@@ -1,14 +1,19 @@
 # Audio Orbit
 
-Audio Orbit is a small Windows desktop app for controlling left/right audio balance and enabling smooth spatial auto-panning.
+Audio Orbit is a lightweight Windows desktop app that creates an orbit-style stereo effect by smoothly shifting system volume between the left and right channels.
 
 ## Features
 
 - Manual left/right channel volume sliders.
-- Toggleable spatial auto-panning using a sine-wave pan cycle.
-- Maximum panning intensity slider.
+- Toggleable orbit panning using a sine-wave pan cycle.
+- Stronger balance-style panning: the dominant side stays loud while the opposite side fades.
+- Adjustable orbit volume, strength, and speed sliders.
 - Native Windows Core Audio integration through Rust.
 - Windows `.exe` release builds through GitHub Actions.
+
+## What to expect
+
+Audio Orbit changes the Windows output endpoint channel balance. It does not process individual app audio streams and it does not create true HRTF/3D surround positioning. For the strongest effect, use headphones, a stereo output device, and set Orbit Strength to 100%.
 
 ## Requirements
 
