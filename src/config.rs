@@ -287,12 +287,15 @@ impl DspProfile {
 pub struct UpdateSettings {
     #[serde(default)]
     pub include_prereleases: bool,
+    #[serde(default)]
+    pub last_auto_check_unix_seconds: u64,
 }
 
 impl Default for UpdateSettings {
     fn default() -> Self {
         Self {
             include_prereleases: false,
+            last_auto_check_unix_seconds: 0,
         }
     }
 }

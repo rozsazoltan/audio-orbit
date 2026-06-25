@@ -74,7 +74,7 @@ Audio files themselves are not embedded in the backup. The backup stores library
 
 Audio Orbit can check GitHub releases for new Windows executable builds. Stable releases are checked by default. Prerelease watching can be enabled in the release watcher.
 
-To avoid GitHub rate limiting, update checks are limited per app session.
+On startup, Audio Orbit performs a background update check at most once per hour. If a newer release is available, the release watcher modal opens automatically. To avoid GitHub rate limiting, manual update checks are also limited per app session.
 
 ## Get started
 

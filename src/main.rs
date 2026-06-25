@@ -26,8 +26,12 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::mpsc,
-    time::{Duration, Instant},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+const MAX_UPDATE_CHECKS_PER_SESSION: u8 = 2;
+const AUTOMATIC_UPDATE_CHECK_INTERVAL_SECONDS: u64 = 60 * 60;
 
 fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
@@ -96,6 +100,7 @@ struct AudioOrbitApp {
     editing_playlist_index: Option<usize>,
     editing_profile_index: Option<usize>,
     last_update_check: Option<updater::UpdateCheck>,
+    update_check_receiver: Option<mpsc::Receiver<Result<updater::UpdateCheck, String>>>,
     update_check_count: u8,
     media_key_receiver: Option<mpsc::Receiver<media_keys::MediaKeyEvent>>,
     media_key_status: String,
@@ -148,6 +153,7 @@ impl AudioOrbitApp {
                     editing_playlist_index: None,
                     editing_profile_index: None,
                     last_update_check: None,
+                    update_check_receiver: None,
                     update_check_count: 0,
                     media_key_receiver: None,
                     media_key_status: "Media keys: unavailable".to_owned(),
@@ -185,6 +191,7 @@ impl AudioOrbitApp {
                 editing_playlist_index: None,
                 editing_profile_index: None,
                 last_update_check: None,
+                update_check_receiver: None,
                 update_check_count: 0,
                 media_key_receiver: None,
                 media_key_status: "Media keys: unavailable".to_owned(),
@@ -194,6 +201,7 @@ impl AudioOrbitApp {
         let media_keys = media_keys::start_listener();
         app.media_key_receiver = media_keys.receiver;
         app.media_key_status = media_keys.status_message;
+        app.start_automatic_update_check_if_due();
         app
     }
 
@@ -744,7 +752,7 @@ impl AudioOrbitApp {
     }
 
     fn schedule_current_profile_apply(&mut self) {
-        self.pending_profile_apply_at = Some(Instant::now() + Duration::from_millis(450));
+        self.pending_profile_apply_at = Some(Instant::now() + Duration::from_secs(3));
     }
 
     fn process_pending_profile_apply(&mut self) {
@@ -1000,7 +1008,10 @@ impl AudioOrbitApp {
     }
 
     fn check_for_updates(&mut self) {
-        const MAX_UPDATE_CHECKS_PER_SESSION: u8 = 2;
+        if self.update_check_receiver.is_some() {
+            self.error_message = Some("An update check is already running.".to_owned());
+            return;
+        }
 
         if self.update_check_count >= MAX_UPDATE_CHECKS_PER_SESSION {
             self.error_message = Some(
@@ -1014,20 +1025,76 @@ impl AudioOrbitApp {
 
         match updater::check_for_update(self.state.update_settings.include_prereleases) {
             Ok(check) => {
-                if check.is_update_available {
-                    self.status_message = format!(
-                        "Update available: v{}{}.",
-                        check.latest_version,
-                        if check.prerelease { " prerelease" } else { "" }
-                    );
-                } else {
-                    self.status_message = format!("Audio Orbit is already on the latest release: v{}.", check.current_version);
-                }
-                self.last_update_check = Some(check);
-                self.error_message = None;
+                self.handle_update_check_result(check, false);
             }
             Err(error) => self.error_message = Some(error.to_string()),
         }
+    }
+
+    fn start_automatic_update_check_if_due(&mut self) {
+        if self.update_check_receiver.is_some() || self.update_check_count >= MAX_UPDATE_CHECKS_PER_SESSION {
+            return;
+        }
+
+        let now = current_unix_seconds();
+        let last_check = self.state.update_settings.last_auto_check_unix_seconds;
+        if now.saturating_sub(last_check) < AUTOMATIC_UPDATE_CHECK_INTERVAL_SECONDS {
+            return;
+        }
+
+        self.state.update_settings.last_auto_check_unix_seconds = now;
+        self.update_check_count += 1;
+        self.save_state_silently();
+
+        let include_prereleases = self.state.update_settings.include_prereleases;
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = updater::check_for_update(include_prereleases).map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+
+        self.update_check_receiver = Some(receiver);
+    }
+
+    fn process_update_check_events(&mut self) {
+        let Some(receiver) = &self.update_check_receiver else {
+            return;
+        };
+
+        match receiver.try_recv() {
+            Ok(Ok(check)) => {
+                self.update_check_receiver = None;
+                self.handle_update_check_result(check, true);
+            }
+            Ok(Err(error)) => {
+                self.update_check_receiver = None;
+                self.error_message = Some(format!("Automatic update check failed: {error}"));
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.update_check_receiver = None;
+            }
+        }
+    }
+
+    fn handle_update_check_result(&mut self, check: updater::UpdateCheck, automatic: bool) {
+        if check.is_update_available {
+            self.status_message = format!(
+                "Update available: v{}{}.",
+                check.latest_version,
+                if check.prerelease { " prerelease" } else { "" }
+            );
+            if automatic {
+                self.show_release_modal = true;
+            }
+        } else if automatic {
+            self.status_message = format!("Audio Orbit is already on the latest release: v{}.", check.current_version);
+        } else {
+            self.status_message = format!("Audio Orbit is already on the latest release: v{}.", check.current_version);
+        }
+
+        self.last_update_check = Some(check);
+        self.error_message = None;
     }
 
     fn install_update(&mut self) {
@@ -1283,6 +1350,7 @@ impl eframe::App for AudioOrbitApp {
         context.request_repaint_after(Duration::from_millis(33));
 
         self.process_media_key_events();
+        self.process_update_check_events();
         self.process_keyboard_shortcuts(context);
         self.process_pending_track_switch();
         self.process_pending_profile_apply();
@@ -1505,17 +1573,6 @@ impl AudioOrbitApp {
         playback_changed |= ui
             .checkbox(&mut self.state.playback.auto_advance, "Auto-play next")
             .changed();
-        playback_changed |= ui
-            .checkbox(&mut self.state.playback.crossfade_enabled, "Crossfade")
-            .changed();
-        if self.state.playback.crossfade_enabled {
-            playback_changed |= ui
-                .add(
-                    egui::Slider::new(&mut self.state.playback.crossfade_seconds, 1u8..=20u8)
-                        .text("sec"),
-                )
-                .changed();
-        }
         if playback_changed {
             self.save_state_silently();
         }
@@ -2324,8 +2381,6 @@ impl AudioOrbitApp {
     }
 
     fn render_update_settings_section(&mut self, ui: &mut egui::Ui, show_modal_button: bool) {
-        const MAX_UPDATE_CHECKS_PER_SESSION: u8 = 2;
-
         ui.heading("Updates");
         let prerelease_changed = ui
             .checkbox(
@@ -2344,13 +2399,14 @@ impl AudioOrbitApp {
         });
 
         ui.horizontal(|ui| {
-            ui.label(format!(
-                "Checks used: {}/{}",
-                self.update_check_count,
-                MAX_UPDATE_CHECKS_PER_SESSION
-            ));
+            let check_status = if self.update_check_receiver.is_some() {
+                format!("Checks used: {}/{} · checking...", self.update_check_count, MAX_UPDATE_CHECKS_PER_SESSION)
+            } else {
+                format!("Checks used: {}/{}", self.update_check_count, MAX_UPDATE_CHECKS_PER_SESSION)
+            };
+            ui.label(check_status);
 
-            let can_check = self.update_check_count < MAX_UPDATE_CHECKS_PER_SESSION;
+            let can_check = self.update_check_count < MAX_UPDATE_CHECKS_PER_SESSION && self.update_check_receiver.is_none();
             if ui
                 .add_enabled(can_check, egui::Button::new(ui_icons::label(Icon::Search, "Check releases")))
                 .clicked()
@@ -2499,6 +2555,14 @@ impl AudioOrbitApp {
 
         self.show_folder_import_modal = is_open;
     }
+}
+
+
+fn current_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn media_key_status_message(
