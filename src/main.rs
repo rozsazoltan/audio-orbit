@@ -12,7 +12,7 @@ use crate::{
     audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo},
     config::{
         app_data_dir, collect_audio_files_from_folder, display_file_name, export_state_zip,
-        import_state_zip, load_state, same_path, save_state, Playlist, PlaylistKind, SavedState,
+        import_state_zip, load_state, same_path, save_state, Playlist, PlaylistKind, RepeatMode, SavedState,
         Track, FAVORITES_PLAYLIST_NAME,
     },
     dsp::{DspSettings, OrbitMode},
@@ -21,6 +21,7 @@ use eframe::egui;
 use lucide_icons::Icon;
 use rfd::FileDialog;
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -57,6 +58,7 @@ struct AudioOrbitApp {
     player: Option<AudioPlayer>,
     state: SavedState,
     selected_track_index: Option<usize>,
+    selected_track_indexes: BTreeSet<usize>,
     active_track_index: Option<usize>,
     active_track_path: Option<PathBuf>,
     last_playback: Option<PlaybackInfo>,
@@ -69,6 +71,10 @@ struct AudioOrbitApp {
     show_library_panel: bool,
     show_profile_panel: bool,
     player_only_mode: bool,
+    show_track_search: bool,
+    track_search_query: String,
+    search_cursor: usize,
+    collapsed_groups: BTreeSet<String>,
     pending_folder_path: Option<PathBuf>,
     pending_playlist_name: String,
     pending_folder_depth: usize,
@@ -93,6 +99,7 @@ impl AudioOrbitApp {
         let show_library_panel = state.ui.show_library_panel;
         let show_profile_panel = state.ui.show_profile_panel;
         let player_only_mode = state.ui.player_only_mode;
+        let show_track_search = state.ui.show_track_search;
 
         let mut app = match AudioPlayer::new() {
             Ok(player) => {
@@ -101,6 +108,7 @@ impl AudioOrbitApp {
                     player: Some(player),
                     state,
                     selected_track_index: None,
+                    selected_track_indexes: BTreeSet::new(),
                     active_track_index: None,
                     active_track_path: None,
                     last_playback: None,
@@ -113,6 +121,10 @@ impl AudioOrbitApp {
                     show_library_panel,
                     show_profile_panel,
                     player_only_mode,
+                    show_track_search,
+                    track_search_query: String::new(),
+                    search_cursor: 0,
+                    collapsed_groups: BTreeSet::new(),
                     pending_folder_path: None,
                     pending_playlist_name,
                     pending_folder_depth: 2,
@@ -131,6 +143,7 @@ impl AudioOrbitApp {
                 player: None,
                 state,
                 selected_track_index: None,
+                selected_track_indexes: BTreeSet::new(),
                 active_track_index: None,
                 active_track_path: None,
                 last_playback: None,
@@ -143,6 +156,10 @@ impl AudioOrbitApp {
                 show_library_panel,
                 show_profile_panel,
                 player_only_mode,
+                show_track_search,
+                track_search_query: String::new(),
+                search_cursor: 0,
+                collapsed_groups: BTreeSet::new(),
                 pending_folder_path: None,
                 pending_playlist_name,
                 pending_folder_depth: 2,
@@ -184,6 +201,42 @@ impl AudioOrbitApp {
         self.current_playlist()
             .map(Playlist::filtered_track_indexes)
             .unwrap_or_default()
+    }
+
+    fn visible_track_indexes(&self) -> Vec<usize> {
+        let query = self.track_search_query.trim().to_lowercase();
+        let Some(playlist) = self.current_playlist() else {
+            return Vec::new();
+        };
+
+        playlist
+            .filtered_track_indexes()
+            .into_iter()
+            .filter(|index| {
+                playlist
+                    .tracks
+                    .get(*index)
+                    .map(|track| {
+                        query.is_empty()
+                            || track.title.to_lowercase().contains(&query)
+                            || track.group.to_lowercase().contains(&query)
+                            || track.path.to_string_lossy().to_lowercase().contains(&query)
+                    })
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    fn playback_sequence_indexes(&self) -> Vec<usize> {
+        let indexes = self.eligible_track_indexes();
+        if self.state.playback.repeat_mode == RepeatMode::Selection && !self.selected_track_indexes.is_empty() {
+            indexes
+                .into_iter()
+                .filter(|index| self.selected_track_indexes.contains(index))
+                .collect()
+        } else {
+            indexes
+        }
     }
 
     fn selected_track_path(&self) -> Option<PathBuf> {
@@ -289,6 +342,7 @@ impl AudioOrbitApp {
                 let playlist = Playlist::from_folder(name.clone(), folder.clone(), self.pending_folder_depth, files);
                 self.state.playlists.push(playlist);
                 self.state.selected_playlist_index = self.state.playlists.len() - 1;
+                self.selected_track_indexes.clear();
                 self.selected_track_index = self.eligible_track_indexes().first().copied();
                 self.status_message = format!(
                     "Imported {track_count} track(s) from {} as {name}.",
@@ -370,6 +424,7 @@ impl AudioOrbitApp {
                 self.show_library_panel = self.state.ui.show_library_panel;
                 self.show_profile_panel = self.state.ui.show_profile_panel;
                 self.player_only_mode = self.state.ui.player_only_mode;
+                self.selected_track_indexes.clear();
                 self.selected_track_index = self.eligible_track_indexes().first().copied();
                 self.status_message = format!("Imported app backup from {}.", path.display());
                 self.error_message = None;
@@ -385,6 +440,7 @@ impl AudioOrbitApp {
         let number = self.state.playlists.len() + 1;
         self.state.playlists.push(Playlist::new(format!("Playlist {number}")));
         self.state.selected_playlist_index = self.state.playlists.len() - 1;
+        self.selected_track_indexes.clear();
         self.selected_track_index = None;
         self.status_message = "Created a new playlist.".to_owned();
         self.save_state_silently();
@@ -408,6 +464,7 @@ impl AudioOrbitApp {
         self.stop();
         self.state.playlists.remove(self.state.selected_playlist_index);
         self.state.selected_playlist_index = self.state.selected_playlist_index.saturating_sub(1);
+        self.selected_track_indexes.clear();
         self.selected_track_index = self.eligible_track_indexes().first().copied();
         self.status_message = "Removed playlist.".to_owned();
         self.save_state_silently();
@@ -545,15 +602,19 @@ impl AudioOrbitApp {
     }
 
     fn next_track_candidate(&self) -> Option<(usize, PathBuf)> {
-        let indexes = self.eligible_track_indexes();
+        let indexes = self.playback_sequence_indexes();
         if indexes.is_empty() {
             return None;
         }
 
         let current_index = self.active_track_index.or(self.selected_track_index);
-        let current_position = current_index.and_then(|index| indexes.iter().position(|candidate| *candidate == index));
-        let next_position = current_position.map(|position| (position + 1) % indexes.len()).unwrap_or(0);
-        let next_index = indexes[next_position];
+        let next_index = if self.state.playback.repeat_mode == RepeatMode::Track {
+            current_index.unwrap_or(indexes[0])
+        } else {
+            let current_position = current_index.and_then(|index| indexes.iter().position(|candidate| *candidate == index));
+            let next_position = current_position.map(|position| (position + 1) % indexes.len()).unwrap_or(0);
+            indexes[next_position]
+        };
 
         let path = self
             .current_playlist()?
@@ -580,17 +641,21 @@ impl AudioOrbitApp {
     }
 
     fn play_previous_track(&mut self) {
-        let indexes = self.eligible_track_indexes();
+        let indexes = self.playback_sequence_indexes();
         if indexes.is_empty() {
             return;
         }
 
         let current_index = self.active_track_index.or(self.selected_track_index);
-        let current_position = current_index.and_then(|index| indexes.iter().position(|candidate| *candidate == index));
-        let previous_position = current_position
-            .map(|position| if position == 0 { indexes.len() - 1 } else { position - 1 })
-            .unwrap_or(0);
-        let previous_index = indexes[previous_position];
+        let previous_index = if self.state.playback.repeat_mode == RepeatMode::Track {
+            current_index.unwrap_or(indexes[0])
+        } else {
+            let current_position = current_index.and_then(|index| indexes.iter().position(|candidate| *candidate == index));
+            let previous_position = current_position
+                .map(|position| if position == 0 { indexes.len() - 1 } else { position - 1 })
+                .unwrap_or(0);
+            indexes[previous_position]
+        };
 
         let Some(path) = self
             .current_playlist()
@@ -820,7 +885,7 @@ impl AudioOrbitApp {
             .unwrap_or(false);
 
         if finished && self.active_track_index.is_some() {
-            if self.state.playback.auto_advance {
+            if self.state.playback.auto_advance || self.state.playback.repeat_mode != RepeatMode::Off {
                 self.play_next_track_with_crossfade(0.0);
             } else {
                 self.active_track_index = None;
@@ -831,7 +896,9 @@ impl AudioOrbitApp {
     }
 
     fn maybe_start_crossfade_to_next_track(&mut self) -> bool {
-        if !self.state.playback.auto_advance || !self.state.playback.crossfade_enabled {
+        if !(self.state.playback.auto_advance || self.state.playback.repeat_mode != RepeatMode::Off)
+            || !self.state.playback.crossfade_enabled
+        {
             return false;
         }
 
@@ -1159,7 +1226,7 @@ impl AudioOrbitApp {
             .map(|playback| playback.waveform.as_slice())
             .unwrap_or(&[]);
         let response = draw_waveform_seek(ui, waveform, progress, format!("{} / {}", format_duration(position), format_duration(duration)));
-        if response.clicked() && duration > 0.0 {
+        if (response.clicked() || response.drag_stopped()) && duration > 0.0 {
             if let Some(pointer) = response.interact_pointer_pos() {
                 let next_position = ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration;
                 self.seek_current(next_position);
@@ -1232,6 +1299,14 @@ impl AudioOrbitApp {
 
     fn render_compact_playback_toggles(&mut self, ui: &mut egui::Ui) {
         let mut playback_changed = false;
+        if ui
+            .button(format!("↻ {}", self.state.playback.repeat_mode.label()))
+            .on_hover_text("Cycle repeat: off, current track, selected tracks")
+            .clicked()
+        {
+            self.state.playback.repeat_mode = self.state.playback.repeat_mode.next();
+            playback_changed = true;
+        }
         playback_changed |= ui
             .checkbox(&mut self.state.playback.auto_advance, "Auto-play next")
             .changed();
@@ -1331,6 +1406,7 @@ impl AudioOrbitApp {
 
                     if row.inner {
                         self.state.selected_playlist_index = index;
+                        self.selected_track_indexes.clear();
                         self.selected_track_index = self.eligible_track_indexes().first().copied();
                         self.save_state_silently();
                     }
@@ -1438,20 +1514,75 @@ impl AudioOrbitApp {
 
         let playlist_name = playlist.name.clone();
         let selected_group_label = playlist.selected_group_label();
-        let filtered_indexes = playlist.filtered_track_indexes();
-        let visible_count = filtered_indexes.len();
         let total_count = playlist.tracks.len();
         let show_group_headers = playlist.selected_group.is_none();
+        let query = self.track_search_query.trim().to_owned();
+        let visible_indexes = self.visible_track_indexes();
+        let visible_count = visible_indexes.len();
 
         ui.horizontal(|ui| {
             ui.heading(format!("{} {}", playlist.kind.icon(), playlist_name));
             ui.label(format!("{visible_count}/{total_count} tracks · {selected_group_label}"));
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let search_label = if self.show_track_search {
+                    ui_icons::label(Icon::X, "Close search")
+                } else {
+                    ui_icons::label(Icon::Search, "Search")
+                };
+                if ui.button(search_label).clicked() {
+                    self.show_track_search = !self.show_track_search;
+                    self.state.ui.show_track_search = self.show_track_search;
+                    if !self.show_track_search {
+                        self.track_search_query.clear();
+                        self.search_cursor = 0;
+                    }
+                    self.save_state_silently();
+                }
+            });
         });
+
+        if self.show_track_search {
+            ui.horizontal(|ui| {
+                ui.label(ui_icons::icon(Icon::Search));
+                let response = ui.text_edit_singleline(&mut self.track_search_query);
+                if response.changed() {
+                    self.search_cursor = 0;
+                }
+
+                let can_jump = !visible_indexes.is_empty() && !self.track_search_query.trim().is_empty();
+                if ui
+                    .add_enabled(can_jump, egui::Button::new(ui_icons::label(Icon::ArrowDown, "Next result")))
+                    .clicked()
+                {
+                    let next = visible_indexes[self.search_cursor % visible_indexes.len()];
+                    self.selected_track_index = Some(next);
+                    self.search_cursor = (self.search_cursor + 1) % visible_indexes.len().max(1);
+                }
+
+                if ui.button(ui_icons::label(Icon::X, "Clear")).clicked() {
+                    self.track_search_query.clear();
+                    self.search_cursor = 0;
+                }
+            });
+            if !query.is_empty() {
+                ui.small(format!("Filtering tracks by: {query}"));
+            }
+        }
+
+        if self.state.playback.repeat_mode == RepeatMode::Selection {
+            ui.small("Repeat selection mode: tick the tracks that should repeat in playlist order.");
+        }
+
         ui.separator();
 
         if visible_count == 0 {
             ui.centered_and_justified(|ui| {
-                ui.label("No tracks in this view. Add files or import a music folder.");
+                if self.show_track_search && !self.track_search_query.trim().is_empty() {
+                    ui.label("No tracks match the current search.");
+                } else {
+                    ui.label("No tracks in this view. Add files or import a music folder.");
+                }
             });
             return;
         }
@@ -1459,7 +1590,7 @@ impl AudioOrbitApp {
         let visible_tracks: Vec<(usize, Track)> = self
             .current_playlist()
             .map(|playlist| {
-                filtered_indexes
+                visible_indexes
                     .into_iter()
                     .filter_map(|index| playlist.tracks.get(index).map(|track| (index, track.clone())))
                     .collect()
@@ -1479,9 +1610,25 @@ impl AudioOrbitApp {
             for (index, track) in visible_tracks {
                 if show_group_headers && track.group != last_group {
                     ui.add_space(6.0);
-                    ui.heading(track.group.clone());
+                    let group = track.group.clone();
+                    let collapsed = self.collapsed_groups.contains(&group);
+                    ui.horizontal(|ui| {
+                        let icon = if collapsed { Icon::ChevronRight } else { Icon::ChevronDown };
+                        if ui.small_button(ui_icons::icon(icon)).on_hover_text("Collapse/expand folder").clicked() {
+                            if collapsed {
+                                self.collapsed_groups.remove(&group);
+                            } else {
+                                self.collapsed_groups.insert(group.clone());
+                            }
+                        }
+                        ui.heading(group.as_str());
+                    });
                     ui.separator();
-                    last_group = track.group.clone();
+                    last_group = group;
+                }
+
+                if show_group_headers && self.collapsed_groups.contains(&track.group) {
+                    continue;
                 }
 
                 let is_selected = self.selected_track_index == Some(index);
@@ -1491,12 +1638,27 @@ impl AudioOrbitApp {
                     .map(|active| same_path(active, &track.path))
                     .unwrap_or(false);
                 let favorite = self.is_favorite(&track.path);
-                let marker = if is_active { ui_icons::icon(Icon::Play) } else { " ".to_owned() };
                 let metadata = format_track_metadata(&track);
-                let title = format!("{marker} {}", track.title);
+                let title = if is_active {
+                    format!("{} {}", ui_icons::icon(Icon::Play), track.title)
+                } else {
+                    track.title.clone()
+                };
                 let path = track.path.clone();
+                let repeat_selection_mode = self.state.playback.repeat_mode == RepeatMode::Selection;
 
                 ui.horizontal(|ui| {
+                    if repeat_selection_mode {
+                        let mut checked = self.selected_track_indexes.contains(&index);
+                        if ui.checkbox(&mut checked, "").on_hover_text("Include in repeat selection").changed() {
+                            if checked {
+                                self.selected_track_indexes.insert(index);
+                            } else {
+                                self.selected_track_indexes.remove(&index);
+                            }
+                        }
+                    }
+
                     let heart = if favorite {
                         egui::RichText::new("♥").color(egui::Color32::from_rgb(230, 70, 95))
                     } else {
@@ -1669,16 +1831,6 @@ impl AudioOrbitApp {
                 )
                 .changed();
 
-            ui.separator();
-            profile_changed |= ui
-                .checkbox(&mut profile.settings.skip_silence_enabled, "Skip long silence")
-                .changed();
-            profile_changed |= ui
-                .add(
-                    egui::Slider::new(&mut profile.settings.silence_threshold_seconds, 1u8..=12u8)
-                        .text("Silence threshold (sec)"),
-                )
-                .changed();
         }
 
         if profile_changed {
@@ -1780,6 +1932,30 @@ impl AudioOrbitApp {
         playback_changed |= ui
             .checkbox(&mut self.state.playback.auto_advance, "Auto-play next")
             .changed();
+
+        ui.horizontal(|ui| {
+            ui.label("Repeat");
+            egui::ComboBox::from_id_salt("repeat_mode_selector")
+                .selected_text(self.state.playback.repeat_mode.label())
+                .show_ui(ui, |ui| {
+                    playback_changed |= ui
+                        .selectable_value(&mut self.state.playback.repeat_mode, RepeatMode::Off, RepeatMode::Off.label())
+                        .changed();
+                    playback_changed |= ui
+                        .selectable_value(&mut self.state.playback.repeat_mode, RepeatMode::Track, RepeatMode::Track.label())
+                        .changed();
+                    playback_changed |= ui
+                        .selectable_value(&mut self.state.playback.repeat_mode, RepeatMode::Selection, RepeatMode::Selection.label())
+                        .changed();
+                });
+        });
+        if self.state.playback.repeat_mode == RepeatMode::Selection {
+            ui.small(format!(
+                "{} selected track(s) will repeat in playlist order.",
+                self.selected_track_indexes.len()
+            ));
+        }
+
         playback_changed |= ui
             .checkbox(&mut self.state.playback.crossfade_enabled, "Crossfade tracks")
             .changed();
@@ -2053,34 +2229,60 @@ fn next_valid_track_index(previous_index: usize, remaining_len: usize) -> Option
 }
 
 fn draw_waveform_seek(ui: &mut egui::Ui, waveform: &[f32], progress: f32, label: String) -> egui::Response {
-    let desired_size = egui::vec2(ui.available_width(), 42.0);
+    let desired_size = egui::vec2(ui.available_width(), 46.0);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click_and_drag());
     let visuals = ui.visuals();
     let painter = ui.painter();
-    painter.rect_filled(rect, 8.0, visuals.extreme_bg_color);
+
+    painter.rect_filled(rect, 8.0, egui::Color32::from_black_alpha(210));
 
     if waveform.is_empty() {
         paint_seek_label(painter, rect, &label);
         return response;
     }
 
-    let progress_x = rect.left() + rect.width() * progress.clamp(0.0, 1.0);
-    let bar_width = (rect.width() / waveform.len().max(1) as f32).max(1.0);
-    for (index, value) in waveform.iter().enumerate() {
-        let x = rect.left() + index as f32 * bar_width;
-        let height = (rect.height() * value.clamp(0.03, 1.0)).max(2.0);
+    let progress = progress.clamp(0.0, 1.0);
+    let progress_x = rect.left() + rect.width() * progress;
+    let target_points = (rect.width() / 4.0).round().clamp(48.0, 260.0) as usize;
+    let step = (waveform.len() as f32 / target_points.max(1) as f32).ceil().max(1.0) as usize;
+    let rendered_points = (waveform.len() + step - 1) / step;
+    let gap = 2.0;
+    let bar_width = ((rect.width() - gap * rendered_points.saturating_sub(1) as f32) / rendered_points.max(1) as f32)
+        .clamp(2.0, 5.0);
+
+    for (bar_index, chunk) in waveform.chunks(step).enumerate() {
+        let value = chunk
+            .iter()
+            .copied()
+            .fold(0.0_f32, f32::max)
+            .clamp(0.02, 1.0);
+        let eased = value.sqrt();
+        let x1 = rect.left() + bar_index as f32 * (bar_width + gap);
+        let x2 = (x1 + bar_width).min(rect.right());
+        if x1 >= rect.right() {
+            break;
+        }
+
+        let height = (rect.height() * 0.82 * eased).max(4.0);
         let y1 = rect.center().y - height / 2.0;
         let y2 = rect.center().y + height / 2.0;
-        let color = if x <= progress_x {
+        let color = if x1 <= progress_x {
             visuals.selection.bg_fill
         } else {
-            visuals.widgets.inactive.fg_stroke.color.linear_multiply(0.55)
+            visuals.widgets.inactive.fg_stroke.color.linear_multiply(0.72)
         };
-        painter.line_segment(
-            [egui::pos2(x, y1), egui::pos2(x, y2)],
-            egui::Stroke::new(bar_width.min(3.0), color),
+        painter.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(x1, y1), egui::pos2(x2, y2)),
+            bar_width / 2.0,
+            color,
         );
     }
+
+    let playhead = egui::Rect::from_min_max(
+        egui::pos2(progress_x - 1.0, rect.top() + 4.0),
+        egui::pos2(progress_x + 1.0, rect.bottom() - 4.0),
+    );
+    painter.rect_filled(playhead, 1.0, egui::Color32::WHITE.linear_multiply(0.85));
 
     paint_seek_label(painter, rect, &label);
     response
@@ -2088,15 +2290,11 @@ fn draw_waveform_seek(ui: &mut egui::Ui, waveform: &[f32], progress: f32, label:
 
 fn paint_seek_label(painter: &egui::Painter, rect: egui::Rect, label: &str) {
     let font = egui::FontId::proportional(14.0);
+    let label_width = (label.chars().count() as f32 * 8.0 + 22.0).clamp(88.0, 190.0);
+    let label_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(label_width, 24.0));
+    painter.rect_filled(label_rect, 6.0, egui::Color32::from_black_alpha(185));
     painter.text(
-        rect.center() + egui::vec2(1.0, 1.0),
-        egui::Align2::CENTER_CENTER,
-        label,
-        font.clone(),
-        egui::Color32::BLACK,
-    );
-    painter.text(
-        rect.center(),
+        label_rect.center(),
         egui::Align2::CENTER_CENTER,
         label,
         font,

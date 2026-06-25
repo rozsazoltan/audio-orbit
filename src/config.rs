@@ -297,6 +297,38 @@ impl Default for UpdateSettings {
     }
 }
 
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RepeatMode {
+    Off,
+    Track,
+    Selection,
+}
+
+impl Default for RepeatMode {
+    fn default() -> Self {
+        Self::Off
+    }
+}
+
+impl RepeatMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Off => "Repeat off",
+            Self::Track => "Repeat track",
+            Self::Selection => "Repeat selection",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Track,
+            Self::Track => Self::Selection,
+            Self::Selection => Self::Off,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlaybackSettings {
     #[serde(default = "default_auto_advance")]
@@ -305,6 +337,8 @@ pub struct PlaybackSettings {
     pub crossfade_enabled: bool,
     #[serde(default = "default_crossfade_seconds")]
     pub crossfade_seconds: u8,
+    #[serde(default)]
+    pub repeat_mode: RepeatMode,
 }
 
 impl Default for PlaybackSettings {
@@ -313,6 +347,7 @@ impl Default for PlaybackSettings {
             auto_advance: true,
             crossfade_enabled: false,
             crossfade_seconds: default_crossfade_seconds(),
+            repeat_mode: RepeatMode::default(),
         }
     }
 }
@@ -334,6 +369,8 @@ pub struct UiSettings {
     pub show_profile_panel: bool,
     #[serde(default)]
     pub player_only_mode: bool,
+    #[serde(default)]
+    pub show_track_search: bool,
 }
 
 impl Default for UiSettings {
@@ -342,6 +379,7 @@ impl Default for UiSettings {
             show_library_panel: true,
             show_profile_panel: true,
             player_only_mode: false,
+            show_track_search: false,
         }
     }
 }
