@@ -501,7 +501,7 @@ dependencies = [
 
 [[package]]
 name = "audio-orbit"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "cpal",
@@ -517,6 +517,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "windows-sys 0.59.0",
  "winresource",
  "zip",
 ]
