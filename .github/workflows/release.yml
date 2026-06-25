@@ -20,6 +20,11 @@ jobs:
     name: Prepare release, squash merge, and publish Windows executable
     runs-on: windows-latest
 
+    env:
+      RUST_TARGET: x86_64-pc-windows-msvc
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
+
     steps:
       - name: Checkout default branch
         uses: actions/checkout@v4
@@ -47,7 +52,45 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ env.RUST_TARGET }}
+
+      - name: Compute Cargo dependency cache key
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $CargoToml = Get-Content "Cargo.toml" -Raw
+          $DependencySectionPattern = '(?ms)^\[(dependencies|dev-dependencies|build-dependencies|workspace\.dependencies|target\.[^\]]+\.dependencies|target\.[^\]]+\.dev-dependencies|target\.[^\]]+\.build-dependencies)\]\s*.*?(?=^\[|\z)'
+          $DependencySections = [regex]::Matches($CargoToml, $DependencySectionPattern)
+
+          if ($DependencySections.Count -eq 0) {
+            Write-Error "Could not find dependency sections in Cargo.toml for the release cache key."
+            exit 1
+          }
+
+          $CacheInput = ($DependencySections | ForEach-Object { $_.Value.Trim() }) -join "`n`n"
+          $CacheInput = $CacheInput + "`nrust-toolchain=stable"
+          $CacheInput = $CacheInput + "`nrust-target=$env:RUST_TARGET"
+
+          $CacheInputPath = Join-Path $env:RUNNER_TEMP "cargo-deps-cache-input.txt"
+          Set-Content -Path $CacheInputPath -Value $CacheInput -NoNewline
+
+          $CacheHash = (Get-FileHash $CacheInputPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          "CARGO_DEPS_CACHE_HASH=$CacheHash" >> $env:GITHUB_ENV
+
+          Write-Host "Cargo dependency cache hash: $CacheHash"
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/${{ env.RUST_TARGET }}/release/deps
+            target/${{ env.RUST_TARGET }}/release/build
+            target/${{ env.RUST_TARGET }}/release/.fingerprint
+          key: cargo-${{ runner.os }}-${{ env.RUST_TARGET }}-stable-deps-${{ env.CARGO_DEPS_CACHE_HASH }}
 
       - name: Prepare release branch and commit version metadata
         shell: pwsh
@@ -177,18 +220,15 @@ jobs:
 
           Write-Host "Deleted temporary release branch $env:RELEASE_BRANCH."
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-
       - name: Build executable from merged release commit
         shell: pwsh
-        run: cargo build --release --target x86_64-pc-windows-msvc
+        run: cargo build --release --target $env:RUST_TARGET
 
       - name: Prepare release asset
         shell: pwsh
         run: |
           $ExeName = "audio-orbit-$env:TAG-windows-x64.exe"
-          Copy-Item "target\x86_64-pc-windows-msvc\release\audio-orbit.exe" $ExeName
+          Copy-Item "target\$env:RUST_TARGET\release\audio-orbit.exe" $ExeName
           "ASSET=$ExeName" >> $env:GITHUB_ENV
 
       - name: Create GitHub release
