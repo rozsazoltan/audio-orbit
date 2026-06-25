@@ -12,14 +12,14 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-const DEFAULT_ORBIT_RATE_HZ: f32 = 0.65;
+const DEFAULT_ORBIT_RATE_HZ: f32 = 0.9;
 const ORBIT_UPDATES_PER_SECOND: f32 = 60.0;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([540.0, 360.0])
-            .with_min_inner_size([460.0, 320.0])
+            .with_inner_size([560.0, 450.0])
+            .with_min_inner_size([500.0, 410.0])
             .with_resizable(false),
         ..Default::default()
     };
@@ -37,13 +37,13 @@ struct BalanceApp {
     error_message: Option<String>,
     left_percent: u8,
     right_percent: u8,
-    max_percent: u8,
-    orbit_depth_percent: u8,
+    output_level_percent: u8,
+    stereo_width_percent: u8,
     orbit_speed_percent: u8,
     is_orbit_enabled: bool,
     worker_running: Arc<AtomicBool>,
-    worker_max_percent: Arc<AtomicU8>,
-    worker_depth_percent: Arc<AtomicU8>,
+    worker_output_level_percent: Arc<AtomicU8>,
+    worker_stereo_width_percent: Arc<AtomicU8>,
     worker_speed_percent: Arc<AtomicU8>,
     worker_handle: Option<JoinHandle<()>>,
 }
@@ -51,8 +51,8 @@ struct BalanceApp {
 impl BalanceApp {
     fn new() -> Self {
         let worker_running = Arc::new(AtomicBool::new(false));
-        let worker_max_percent = Arc::new(AtomicU8::new(100));
-        let worker_depth_percent = Arc::new(AtomicU8::new(100));
+        let worker_output_level_percent = Arc::new(AtomicU8::new(100));
+        let worker_stereo_width_percent = Arc::new(AtomicU8::new(100));
         let worker_speed_percent = Arc::new(AtomicU8::new(100));
 
         match AudioController::new() {
@@ -68,13 +68,13 @@ impl BalanceApp {
                     error_message: None,
                     left_percent: balance.left_percent,
                     right_percent: balance.right_percent,
-                    max_percent: 100,
-                    orbit_depth_percent: 100,
+                    output_level_percent: 100,
+                    stereo_width_percent: 100,
                     orbit_speed_percent: 100,
                     is_orbit_enabled: false,
                     worker_running,
-                    worker_max_percent,
-                    worker_depth_percent,
+                    worker_output_level_percent,
+                    worker_stereo_width_percent,
                     worker_speed_percent,
                     worker_handle: None,
                 }
@@ -85,13 +85,13 @@ impl BalanceApp {
                 error_message: Some(error.to_string()),
                 left_percent: 100,
                 right_percent: 100,
-                max_percent: 100,
-                orbit_depth_percent: 100,
+                output_level_percent: 100,
+                stereo_width_percent: 100,
                 orbit_speed_percent: 100,
                 is_orbit_enabled: false,
                 worker_running,
-                worker_max_percent,
-                worker_depth_percent,
+                worker_output_level_percent,
+                worker_stereo_width_percent,
                 worker_speed_percent,
                 worker_handle: None,
             },
@@ -113,22 +113,46 @@ impl BalanceApp {
         }
     }
 
+    fn set_test_pan(&mut self, pan: f32) {
+        if self.is_orbit_enabled {
+            return;
+        }
+
+        let level = self.output_level_percent.min(100);
+        let intensity = if pan < 0.0 {
+            VolumeIntensity::new(level, 0)
+        } else if pan > 0.0 {
+            VolumeIntensity::new(0, level)
+        } else {
+            VolumeIntensity::new(level, level)
+        };
+
+        self.left_percent = intensity.left_percent;
+        self.right_percent = intensity.right_percent;
+
+        if let Some(controller) = &self.controller {
+            if let Err(error) = controller.set_balance(intensity) {
+                self.error_message = Some(error.to_string());
+            }
+        }
+    }
+
     fn start_orbit(&mut self) {
         if self.controller.is_none() || self.worker_running.load(Ordering::SeqCst) {
             return;
         }
 
         self.worker_running.store(true, Ordering::SeqCst);
-        self.worker_max_percent
-            .store(self.max_percent, Ordering::SeqCst);
-        self.worker_depth_percent
-            .store(self.orbit_depth_percent, Ordering::SeqCst);
+        self.worker_output_level_percent
+            .store(self.output_level_percent, Ordering::SeqCst);
+        self.worker_stereo_width_percent
+            .store(self.stereo_width_percent, Ordering::SeqCst);
         self.worker_speed_percent
             .store(self.orbit_speed_percent, Ordering::SeqCst);
 
         let worker_running = Arc::clone(&self.worker_running);
-        let worker_max_percent = Arc::clone(&self.worker_max_percent);
-        let worker_depth_percent = Arc::clone(&self.worker_depth_percent);
+        let worker_output_level_percent = Arc::clone(&self.worker_output_level_percent);
+        let worker_stereo_width_percent = Arc::clone(&self.worker_stereo_width_percent);
         let worker_speed_percent = Arc::clone(&self.worker_speed_percent);
 
         self.worker_handle = Some(thread::spawn(move || {
@@ -141,12 +165,12 @@ impl BalanceApp {
             let mut elapsed = 0.0_f32;
 
             while worker_running.load(Ordering::SeqCst) {
-                let max_percent = worker_max_percent.load(Ordering::SeqCst);
-                let depth = worker_depth_percent.load(Ordering::SeqCst) as f32 / 100.0;
+                let output_level_percent = worker_output_level_percent.load(Ordering::SeqCst);
+                let width = worker_stereo_width_percent.load(Ordering::SeqCst) as f32 / 100.0;
                 let speed = (worker_speed_percent.load(Ordering::SeqCst) as f32 / 100.0).max(0.05);
-                let pan = (2.0 * PI * DEFAULT_ORBIT_RATE_HZ * speed * elapsed).sin() * depth;
+                let pan = (2.0 * PI * DEFAULT_ORBIT_RATE_HZ * speed * elapsed).sin() * width;
 
-                let _ = controller.set_balance(balance_style_pan(pan, max_percent));
+                let _ = controller.set_balance(equal_power_stereo_pan(pan, output_level_percent));
 
                 elapsed += interval.as_secs_f32();
                 thread::sleep(interval);
@@ -177,8 +201,8 @@ impl eframe::App for BalanceApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(context, |ui| {
             ui.heading("Audio Orbit");
-            ui.label("Windows left/right balance controller with stronger stereo orbit panning.");
-            ui.label("Best tested with headphones and stereo output devices.");
+            ui.label("Stereo left/right panning for Windows headphones and stereo output devices.");
+            ui.label("This is not true 8-direction/HRTF surround; it only moves sound between left and right.");
             ui.separator();
 
             ui.horizontal(|ui| {
@@ -209,24 +233,24 @@ impl eframe::App for BalanceApp {
             ui.add_enabled_ui(self.controller.is_some(), |ui| {
                 if ui
                     .add(
-                        egui::Slider::new(&mut self.max_percent, 0u8..=100u8)
-                            .text("Orbit Max Volume (%)"),
+                        egui::Slider::new(&mut self.output_level_percent, 0u8..=100u8)
+                            .text("Output Level (%)"),
                     )
                     .changed()
                 {
-                    self.worker_max_percent
-                        .store(self.max_percent, Ordering::SeqCst);
+                    self.worker_output_level_percent
+                        .store(self.output_level_percent, Ordering::SeqCst);
                 }
 
                 if ui
                     .add(
-                        egui::Slider::new(&mut self.orbit_depth_percent, 0u8..=100u8)
-                            .text("Orbit Strength (%)"),
+                        egui::Slider::new(&mut self.stereo_width_percent, 0u8..=100u8)
+                            .text("Stereo Width (%)"),
                     )
                     .changed()
                 {
-                    self.worker_depth_percent
-                        .store(self.orbit_depth_percent, Ordering::SeqCst);
+                    self.worker_stereo_width_percent
+                        .store(self.stereo_width_percent, Ordering::SeqCst);
                 }
 
                 if ui
@@ -240,6 +264,33 @@ impl eframe::App for BalanceApp {
                         .store(self.orbit_speed_percent, Ordering::SeqCst);
                 }
             });
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label("Channel test:");
+
+                if ui
+                    .add_enabled(!self.is_orbit_enabled && self.controller.is_some(), egui::Button::new("Left only"))
+                    .clicked()
+                {
+                    self.set_test_pan(-1.0);
+                }
+
+                if ui
+                    .add_enabled(!self.is_orbit_enabled && self.controller.is_some(), egui::Button::new("Center"))
+                    .clicked()
+                {
+                    self.set_test_pan(0.0);
+                }
+
+                if ui
+                    .add_enabled(!self.is_orbit_enabled && self.controller.is_some(), egui::Button::new("Right only"))
+                    .clicked()
+                {
+                    self.set_test_pan(1.0);
+                }
+            });
+            ui.small("If Left only / Right only still sounds centered or only changes loudness, the selected Windows output device does not expose usable per-channel endpoint control.");
 
             ui.add_space(12.0);
 
@@ -268,15 +319,13 @@ impl eframe::App for BalanceApp {
     }
 }
 
-fn balance_style_pan(pan: f32, max_percent: u8) -> VolumeIntensity {
+fn equal_power_stereo_pan(pan: f32, output_level_percent: u8) -> VolumeIntensity {
     let pan = pan.clamp(-1.0, 1.0);
-    let max = max_percent.min(100) as f32;
+    let output_level = output_level_percent.min(100) as f32;
+    let angle = (pan + 1.0) * PI / 4.0;
 
-    let (left, right) = if pan < 0.0 {
-        (max, max * (1.0 + pan))
-    } else {
-        (max * (1.0 - pan), max)
-    };
+    let left = angle.cos() * output_level;
+    let right = angle.sin() * output_level;
 
     VolumeIntensity::new(left.round() as u8, right.round() as u8)
 }
