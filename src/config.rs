@@ -1,18 +1,77 @@
 use crate::dsp::{DspSettings, OrbitMode};
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
+use lofty::file::AudioFile;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
-    fs,
+    fs::{self, File},
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
+use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
+
+pub const FAVORITES_PLAYLIST_NAME: &str = "Favorites";
+const BACKUP_STATE_ENTRY: &str = "audio-orbit/state.json";
+const BACKUP_META_ENTRY: &str = "audio-orbit/backup.json";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlaylistKind {
+    Favorites,
+    Manual,
+    Folder,
+}
+
+impl Default for PlaylistKind {
+    fn default() -> Self {
+        Self::Manual
+    }
+}
+
+impl PlaylistKind {
+    pub fn icon(&self) -> &'static str {
+        match self {
+            Self::Favorites => "♥",
+            Self::Manual => "♫",
+            Self::Folder => "📁",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Favorites => "Favorites",
+            Self::Manual => "Manual playlist",
+            Self::Folder => "Folder playlist",
+        }
+    }
+
+    pub fn accepts_manual_tracks(&self) -> bool {
+        !matches!(self, Self::Folder)
+    }
+
+    pub fn can_delete(&self) -> bool {
+        !matches!(self, Self::Favorites)
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TrackMetadata {
+    pub size_bytes: Option<u64>,
+    pub duration_seconds: Option<f32>,
+    pub sample_rate_hz: Option<u32>,
+    pub channels: Option<u8>,
+    pub bitrate_kbps: Option<u32>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Track {
     pub path: PathBuf,
     pub title: String,
     pub group: String,
+    #[serde(default)]
+    pub metadata: TrackMetadata,
+    #[serde(default)]
+    pub waveform: Vec<f32>,
 }
 
 impl Track {
@@ -25,8 +84,34 @@ impl Track {
             .unwrap_or_else(|| display_file_name(&path));
 
         let group = folder_group_for_path(&path, root, folder_depth);
+        let metadata = read_track_metadata(&path).unwrap_or_else(|_| TrackMetadata {
+            size_bytes: fs::metadata(&path).ok().map(|metadata| metadata.len()),
+            ..Default::default()
+        });
 
-        Self { path, title, group }
+        Self {
+            path,
+            title,
+            group,
+            metadata,
+            waveform: Vec::new(),
+        }
+    }
+
+    pub fn update_playback_metadata(
+        &mut self,
+        duration_seconds: f32,
+        sample_rate_hz: u32,
+        channels: u16,
+        waveform: Vec<f32>,
+    ) {
+        self.metadata.duration_seconds = Some(duration_seconds);
+        self.metadata.sample_rate_hz = Some(sample_rate_hz);
+        self.metadata.channels = Some(channels.min(u8::MAX as u16) as u8);
+        if self.metadata.size_bytes.is_none() {
+            self.metadata.size_bytes = fs::metadata(&self.path).ok().map(|metadata| metadata.len());
+        }
+        self.waveform = waveform;
     }
 }
 
@@ -37,6 +122,8 @@ pub struct Playlist {
     pub source_folder: Option<PathBuf>,
     pub folder_depth: usize,
     pub selected_group: Option<String>,
+    #[serde(default)]
+    pub kind: PlaylistKind,
 }
 
 impl Playlist {
@@ -47,6 +134,18 @@ impl Playlist {
             source_folder: None,
             folder_depth: 2,
             selected_group: None,
+            kind: PlaylistKind::Manual,
+        }
+    }
+
+    pub fn favorites() -> Self {
+        Self {
+            name: FAVORITES_PLAYLIST_NAME.to_owned(),
+            tracks: Vec::new(),
+            source_folder: None,
+            folder_depth: 0,
+            selected_group: None,
+            kind: PlaylistKind::Favorites,
         }
     }
 
@@ -62,17 +161,36 @@ impl Playlist {
             source_folder: Some(source_folder),
             folder_depth,
             selected_group: None,
+            kind: PlaylistKind::Folder,
         };
         playlist.replace_tracks_from_files(files);
         playlist
     }
 
+    pub fn accepts_manual_tracks(&self) -> bool {
+        self.kind.accepts_manual_tracks()
+    }
+
     pub fn add_files(&mut self, files: Vec<PathBuf>) {
+        if !self.accepts_manual_tracks() {
+            return;
+        }
+
         let root = self.source_folder.as_deref();
         let folder_depth = self.folder_depth;
-        self.tracks
-            .extend(files.into_iter().map(|path| Track::from_path(path, root, folder_depth)));
+        for path in files {
+            self.add_track_path(path, root, folder_depth);
+        }
         self.sort_tracks();
+    }
+
+    pub fn add_track_path(&mut self, path: PathBuf, root: Option<&Path>, folder_depth: usize) -> bool {
+        if self.tracks.iter().any(|track| same_path(&track.path, &path)) {
+            return false;
+        }
+        self.tracks.push(Track::from_path(path, root, folder_depth));
+        self.sort_tracks();
+        true
     }
 
     pub fn replace_tracks_from_files(&mut self, files: Vec<PathBuf>) {
@@ -137,12 +255,11 @@ impl Playlist {
         }
     }
 
-    fn sort_tracks(&mut self) {
+    pub fn sort_tracks(&mut self) {
         self.tracks.sort_by(|left, right| {
-            left.group
-                .to_lowercase()
-                .cmp(&right.group.to_lowercase())
-                .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
+            natural_key(&left.group)
+                .cmp(&natural_key(&right.group))
+                .then_with(|| natural_key(&left.title).cmp(&natural_key(&right.title)))
                 .then_with(|| left.path.cmp(&right.path))
         });
     }
@@ -164,17 +281,33 @@ impl DspProfile {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UpdateSettings {
+    #[serde(default)]
+    pub include_prereleases: bool,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            include_prereleases: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SavedState {
     pub playlists: Vec<Playlist>,
     pub profiles: Vec<DspProfile>,
     pub selected_playlist_index: usize,
     pub selected_profile_index: usize,
+    #[serde(default)]
+    pub update_settings: UpdateSettings,
 }
 
 impl Default for SavedState {
     fn default() -> Self {
         Self {
-            playlists: vec![Playlist::new("Local music")],
+            playlists: vec![Playlist::favorites(), Playlist::new("Local music")],
             profiles: vec![
                 DspProfile::new("Smooth orbit", DspSettings::default()),
                 DspProfile::new(
@@ -186,10 +319,19 @@ impl Default for SavedState {
                     },
                 ),
             ],
-            selected_playlist_index: 0,
+            selected_playlist_index: 1,
             selected_profile_index: 0,
+            update_settings: UpdateSettings::default(),
         }
     }
+}
+
+pub fn app_data_dir() -> Option<PathBuf> {
+    ProjectDirs::from("dev", "AudioOrbit", "Audio Orbit").map(|dirs| dirs.data_local_dir().to_path_buf())
+}
+
+pub fn state_path() -> Option<PathBuf> {
+    app_data_dir().map(|dir| dir.join("state.json"))
 }
 
 pub fn load_state() -> SavedState {
@@ -205,19 +347,47 @@ pub fn load_state() -> SavedState {
 }
 
 pub fn save_state(state: &SavedState) -> Result<()> {
-    let path = state_path().context("could not resolve the configuration path")?;
+    let path = state_path().context("could not resolve the application data path")?;
     write_state_to_path(state, &path)
 }
 
-pub fn export_state_to(state: &SavedState, path: &Path) -> Result<()> {
-    write_state_to_path(state, path)
+pub fn export_state_zip(state: &SavedState, path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create backup directory: {}", parent.display()))?;
+    }
+
+    let file = File::create(path)
+        .with_context(|| format!("failed to create backup zip: {}", path.display()))?;
+    let mut zip = ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    let meta = serde_json::json!({
+        "app": "Audio Orbit",
+        "version": env!("CARGO_PKG_VERSION"),
+        "type": "full-app-state-backup"
+    });
+    zip.start_file(BACKUP_META_ENTRY, options)?;
+    zip.write_all(serde_json::to_string_pretty(&meta)?.as_bytes())?;
+
+    zip.start_file(BACKUP_STATE_ENTRY, options)?;
+    zip.write_all(serde_json::to_string_pretty(state)?.as_bytes())?;
+    zip.finish()?;
+    Ok(())
 }
 
-pub fn import_state_from(path: &Path) -> Result<SavedState> {
-    let contents = fs::read_to_string(path)
-        .with_context(|| format!("failed to read library backup: {}", path.display()))?;
+pub fn import_state_zip(path: &Path) -> Result<SavedState> {
+    let file = File::open(path)
+        .with_context(|| format!("failed to open backup zip: {}", path.display()))?;
+    let mut zip = ZipArchive::new(file)
+        .with_context(|| format!("failed to read backup zip: {}", path.display()))?;
+    let mut entry = zip
+        .by_name(BACKUP_STATE_ENTRY)
+        .context("backup zip does not contain audio-orbit/state.json")?;
+    let mut contents = String::new();
+    entry.read_to_string(&mut contents)?;
     let state = serde_json::from_str(&contents)
-        .with_context(|| format!("failed to parse library backup: {}", path.display()))?;
+        .with_context(|| format!("failed to parse backup state from {}", path.display()))?;
     Ok(state)
 }
 
@@ -246,21 +416,37 @@ pub fn collect_audio_files_from_folder(root: &Path) -> Result<Vec<PathBuf>> {
         }
     }
 
-    files.sort_by(|left, right| left.to_string_lossy().to_lowercase().cmp(&right.to_string_lossy().to_lowercase()));
+    files.sort_by(|left, right| natural_key(&left.to_string_lossy()).cmp(&natural_key(&right.to_string_lossy())));
     Ok(files)
 }
 
 pub fn is_supported_audio_file(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .map(|extension| matches!(extension.to_lowercase().as_str(), "mp3" | "wav" | "flac" | "ogg"))
+        .map(|extension| {
+            matches!(
+                extension.to_lowercase().as_str(),
+                "mp3" | "wav" | "flac" | "ogg" | "opus" | "m4a" | "mp4" | "aac" | "aiff" | "aif" | "ape" | "wv"
+            )
+        })
         .unwrap_or(false)
+}
+
+pub fn same_path(left: &Path, right: &Path) -> bool {
+    left.to_string_lossy().to_lowercase() == right.to_string_lossy().to_lowercase()
+}
+
+pub fn display_file_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 fn write_state_to_path(state: &SavedState, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create configuration directory: {}", parent.display()))?;
+            .with_context(|| format!("failed to create application data directory: {}", parent.display()))?;
     }
 
     let contents = serde_json::to_string_pretty(state)
@@ -271,9 +457,19 @@ fn write_state_to_path(state: &SavedState, path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn state_path() -> Option<PathBuf> {
-    ProjectDirs::from("dev", "AudioOrbit", "Audio Orbit")
-        .map(|dirs| dirs.config_dir().join("state.json"))
+fn read_track_metadata(path: &Path) -> Result<TrackMetadata> {
+    let file_size = fs::metadata(path).ok().map(|metadata| metadata.len());
+    let tagged_file = lofty::read_from_path(path)
+        .with_context(|| format!("failed to read audio metadata: {}", path.display()))?;
+    let properties = tagged_file.properties();
+
+    Ok(TrackMetadata {
+        size_bytes: file_size,
+        duration_seconds: Some(properties.duration().as_secs_f32()).filter(|value| *value > 0.0),
+        sample_rate_hz: properties.sample_rate(),
+        channels: properties.channels(),
+        bitrate_kbps: properties.audio_bitrate().or_else(|| properties.overall_bitrate()),
+    })
 }
 
 fn folder_group_for_path(path: &Path, root: Option<&Path>, folder_depth: usize) -> String {
@@ -306,9 +502,6 @@ fn folder_group_for_path(path: &Path, root: Option<&Path>, folder_depth: usize) 
         .unwrap_or_else(|| "Root".to_owned())
 }
 
-fn display_file_name(path: &Path) -> String {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| path.display().to_string())
+fn natural_key(input: &str) -> String {
+    input.to_lowercase()
 }

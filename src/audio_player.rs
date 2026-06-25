@@ -3,18 +3,23 @@ use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait};
 use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 use std::{
+    fs,
     fs::File,
     io::BufReader,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
+#[derive(Clone, Debug)]
 pub struct PlaybackInfo {
     pub path: PathBuf,
-    pub duration_seconds: f32,
+    pub original_duration_seconds: f32,
+    pub rendered_duration_seconds: f32,
     pub input_channels: u16,
     pub sample_rate: u32,
     pub output_samples: usize,
+    pub size_bytes: Option<u64>,
+    pub waveform: Vec<f32>,
 }
 
 pub struct AudioPlayer {
@@ -26,6 +31,9 @@ pub struct AudioPlayer {
     paused_at: Option<Instant>,
     accumulated_pause: Duration,
     current_duration: Option<Duration>,
+    current_start_offset_seconds: f32,
+    current_path: Option<PathBuf>,
+    current_settings: Option<DspSettings>,
 }
 
 impl AudioPlayer {
@@ -43,6 +51,9 @@ impl AudioPlayer {
             paused_at: None,
             accumulated_pause: Duration::ZERO,
             current_duration: None,
+            current_start_offset_seconds: 0.0,
+            current_path: None,
+            current_settings: None,
         })
     }
 
@@ -51,6 +62,15 @@ impl AudioPlayer {
     }
 
     pub fn play_file_with_orbit(&mut self, path: &Path, settings: DspSettings) -> Result<PlaybackInfo> {
+        self.play_file_with_orbit_from(path, settings, 0.0)
+    }
+
+    pub fn play_file_with_orbit_from(
+        &mut self,
+        path: &Path,
+        settings: DspSettings,
+        start_seconds: f32,
+    ) -> Result<PlaybackInfo> {
         self.stop();
 
         let file = File::open(path)
@@ -60,19 +80,46 @@ impl AudioPlayer {
 
         let input_channels = decoder.channels();
         let sample_rate = decoder.sample_rate();
-        let input_samples: Vec<f32> = decoder.convert_samples().collect();
+        if sample_rate == 0 {
+            anyhow::bail!("the selected audio file reported an invalid sample rate");
+        }
 
+        let input_samples: Vec<f32> = decoder.convert_samples().collect();
         if input_samples.is_empty() {
             anyhow::bail!("the selected audio file did not contain any decoded samples");
         }
 
         let (processed_samples, render_info) =
-            render_orbit_to_stereo(&input_samples, input_channels, sample_rate, settings);
+            render_orbit_to_stereo(&input_samples, input_channels, sample_rate, settings, start_seconds);
 
-        let duration = Duration::from_secs_f32(render_info.duration_seconds.max(0.0));
-        self.play_processed_samples(processed_samples, sample_rate, duration)?;
+        if processed_samples.is_empty() {
+            anyhow::bail!("the rendered audio was empty after processing; disable silence skip or seek earlier in the track");
+        }
+
+        let rendered_duration = Duration::from_secs_f32(render_info.rendered_duration_seconds.max(0.0));
+        self.play_processed_samples(processed_samples, sample_rate, rendered_duration, path, settings, start_seconds)?;
 
         Ok(playback_info(path, render_info))
+    }
+
+    pub fn seek_current(&mut self, seconds: f32) -> Result<Option<PlaybackInfo>> {
+        let Some(path) = self.current_path.clone() else {
+            return Ok(None);
+        };
+        let Some(settings) = self.current_settings else {
+            return Ok(None);
+        };
+
+        self.play_file_with_orbit_from(&path, settings, seconds).map(Some)
+    }
+
+    pub fn apply_settings_to_current(&mut self, settings: DspSettings) -> Result<Option<PlaybackInfo>> {
+        let position = self.playback_position_seconds();
+        let Some(path) = self.current_path.clone() else {
+            return Ok(None);
+        };
+
+        self.play_file_with_orbit_from(&path, settings, position).map(Some)
     }
 
     pub fn stop(&mut self) {
@@ -84,6 +131,9 @@ impl AudioPlayer {
         self.paused_at = None;
         self.accumulated_pause = Duration::ZERO;
         self.current_duration = None;
+        self.current_start_offset_seconds = 0.0;
+        self.current_path = None;
+        self.current_settings = None;
     }
 
     pub fn pause_or_resume(&mut self) {
@@ -130,14 +180,17 @@ impl AudioPlayer {
             .saturating_duration_since(started_at)
             .saturating_sub(self.accumulated_pause);
 
+        let position = self.current_start_offset_seconds + elapsed.as_secs_f32();
+
         match self.current_duration {
-            Some(duration) => elapsed.min(duration).as_secs_f32(),
-            None => elapsed.as_secs_f32(),
+            Some(duration) => position.min(self.current_start_offset_seconds + duration.as_secs_f32()),
+            None => position,
         }
     }
 
     pub fn playback_duration_seconds(&self) -> Option<f32> {
-        self.current_duration.map(|duration| duration.as_secs_f32())
+        self.current_duration
+            .map(|duration| self.current_start_offset_seconds + duration.as_secs_f32())
     }
 
     fn play_processed_samples(
@@ -145,6 +198,9 @@ impl AudioPlayer {
         samples: Vec<f32>,
         sample_rate: u32,
         duration: Duration,
+        path: &Path,
+        settings: DspSettings,
+        start_seconds: f32,
     ) -> Result<()> {
         let sink = Sink::try_new(&self.stream_handle)
             .context("failed to create audio playback sink")?;
@@ -157,6 +213,9 @@ impl AudioPlayer {
         self.paused_at = None;
         self.accumulated_pause = Duration::ZERO;
         self.current_duration = Some(duration);
+        self.current_start_offset_seconds = start_seconds.max(0.0);
+        self.current_path = Some(path.to_path_buf());
+        self.current_settings = Some(settings);
 
         Ok(())
     }
@@ -173,9 +232,12 @@ pub fn current_default_output_device_name() -> String {
 fn playback_info(path: &Path, render_info: RenderInfo) -> PlaybackInfo {
     PlaybackInfo {
         path: path.to_path_buf(),
-        duration_seconds: render_info.duration_seconds,
+        original_duration_seconds: render_info.original_duration_seconds,
+        rendered_duration_seconds: render_info.rendered_duration_seconds,
         input_channels: render_info.input_channels,
         sample_rate: render_info.sample_rate,
         output_samples: render_info.output_samples,
+        size_bytes: fs::metadata(path).ok().map(|metadata| metadata.len()),
+        waveform: render_info.waveform,
     }
 }
