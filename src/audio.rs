@@ -1,5 +1,3 @@
-use anyhow::Result;
-
 #[derive(Clone, Copy, Debug)]
 pub struct VolumeIntensity {
     pub left_percent: u8,
@@ -20,9 +18,8 @@ mod platform {
     use super::VolumeIntensity;
     use anyhow::{Context, Result};
     use std::ptr::null;
-    use windows::Win32::Media::Audio::{
-        eConsole, eRender, IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator,
-    };
+    use windows::Win32::Media::Audio::{eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator};
+    use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
     };
@@ -39,6 +36,7 @@ mod platform {
         fn init() -> Result<Self> {
             unsafe {
                 CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+                    .ok()
                     .context("failed to initialize COM for Windows Core Audio")?;
             }
 
