@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   windows-release:
-    name: Prepare release, merge, and publish Windows executable
+    name: Prepare release, squash merge, and publish Windows executable
     runs-on: windows-latest
 
     steps:
@@ -119,7 +119,7 @@ jobs:
           git commit --allow-empty -m $CommitMessage
           git push origin $env:RELEASE_BRANCH
 
-      - name: Merge release branch before build
+      - name: Squash merge release branch before build
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -129,13 +129,15 @@ jobs:
 
           git checkout $DefaultBranch
           git pull --ff-only origin $DefaultBranch
-          git merge --no-ff $env:RELEASE_BRANCH -m $CommitMessage
+          git merge --squash $env:RELEASE_BRANCH
+          git status --short
+          git commit --allow-empty -m $CommitMessage
           git push origin $DefaultBranch
 
           $MergedSha = git rev-parse HEAD
           "MERGED_SHA=$MergedSha" >> $env:GITHUB_ENV
 
-          Write-Host "Merged $env:RELEASE_BRANCH into $DefaultBranch at $MergedSha."
+          Write-Host "Squash merged $env:RELEASE_BRANCH into $DefaultBranch at $MergedSha."
 
       - name: Delete release branch after merge
         shell: pwsh
