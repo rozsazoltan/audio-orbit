@@ -325,6 +325,31 @@ fn default_crossfade_seconds() -> u8 {
     5
 }
 
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UiSettings {
+    #[serde(default = "default_true")]
+    pub show_library_panel: bool,
+    #[serde(default = "default_true")]
+    pub show_profile_panel: bool,
+    #[serde(default)]
+    pub player_only_mode: bool,
+}
+
+impl Default for UiSettings {
+    fn default() -> Self {
+        Self {
+            show_library_panel: true,
+            show_profile_panel: true,
+            player_only_mode: false,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SavedState {
     pub playlists: Vec<Playlist>,
@@ -335,6 +360,8 @@ pub struct SavedState {
     pub update_settings: UpdateSettings,
     #[serde(default)]
     pub playback: PlaybackSettings,
+    #[serde(default)]
+    pub ui: UiSettings,
 }
 
 impl Default for SavedState {
@@ -356,6 +383,7 @@ impl Default for SavedState {
             selected_profile_index: 0,
             update_settings: UpdateSettings::default(),
             playback: PlaybackSettings::default(),
+            ui: UiSettings::default(),
         }
     }
 }

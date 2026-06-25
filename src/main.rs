@@ -66,6 +66,9 @@ struct AudioOrbitApp {
     show_folder_import_modal: bool,
     show_settings_modal: bool,
     show_release_modal: bool,
+    show_library_panel: bool,
+    show_profile_panel: bool,
+    player_only_mode: bool,
     pending_folder_path: Option<PathBuf>,
     pending_playlist_name: String,
     pending_folder_depth: usize,
@@ -87,6 +90,9 @@ impl AudioOrbitApp {
 
         let pending_playlist_name = "Local music".to_owned();
         let current_output_name = current_default_output_device_name();
+        let show_library_panel = state.ui.show_library_panel;
+        let show_profile_panel = state.ui.show_profile_panel;
+        let player_only_mode = state.ui.player_only_mode;
 
         let mut app = match AudioPlayer::new() {
             Ok(player) => {
@@ -104,6 +110,9 @@ impl AudioOrbitApp {
                     show_folder_import_modal: false,
                     show_settings_modal: false,
                     show_release_modal: false,
+                    show_library_panel,
+                    show_profile_panel,
+                    player_only_mode,
                     pending_folder_path: None,
                     pending_playlist_name,
                     pending_folder_depth: 2,
@@ -131,6 +140,9 @@ impl AudioOrbitApp {
                 show_folder_import_modal: false,
                 show_settings_modal: false,
                 show_release_modal: false,
+                show_library_panel,
+                show_profile_panel,
+                player_only_mode,
                 pending_folder_path: None,
                 pending_playlist_name,
                 pending_folder_depth: 2,
@@ -355,6 +367,9 @@ impl AudioOrbitApp {
                 ensure_state_is_valid(&mut state);
                 self.stop();
                 self.state = state;
+                self.show_library_panel = self.state.ui.show_library_panel;
+                self.show_profile_panel = self.state.ui.show_profile_panel;
+                self.player_only_mode = self.state.ui.player_only_mode;
                 self.selected_track_index = self.eligible_track_indexes().first().copied();
                 self.status_message = format!("Imported app backup from {}.", path.display());
                 self.error_message = None;
@@ -1003,7 +1018,7 @@ impl Drop for AudioOrbitApp {
 impl eframe::App for AudioOrbitApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         context.set_visuals(egui::Visuals::dark());
-        context.request_repaint_after(Duration::from_millis(180));
+        context.request_repaint_after(Duration::from_millis(33));
 
         self.process_media_key_events();
         self.update_playback_status();
@@ -1013,12 +1028,23 @@ impl eframe::App for AudioOrbitApp {
             self.render_now_playing_panel(ui);
         });
 
-        egui::SidePanel::left("library_panel")
-            .resizable(true)
-            .default_width(300.0)
-            .show(context, |ui| {
-                self.render_library_panel(ui);
-            });
+        if !self.player_only_mode && self.show_library_panel {
+            egui::SidePanel::left("library_panel")
+                .resizable(true)
+                .default_width(300.0)
+                .show(context, |ui| {
+                    self.render_library_panel(ui);
+                });
+        }
+
+        if !self.player_only_mode && self.show_profile_panel {
+            egui::SidePanel::right("profile_panel")
+                .resizable(true)
+                .default_width(320.0)
+                .show(context, |ui| {
+                    self.render_profile_panel(ui);
+                });
+        }
 
         egui::CentralPanel::default().show(context, |ui| {
             self.render_track_panel(ui);
@@ -1067,6 +1093,42 @@ impl AudioOrbitApp {
                 if ui.button(ui_icons::label(Icon::Settings2, "Settings")).clicked() {
                     self.show_settings_modal = true;
                 }
+
+                let player_only_label = if self.player_only_mode {
+                    ui_icons::label(Icon::ListMusic, "Full layout")
+                } else {
+                    ui_icons::label(Icon::Play, "Player only")
+                };
+                if ui.button(player_only_label).clicked() {
+                    self.player_only_mode = !self.player_only_mode;
+                    self.state.ui.player_only_mode = self.player_only_mode;
+                    self.save_state_silently();
+                }
+
+                if !self.player_only_mode {
+                    let profile_label = if self.show_profile_panel {
+                        ui_icons::label(Icon::Settings2, "Hide profiles")
+                    } else {
+                        ui_icons::label(Icon::Settings2, "Show profiles")
+                    };
+                    if ui.button(profile_label).clicked() {
+                        self.show_profile_panel = !self.show_profile_panel;
+                        self.state.ui.show_profile_panel = self.show_profile_panel;
+                        self.save_state_silently();
+                    }
+
+                    let library_label = if self.show_library_panel {
+                        ui_icons::label(Icon::ListMusic, "Hide library")
+                    } else {
+                        ui_icons::label(Icon::ListMusic, "Show library")
+                    };
+                    if ui.button(library_label).clicked() {
+                        self.show_library_panel = !self.show_library_panel;
+                        self.state.ui.show_library_panel = self.show_library_panel;
+                        self.save_state_silently();
+                    }
+                }
+
                 if ui.button(ui_icons::label(Icon::RefreshCw, "Refresh output")).clicked() {
                     self.refresh_output_device();
                 }
@@ -1097,7 +1159,7 @@ impl AudioOrbitApp {
             .map(|playback| playback.waveform.as_slice())
             .unwrap_or(&[]);
         let response = draw_waveform_seek(ui, waveform, progress, format!("{} / {}", format_duration(position), format_duration(duration)));
-        if (response.clicked() || response.dragged()) && duration > 0.0 {
+        if response.clicked() && duration > 0.0 {
             if let Some(pointer) = response.interact_pointer_pos() {
                 let next_position = ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration;
                 self.seek_current(next_position);
@@ -1150,24 +1212,7 @@ impl AudioOrbitApp {
             }
 
             ui.separator();
-            let mut playback_settings_changed = false;
-            playback_settings_changed |= ui
-                .checkbox(&mut self.state.playback.auto_advance, "Auto-play next")
-                .changed();
-            playback_settings_changed |= ui
-                .checkbox(&mut self.state.playback.crossfade_enabled, "Crossfade")
-                .changed();
-            if self.state.playback.crossfade_enabled {
-                playback_settings_changed |= ui
-                    .add(
-                        egui::Slider::new(&mut self.state.playback.crossfade_seconds, 1u8..=20u8)
-                            .text("sec"),
-                    )
-                    .changed();
-            }
-            if playback_settings_changed {
-                self.save_state_silently();
-            }
+            self.render_compact_playback_toggles(ui);
         });
 
         if let Some(output_name) = self.detected_output_change.clone() {
@@ -1185,9 +1230,52 @@ impl AudioOrbitApp {
         ui.add_space(6.0);
     }
 
+    fn render_compact_playback_toggles(&mut self, ui: &mut egui::Ui) {
+        let mut playback_changed = false;
+        playback_changed |= ui
+            .checkbox(&mut self.state.playback.auto_advance, "Auto-play next")
+            .changed();
+        playback_changed |= ui
+            .checkbox(&mut self.state.playback.crossfade_enabled, "Crossfade")
+            .changed();
+        if self.state.playback.crossfade_enabled {
+            playback_changed |= ui
+                .add(
+                    egui::Slider::new(&mut self.state.playback.crossfade_seconds, 1u8..=20u8)
+                        .text("sec"),
+                )
+                .changed();
+        }
+        if playback_changed {
+            self.save_state_silently();
+        }
+
+        let profile_index = self.state.selected_profile_index;
+        let mut profile_changed = false;
+        if let Some(profile) = self.state.profiles.get_mut(profile_index) {
+            ui.separator();
+            profile_changed |= ui
+                .checkbox(&mut profile.settings.skip_silence_enabled, "Skip silence")
+                .changed();
+            if profile.settings.skip_silence_enabled {
+                profile_changed |= ui
+                    .add(
+                        egui::Slider::new(&mut profile.settings.silence_threshold_seconds, 1u8..=12u8)
+                            .text("sec"),
+                    )
+                    .changed();
+            }
+        }
+
+        if profile_changed {
+            self.save_state_silently();
+            self.apply_current_profile_live();
+        }
+    }
+
     fn render_library_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Library");
-        ui.small("Folder scanners, manual playlists, Favorites, backups, and updates.");
+        ui.small("Folder scanners, manual playlists, and Favorites.");
         ui.separator();
 
         egui::ScrollArea::vertical()
@@ -1199,17 +1287,6 @@ impl AudioOrbitApp {
                     let show_actions = selected;
 
                     let row = ui.horizontal(|ui| {
-                        if show_actions {
-                            if ui.small_button(ui_icons::icon(Icon::ArrowUp)).on_hover_text("Move up").clicked() {
-                                self.move_playlist(index, -1);
-                            }
-                            if ui.small_button(ui_icons::icon(Icon::ArrowDown)).on_hover_text("Move down").clicked() {
-                                self.move_playlist(index, 1);
-                            }
-                        } else {
-                            ui.add_space(44.0);
-                        }
-
                         let mut clicked_row = false;
                         if self.editing_playlist_index == Some(index) {
                             let mut next_name = playlist.name.clone();
@@ -1237,6 +1314,12 @@ impl AudioOrbitApp {
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if show_actions && playlist.kind != PlaylistKind::Favorites {
+                                if ui.small_button(ui_icons::icon(Icon::ArrowDown)).on_hover_text("Move down").clicked() {
+                                    self.move_playlist(index, 1);
+                                }
+                                if ui.small_button(ui_icons::icon(Icon::ArrowUp)).on_hover_text("Move up").clicked() {
+                                    self.move_playlist(index, -1);
+                                }
                                 if ui.small_button(ui_icons::icon(Icon::Pencil)).on_hover_text("Rename").clicked() {
                                     self.editing_playlist_index = Some(index);
                                 }
@@ -1293,36 +1376,8 @@ impl AudioOrbitApp {
         });
 
         ui.separator();
-        ui.horizontal(|ui| {
-            if ui.button(ui_icons::label(Icon::Download, "Export backup ZIP")).clicked() {
-                self.export_app_backup();
-            }
-            if ui.button(ui_icons::label(Icon::Upload, "Import backup ZIP")).clicked() {
-                self.import_app_backup();
-            }
-        });
-
-        if let Some(path) = app_data_dir() {
-            ui.small(format!("Data: {}", path.display()));
-        }
-
-        ui.separator();
-        ui.heading("Updates");
-        if ui.button(ui_icons::label(Icon::Bell, "Release watcher...")).clicked() {
-            self.show_release_modal = true;
-        }
-        ui.small(format!(
-            "Checks used this session: {}/2 · Repository: {}",
-            self.update_check_count,
-            updater::repository_label()
-        ));
-        if let Some(check) = &self.last_update_check {
-            ui.small(format!(
-                "Current v{} · Latest v{}{}",
-                check.current_version,
-                check.latest_version,
-                if check.prerelease { " prerelease" } else { "" }
-            ));
+        if ui.button(ui_icons::label(Icon::Settings2, "Settings, backups, updates...")).clicked() {
+            self.show_settings_modal = true;
         }
     }
 
@@ -1442,7 +1497,11 @@ impl AudioOrbitApp {
                 let path = track.path.clone();
 
                 ui.horizontal(|ui| {
-                    let heart = if favorite { ui_icons::icon(Icon::Heart) } else { ui_icons::icon(Icon::HeartOff) };
+                    let heart = if favorite {
+                        egui::RichText::new("♥").color(egui::Color32::from_rgb(230, 70, 95))
+                    } else {
+                        egui::RichText::new("♡")
+                    };
                     if ui.button(heart).on_hover_text("Toggle favorite").clicked() {
                         self.toggle_favorite(path.clone());
                     }
@@ -1458,8 +1517,6 @@ impl AudioOrbitApp {
 
                     ui.add_space(8.0);
                     ui.small(metadata);
-                    ui.add_space(8.0);
-                    draw_mini_waveform(ui, &track.waveform);
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.menu_button(ui_icons::icon(Icon::Ellipsis), |ui| {
@@ -1630,111 +1687,38 @@ impl AudioOrbitApp {
         }
     }
 
-    fn render_release_modal(&mut self, context: &egui::Context) {
-        const MAX_UPDATE_CHECKS_PER_SESSION: u8 = 2;
-
+    fn render_modal_backdrop(&self, context: &egui::Context, id: &'static str) {
         let screen_rect = context.screen_rect();
         let painter = context.layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
-            egui::Id::new("release_modal_backdrop"),
+            egui::Order::Middle,
+            egui::Id::new(id),
         ));
-        painter.rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(160));
+        painter.rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(215));
+    }
 
+    fn render_release_modal(&mut self, context: &egui::Context) {
+        self.render_modal_backdrop(context, "release_modal_backdrop");
         let mut is_open = self.show_release_modal;
-        egui::Window::new("Release watcher")
-            .open(&mut is_open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(560.0)
+
+        egui::Area::new(egui::Id::new("release_modal"))
+            .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(context, |ui| {
-                ui.heading("Release watcher");
-                ui.small("Checks GitHub releases with a strict per-session limit to avoid API rate limiting.");
-                ui.separator();
-
-                let prerelease_changed = ui
-                    .checkbox(
-                        &mut self.state.update_settings.include_prereleases,
-                        "Also watch prereleases",
-                    )
-                    .changed();
-                if prerelease_changed {
-                    self.save_state_silently();
-                }
-
-                ui.small(if self.state.update_settings.include_prereleases {
-                    "Mode: stable releases and prereleases."
-                } else {
-                    "Mode: latest stable release only."
+                egui::Frame::window(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(560.0);
+                    ui.set_max_width(620.0);
+                    ui.horizontal(|ui| {
+                        ui.heading("Release watcher");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button(ui_icons::icon(Icon::X)).on_hover_text("Close").clicked() {
+                                is_open = false;
+                            }
+                        });
+                    });
+                    ui.small("Checks GitHub releases with a strict per-session limit to avoid API rate limiting.");
+                    ui.separator();
+                    self.render_update_settings_section(ui, false);
                 });
-
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(format!(
-                        "Checks used: {}/{}",
-                        self.update_check_count,
-                        MAX_UPDATE_CHECKS_PER_SESSION
-                    ));
-
-                    let can_check = self.update_check_count < MAX_UPDATE_CHECKS_PER_SESSION;
-                    if ui
-                        .add_enabled(can_check, egui::Button::new(ui_icons::label(Icon::Search, "Check releases")))
-                        .clicked()
-                    {
-                        self.check_for_updates();
-                    }
-
-                    if ui.button(ui_icons::label(Icon::ExternalLink, "Open releases")).clicked() {
-                        if let Err(error) = updater::open_releases_page() {
-                            self.error_message = Some(error.to_string());
-                        }
-                    }
-                });
-
-                if self.update_check_count >= MAX_UPDATE_CHECKS_PER_SESSION {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        "Check limit reached. Restart the app before checking again.",
-                    );
-                }
-
-                ui.separator();
-
-                if let Some(check) = self.last_update_check.clone() {
-                    ui.label(format!("Current version: v{}", check.current_version));
-                    ui.label(format!(
-                        "Latest version: v{}{}",
-                        check.latest_version,
-                        if check.prerelease { " prerelease" } else { "" }
-                    ));
-
-                    if check.is_update_available {
-                        ui.colored_label(egui::Color32::LIGHT_GREEN, "A newer executable is available.");
-                    } else {
-                        ui.colored_label(egui::Color32::LIGHT_GREEN, "Latest is OK. No update is required.");
-                    }
-
-                    if let Some(asset_name) = &check.asset_name {
-                        ui.small(format!("Asset: {asset_name}"));
-                    } else {
-                        ui.small("No Windows executable asset was found on the selected release.");
-                    }
-
-                    let can_install = check.is_update_available && check.asset_download_url.is_some();
-                    if ui
-                        .add_enabled(can_install, egui::Button::new(ui_icons::label(Icon::Download, "Replace current executable")))
-                        .clicked()
-                    {
-                        self.install_update();
-                    }
-                } else {
-                    ui.small("No release check has been run in this app session.");
-                }
-
-                ui.separator();
-                if let Some(path) = app_data_dir() {
-                    ui.small(format!("Portable data folder: {}", path.display()));
-                }
             });
 
         if context.input(|input| input.key_pressed(egui::Key::Escape)) {
@@ -1745,23 +1729,40 @@ impl AudioOrbitApp {
     }
 
     fn render_settings_modal(&mut self, context: &egui::Context) {
-        let screen_rect = context.screen_rect();
-        let painter = context.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("settings_modal_backdrop")));
-        painter.rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(160));
-
+        self.render_modal_backdrop(context, "settings_modal_backdrop");
         let mut is_open = self.show_settings_modal;
-        egui::Window::new("Settings")
-            .open(&mut is_open)
-            .collapsible(false)
-            .resizable(true)
-            .default_width(620.0)
-            .default_height(640.0)
+
+        egui::Area::new(egui::Id::new("settings_modal"))
+            .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(context, |ui| {
-                ui.heading("Playback and sound settings");
-                ui.small("Mac-style modal layout with focused settings and dimmed background.");
-                ui.separator();
-                self.render_profile_panel(ui);
+                egui::Frame::window(ui.style()).show(ui, |ui| {
+                    ui.set_min_size(egui::vec2(760.0, 620.0));
+                    ui.set_max_width(840.0);
+
+                    ui.horizontal(|ui| {
+                        ui.heading("Settings");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button(ui_icons::icon(Icon::X)).on_hover_text("Close").clicked() {
+                                is_open = false;
+                            }
+                        });
+                    });
+                    ui.small("Playback, sound profiles, backups, updates, and portable data.");
+                    ui.separator();
+
+                    egui::ScrollArea::vertical()
+                        .max_height(560.0)
+                        .show(ui, |ui| {
+                            self.render_playback_settings_section(ui);
+                            ui.separator();
+                            self.render_profile_panel(ui);
+                            ui.separator();
+                            self.render_backup_settings_section(ui);
+                            ui.separator();
+                            self.render_update_settings_section(ui, true);
+                        });
+                });
             });
 
         if context.input(|input| input.key_pressed(egui::Key::Escape)) {
@@ -1769,6 +1770,154 @@ impl AudioOrbitApp {
         }
 
         self.show_settings_modal = is_open;
+    }
+
+    fn render_playback_settings_section(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Playback");
+        ui.small("Crossfade is a real overlap: the current track fades out while the next track fades in over the configured seconds.");
+
+        let mut playback_changed = false;
+        playback_changed |= ui
+            .checkbox(&mut self.state.playback.auto_advance, "Auto-play next")
+            .changed();
+        playback_changed |= ui
+            .checkbox(&mut self.state.playback.crossfade_enabled, "Crossfade tracks")
+            .changed();
+        if self.state.playback.crossfade_enabled {
+            playback_changed |= ui
+                .add(
+                    egui::Slider::new(&mut self.state.playback.crossfade_seconds, 1u8..=20u8)
+                        .text("Crossfade seconds"),
+                )
+                .changed();
+        }
+        if playback_changed {
+            self.save_state_silently();
+        }
+
+        let profile_index = self.state.selected_profile_index;
+        let mut profile_changed = false;
+        if let Some(profile) = self.state.profiles.get_mut(profile_index) {
+            profile_changed |= ui
+                .checkbox(&mut profile.settings.skip_silence_enabled, "Skip long silence")
+                .changed();
+            if profile.settings.skip_silence_enabled {
+                profile_changed |= ui
+                    .add(
+                        egui::Slider::new(&mut profile.settings.silence_threshold_seconds, 1u8..=12u8)
+                            .text("Silence threshold seconds"),
+                    )
+                    .changed();
+            }
+        }
+        if profile_changed {
+            self.save_state_silently();
+            self.apply_current_profile_live();
+        }
+    }
+
+    fn render_backup_settings_section(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Backup and data");
+        ui.small("The ZIP backup stores the full app state: music folders, playlists, Favorites, sound profiles, playback settings, and update settings.");
+
+        ui.horizontal(|ui| {
+            if ui.button(ui_icons::label(Icon::Download, "Export full backup ZIP")).clicked() {
+                self.export_app_backup();
+            }
+            if ui.button(ui_icons::label(Icon::Upload, "Import backup ZIP")).clicked() {
+                self.import_app_backup();
+            }
+        });
+
+        if let Some(path) = app_data_dir() {
+            ui.small(format!("Portable data folder: {}", path.display()));
+        }
+    }
+
+    fn render_update_settings_section(&mut self, ui: &mut egui::Ui, show_modal_button: bool) {
+        const MAX_UPDATE_CHECKS_PER_SESSION: u8 = 2;
+
+        ui.heading("Updates");
+        let prerelease_changed = ui
+            .checkbox(
+                &mut self.state.update_settings.include_prereleases,
+                "Also watch prereleases",
+            )
+            .changed();
+        if prerelease_changed {
+            self.save_state_silently();
+        }
+
+        ui.small(if self.state.update_settings.include_prereleases {
+            "Mode: stable releases and prereleases."
+        } else {
+            "Mode: latest stable release only."
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "Checks used: {}/{}",
+                self.update_check_count,
+                MAX_UPDATE_CHECKS_PER_SESSION
+            ));
+
+            let can_check = self.update_check_count < MAX_UPDATE_CHECKS_PER_SESSION;
+            if ui
+                .add_enabled(can_check, egui::Button::new(ui_icons::label(Icon::Search, "Check releases")))
+                .clicked()
+            {
+                self.check_for_updates();
+            }
+
+            if show_modal_button && ui.button(ui_icons::label(Icon::Bell, "Open release watcher modal")).clicked() {
+                self.show_release_modal = true;
+            }
+
+            if ui.button(ui_icons::label(Icon::ExternalLink, "Open releases" )).clicked() {
+                if let Err(error) = updater::open_releases_page() {
+                    self.error_message = Some(error.to_string());
+                }
+            }
+        });
+
+        if self.update_check_count >= MAX_UPDATE_CHECKS_PER_SESSION {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "Check limit reached. Restart the app before checking again.",
+            );
+        }
+
+        if let Some(check) = self.last_update_check.clone() {
+            ui.label(format!("Current version: v{}", check.current_version));
+            ui.label(format!(
+                "Latest version: v{}{}",
+                check.latest_version,
+                if check.prerelease { " prerelease" } else { "" }
+            ));
+
+            if check.is_update_available {
+                ui.colored_label(egui::Color32::LIGHT_GREEN, "A newer executable is available.");
+            } else {
+                ui.colored_label(egui::Color32::LIGHT_GREEN, "Latest is OK. No update is required.");
+            }
+
+            if let Some(asset_name) = &check.asset_name {
+                ui.small(format!("Asset: {asset_name}"));
+            } else {
+                ui.small("No Windows executable asset was found on the selected release.");
+            }
+
+            let can_install = check.is_update_available && check.asset_download_url.is_some();
+            if ui
+                .add_enabled(can_install, egui::Button::new(ui_icons::label(Icon::Download, "Replace current executable")))
+                .clicked()
+            {
+                self.install_update();
+            }
+        } else {
+            ui.small(format!("Repository: {}", updater::repository_label()));
+            ui.small("No release check has been run in this app session.");
+        }
     }
 
     fn render_status_panel(&mut self, ui: &mut egui::Ui) {
@@ -1911,13 +2060,7 @@ fn draw_waveform_seek(ui: &mut egui::Ui, waveform: &[f32], progress: f32, label:
     painter.rect_filled(rect, 8.0, visuals.extreme_bg_color);
 
     if waveform.is_empty() {
-        painter.text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            label,
-            egui::FontId::proportional(13.0),
-            visuals.text_color(),
-        );
+        paint_seek_label(painter, rect, &label);
         return response;
     }
 
@@ -1939,38 +2082,26 @@ fn draw_waveform_seek(ui: &mut egui::Ui, waveform: &[f32], progress: f32, label:
         );
     }
 
+    paint_seek_label(painter, rect, &label);
+    response
+}
+
+fn paint_seek_label(painter: &egui::Painter, rect: egui::Rect, label: &str) {
+    let font = egui::FontId::proportional(14.0);
+    painter.text(
+        rect.center() + egui::vec2(1.0, 1.0),
+        egui::Align2::CENTER_CENTER,
+        label,
+        font.clone(),
+        egui::Color32::BLACK,
+    );
     painter.text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         label,
-        egui::FontId::proportional(13.0),
-        visuals.text_color(),
+        font,
+        egui::Color32::WHITE,
     );
-    response
-}
-
-fn draw_mini_waveform(ui: &mut egui::Ui, waveform: &[f32]) {
-    let desired_size = egui::vec2(96.0, 18.0);
-    let (rect, _response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
-    let painter = ui.painter();
-    let visuals = ui.visuals();
-
-    if waveform.is_empty() {
-        painter.rect_filled(rect, 3.0, visuals.extreme_bg_color);
-        return;
-    }
-
-    let step = (waveform.len() / 32).max(1);
-    let values = waveform.iter().step_by(step).take(32).copied().collect::<Vec<_>>();
-    let bar_width = (rect.width() / values.len().max(1) as f32).max(1.0);
-    for (index, value) in values.iter().enumerate() {
-        let x = rect.left() + index as f32 * bar_width;
-        let height = (rect.height() * value.clamp(0.05, 1.0)).max(1.0);
-        painter.line_segment(
-            [egui::pos2(x, rect.center().y - height / 2.0), egui::pos2(x, rect.center().y + height / 2.0)],
-            egui::Stroke::new(bar_width.min(2.0), visuals.widgets.inactive.fg_stroke.color),
-        );
-    }
 }
 
 fn format_track_metadata(track: &Track) -> String {
