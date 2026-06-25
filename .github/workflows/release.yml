@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without the v prefix, for example: 0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  windows-release:
+    name: Build and publish Windows executable
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate release version
+        shell: pwsh
+        run: |
+          $Version = "${{ inputs.version }}".Trim()
+
+          if ($Version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$') {
+            Write-Error "Invalid version '$Version'. Use semantic version format like 0.1.0. Do not include the v prefix."
+            exit 1
+          }
+
+          "VERSION=$Version" >> $env:GITHUB_ENV
+          "TAG=v$Version" >> $env:GITHUB_ENV
+
+      - name: Apply release version to Cargo.toml
+        shell: pwsh
+        run: |
+          $cargoToml = Get-Content Cargo.toml -Raw
+          $cargoToml = $cargoToml -replace '(?m)^version\s*=\s*".*"$', "version = `"$env:VERSION`""
+          Set-Content Cargo.toml $cargoToml -Encoding UTF8
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build executable
+        shell: pwsh
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Prepare release asset
+        shell: pwsh
+        run: |
+          $ExeName = "audio-orbit-$env:TAG-windows-x64.exe"
+          Copy-Item "target\x86_64-pc-windows-msvc\release\audio-orbit.exe" $ExeName
+          "ASSET=$ExeName" >> $env:GITHUB_ENV
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: ${{ env.TAG }}
+          generate_release_notes: true
+          files: ${{ env.ASSET }}
