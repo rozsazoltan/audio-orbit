@@ -11,14 +11,21 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   windows-release:
-    name: Build and publish Windows executable
+    name: Prepare release, merge, and publish Windows executable
     runs-on: windows-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout default branch
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Validate release version
         shell: pwsh
@@ -30,18 +37,46 @@ jobs:
             exit 1
           }
 
+          $Tag = "v$Version"
+          $ReleaseBranch = "chore/release-$Tag"
+
           "VERSION=$Version" >> $env:GITHUB_ENV
-          "TAG=v$Version" >> $env:GITHUB_ENV
+          "TAG=$Tag" >> $env:GITHUB_ENV
+          "RELEASE_BRANCH=$ReleaseBranch" >> $env:GITHUB_ENV
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Sync release metadata for build
+      - name: Prepare release branch and commit version metadata
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
+          $DefaultBranch = "${{ github.event.repository.default_branch }}"
+          $CommitMessage = "chore: release $env:TAG"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin --prune --tags
+          git checkout -B $DefaultBranch "origin/$DefaultBranch"
+          git pull --ff-only origin $DefaultBranch
+
+          $ExistingTag = git ls-remote --tags origin "refs/tags/$env:TAG"
+          if ($ExistingTag) {
+            Write-Error "Tag $env:TAG already exists. Choose a new release version."
+            exit 1
+          }
+
+          $ExistingReleaseBranch = git ls-remote --heads origin $env:RELEASE_BRANCH
+          if ($ExistingReleaseBranch) {
+            Write-Error "Release branch $env:RELEASE_BRANCH already exists. Delete it or choose a new release version."
+            exit 1
+          }
+
+          git checkout -b $env:RELEASE_BRANCH
 
           $CargoTomlPath = "Cargo.toml"
           $CargoToml = Get-Content $CargoTomlPath -Raw
@@ -75,12 +110,37 @@ jobs:
 
           cargo generate-lockfile
 
-          Write-Host "Release metadata was synced for this build only: $env:VERSION ($env:TAG)."
+          git add Cargo.toml Cargo.lock
+          if (Test-Path $ManifestPath) {
+            git add $ManifestPath
+          }
+
+          git status --short
+          git commit --allow-empty -m $CommitMessage
+          git push origin $env:RELEASE_BRANCH
+
+      - name: Merge release branch before build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $DefaultBranch = "${{ github.event.repository.default_branch }}"
+          $CommitMessage = "chore: release $env:TAG"
+
+          git checkout $DefaultBranch
+          git pull --ff-only origin $DefaultBranch
+          git merge --no-ff $env:RELEASE_BRANCH -m $CommitMessage
+          git push origin $DefaultBranch
+
+          $MergedSha = git rev-parse HEAD
+          "MERGED_SHA=$MergedSha" >> $env:GITHUB_ENV
+
+          Write-Host "Merged $env:RELEASE_BRANCH into $DefaultBranch at $MergedSha."
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Build executable
+      - name: Build executable from merged release commit
         shell: pwsh
         run: cargo build --release --target x86_64-pc-windows-msvc
 
@@ -95,6 +155,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
+          target_commitish: ${{ env.MERGED_SHA }}
           name: ${{ env.TAG }}
           generate_release_notes: true
           files: ${{ env.ASSET }}
