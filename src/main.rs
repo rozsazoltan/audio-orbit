@@ -278,11 +278,6 @@ impl AudioOrbitApp {
         self.active_track_path
             .as_ref()
             .map(|path| display_file_name(path))
-            .or_else(|| {
-                self.selected_track_path()
-                    .as_ref()
-                    .map(|path| display_file_name(path))
-            })
             .unwrap_or_else(|| "No track playing".to_owned())
     }
 
@@ -832,6 +827,84 @@ impl AudioOrbitApp {
             .unwrap_or(0.0)
     }
 
+    fn process_keyboard_shortcuts(&mut self, context: &egui::Context) {
+        if self.show_folder_import_modal || self.show_settings_modal || self.show_release_modal || context.wants_keyboard_input() {
+            return;
+        }
+
+        let (space, enter, stop, next, previous, search, player_only, library, profiles) = context.input(|input| {
+            (
+                input.key_pressed(egui::Key::Space),
+                input.key_pressed(egui::Key::Enter),
+                input.key_pressed(egui::Key::S),
+                input.key_pressed(egui::Key::ArrowRight) && input.modifiers.ctrl,
+                input.key_pressed(egui::Key::ArrowLeft) && input.modifiers.ctrl,
+                input.key_pressed(egui::Key::F) && input.modifiers.ctrl,
+                input.key_pressed(egui::Key::M),
+                input.key_pressed(egui::Key::L) && input.modifiers.ctrl,
+                input.key_pressed(egui::Key::P) && input.modifiers.ctrl,
+            )
+        });
+
+        if space {
+            let is_active = self
+                .player
+                .as_ref()
+                .map(|player| player.is_playing() || player.is_paused())
+                .unwrap_or(false);
+
+            if is_active {
+                self.pause_or_resume();
+            } else {
+                self.play_selected_or_first_track();
+            }
+        }
+
+        if enter {
+            self.play_selected_or_first_track();
+        }
+
+        if stop {
+            self.stop();
+        }
+
+        if next {
+            self.play_next_track();
+        }
+
+        if previous {
+            self.play_previous_track();
+        }
+
+        if search {
+            self.show_track_search = !self.show_track_search;
+            self.state.ui.show_track_search = self.show_track_search;
+            if !self.show_track_search {
+                self.track_search_query.clear();
+                self.search_cursor = 0;
+            }
+            self.save_state_silently();
+        }
+
+        if player_only {
+            self.player_only_mode = !self.player_only_mode;
+            self.state.ui.player_only_mode = self.player_only_mode;
+            self.save_state_silently();
+        }
+
+        if library && !self.player_only_mode {
+            self.show_library_panel = !self.show_library_panel;
+            self.state.ui.show_library_panel = self.show_library_panel;
+            self.save_state_silently();
+        }
+
+        if profiles && !self.player_only_mode {
+            self.show_profile_panel = !self.show_profile_panel;
+            self.state.ui.show_profile_panel = self.show_profile_panel;
+            self.save_state_silently();
+        }
+    }
+
     fn process_media_key_events(&mut self) {
         let events = match &self.media_key_receiver {
             Some(receiver) => receiver.try_iter().collect::<Vec<_>>(),
@@ -880,6 +953,7 @@ impl AudioOrbitApp {
         self.active_track_path = None;
         self.pending_track_switch = None;
         self.crossfade_started_for_path = None;
+        self.last_playback = None;
         self.status_message = "Playback stopped.".to_owned();
     }
 
@@ -1210,6 +1284,7 @@ impl eframe::App for AudioOrbitApp {
         context.request_repaint_after(Duration::from_millis(33));
 
         self.process_media_key_events();
+        self.process_keyboard_shortcuts(context);
         self.process_pending_track_switch();
         self.process_pending_profile_apply();
         self.update_playback_status();
@@ -1262,21 +1337,25 @@ impl eframe::App for AudioOrbitApp {
 impl AudioOrbitApp {
     fn render_now_playing_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(8.0);
+        let has_now_playing = self.active_track_path.is_some() || self.pending_track_switch.is_some();
+
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.heading(self.active_track_title());
+                if has_now_playing {
+                    ui.heading(self.active_track_title());
 
-                if let Some(playback) = &self.last_playback {
-                    ui.small(format!(
-                        "{} · {} Hz · {} ch · {} · rendered {}",
-                        display_parent(&playback.path),
-                        playback.sample_rate,
-                        playback.input_channels,
-                        playback.size_bytes.map(format_file_size).unwrap_or_else(|| "unknown size".to_owned()),
-                        format_duration(playback.rendered_duration_seconds)
-                    ));
+                    if let Some(playback) = &self.last_playback {
+                        ui.small(format!(
+                            "{} · {} Hz · {} ch · {} · rendered {}",
+                            display_parent(&playback.path),
+                            playback.sample_rate,
+                            playback.input_channels,
+                            playback.size_bytes.map(format_file_size).unwrap_or_else(|| "unknown size".to_owned()),
+                            format_duration(playback.rendered_duration_seconds)
+                        ));
+                    }
                 } else {
-                    ui.small("Choose a playlist, folder, or track to start playback.");
+                    ui.add_space(24.0);
                 }
             });
 
@@ -1327,24 +1406,26 @@ impl AudioOrbitApp {
             });
         });
 
-        let position = self.displayed_playback_position_seconds();
-        let duration = self.displayed_playback_duration_seconds();
-        let progress = if duration > 0.0 {
-            (position / duration).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        if has_now_playing {
+            let position = self.displayed_playback_position_seconds();
+            let duration = self.displayed_playback_duration_seconds();
+            let progress = if duration > 0.0 {
+                (position / duration).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
 
-        let waveform = self
-            .last_playback
-            .as_ref()
-            .map(|playback| playback.waveform.as_slice())
-            .unwrap_or(&[]);
-        let response = draw_waveform_seek(ui, waveform, progress, format!("{} / {}", format_duration(position), format_duration(duration)));
-        if (response.clicked() || response.drag_stopped()) && duration > 0.0 {
-            if let Some(pointer) = response.interact_pointer_pos() {
-                let next_position = ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration;
-                self.seek_current(next_position);
+            let waveform = self
+                .last_playback
+                .as_ref()
+                .map(|playback| playback.waveform.as_slice())
+                .unwrap_or(&[]);
+            let response = draw_waveform_seek(ui, waveform, progress, format!("{} / {}", format_duration(position), format_duration(duration)));
+            if (response.clicked() || response.drag_stopped()) && duration > 0.0 {
+                if let Some(pointer) = response.interact_pointer_pos() {
+                    let next_position = ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration;
+                    self.seek_current(next_position);
+                }
             }
         }
 
@@ -1440,30 +1521,6 @@ impl AudioOrbitApp {
             self.save_state_silently();
         }
 
-        let profile_index = self.state.selected_profile_index;
-        let mut profile_changed = false;
-        if let Some(profile) = self.state.profiles.get_mut(profile_index) {
-            ui.separator();
-            profile_changed |= ui
-                .checkbox(&mut profile.settings.orbit_enabled, "Orbit")
-                .on_hover_text("Enable orbit-style stereo movement. Turn this off for normal stereo playback.")
-                .changed();
-            profile_changed |= ui
-                .checkbox(&mut profile.settings.skip_silence_enabled, "Skip silence")
-                .changed();
-            if profile.settings.skip_silence_enabled {
-                profile_changed |= ui
-                    .add(
-                        egui::Slider::new(&mut profile.settings.silence_threshold_seconds, 1u8..=12u8)
-                            .text("sec"),
-                    )
-                    .changed();
-            }
-        }
-
-        if profile_changed {
-            self.schedule_current_profile_apply();
-        }
     }
 
     fn render_library_panel(&mut self, ui: &mut egui::Ui) {
@@ -1755,7 +1812,12 @@ impl AudioOrbitApp {
             .collect();
 
         let mut last_group = String::new();
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        let track_list_width = (ui.available_width() - 14.0).max(320.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(track_list_width, ui.available_height()),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
             for (index, track) in visible_tracks {
                 if show_group_headers && track.group != last_group {
                     ui.add_space(6.0);
@@ -1874,7 +1936,9 @@ impl AudioOrbitApp {
                 });
                 ui.separator();
             }
-        });
+                });
+            },
+        );
     }
 
     fn render_profile_panel(&mut self, ui: &mut egui::Ui) {
@@ -1995,6 +2059,56 @@ impl AudioOrbitApp {
 
         }
 
+        if profile_changed {
+            self.schedule_current_profile_apply();
+        }
+
+        ui.add_space(12.0);
+        self.render_profile_transition_section(ui);
+    }
+
+    fn render_profile_transition_section(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Playback transitions");
+        ui.small("Crossfade and silence skipping are kept near the active sound profile because they affect how this profile feels during playback.");
+
+        let mut playback_changed = false;
+        playback_changed |= ui
+            .checkbox(&mut self.state.playback.crossfade_enabled, "Crossfade tracks")
+            .changed();
+        if self.state.playback.crossfade_enabled {
+            playback_changed |= ui
+                .add(
+                    egui::Slider::new(&mut self.state.playback.crossfade_seconds, 1u8..=20u8)
+                        .text("Crossfade seconds"),
+                )
+                .changed();
+        }
+        if playback_changed {
+            self.save_state_silently();
+        }
+
+        let profile_index = self.state.selected_profile_index;
+        let mut profile_changed = false;
+        if let Some(profile) = self.state.profiles.get_mut(profile_index) {
+            profile_changed |= ui
+                .checkbox(&mut profile.settings.skip_silence_enabled, "Skip long silence")
+                .changed();
+            if profile.settings.skip_silence_enabled {
+                profile_changed |= ui
+                    .add(
+                        egui::Slider::new(&mut profile.settings.silence_threshold_seconds, 1u8..=12u8)
+                            .text("Minimum silence length (sec)"),
+                    )
+                    .changed();
+                profile_changed |= ui
+                    .add(
+                        egui::Slider::new(&mut profile.settings.silence_level_threshold_percent, 1u8..=20u8)
+                            .text("Silence level threshold (%)"),
+                    )
+                    .on_hover_text("Audio below this level is treated as silence. Useful when the file has noise floor instead of absolute zero.")
+                    .changed();
+            }
+        }
         if profile_changed {
             self.schedule_current_profile_apply();
         }
@@ -2178,6 +2292,13 @@ impl AudioOrbitApp {
                             .text("Silence threshold seconds"),
                     )
                     .changed();
+                profile_changed |= ui
+                    .add(
+                        egui::Slider::new(&mut profile.settings.silence_level_threshold_percent, 1u8..=20u8)
+                            .text("Silence level threshold (%)"),
+                    )
+                    .on_hover_text("Audio below this level is treated as silence, so low noise floors can be skipped too.")
+                    .changed();
             }
         }
         if profile_changed {
@@ -2296,7 +2417,19 @@ impl AudioOrbitApp {
         ui.label(format!("Version: v{}", env!("CARGO_PKG_VERSION")));
         ui.label("Creator: Zoltán Rózsa");
         ui.label("License: GNU Affero General Public License v3.0 (AGPL-3.0)");
-        ui.small("This app stores its portable state next to the executable in audio-orbit-data.");
+        ui.small("This app stores its portable state next to the executable in .audio-orbit-data.");
+
+        ui.add_space(10.0);
+        ui.heading("Keyboard shortcuts");
+        ui.small("AIMP-style in-app controls are available while no text field is focused.");
+        ui.label("Space — Play / pause");
+        ui.label("Enter — Play selected track");
+        ui.label("S — Stop");
+        ui.label("Ctrl + Left / Ctrl + Right — Previous / next track");
+        ui.label("Ctrl + F — Show or hide track search");
+        ui.label("M — Player-only / full layout");
+        ui.label("Ctrl + L — Show or hide Library panel");
+        ui.label("Ctrl + P — Show or hide Sound profiles panel");
     }
 
     fn render_status_panel(&mut self, ui: &mut egui::Ui) {
@@ -2446,12 +2579,12 @@ fn draw_waveform_seek(ui: &mut egui::Ui, waveform: &[f32], progress: f32, label:
 
     let progress = progress.clamp(0.0, 1.0);
     let progress_x = rect.left() + rect.width() * progress;
-    let target_points = (rect.width() / 4.0).round().clamp(48.0, 260.0) as usize;
+    let target_points = (rect.width() / 2.2).round().clamp(96.0, 1400.0) as usize;
     let step = (waveform.len() as f32 / target_points.max(1) as f32).ceil().max(1.0) as usize;
     let rendered_points = (waveform.len() + step - 1) / step;
-    let gap = 2.0;
+    let gap = 1.25;
     let bar_width = ((rect.width() - gap * rendered_points.saturating_sub(1) as f32) / rendered_points.max(1) as f32)
-        .clamp(2.0, 5.0);
+        .clamp(1.1, 2.8);
 
     for (bar_index, chunk) in waveform.chunks(step).enumerate() {
         let value = chunk

@@ -85,7 +85,7 @@ Recommended layout:
 ```text
 audio-orbit/
 ├─ audio-orbit.exe
-└─ audio-orbit-data/
+└─ .audio-orbit-data/
    ├─ state.json
    └─ update/
 ```
@@ -163,7 +163,7 @@ If an update is available, Audio Orbit can replace its current executable and re
 Audio Orbit stores app data next to the executable:
 
 ```text
-audio-orbit-data/state.json
+.audio-orbit-data/state.json
 ```
 
 This keeps settings portable across version updates when the new executable replaces the old one in the same folder.

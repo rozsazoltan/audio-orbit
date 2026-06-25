@@ -37,6 +37,8 @@ pub struct DspSettings {
     pub skip_silence_enabled: bool,
     #[serde(default = "default_silence_threshold_seconds")]
     pub silence_threshold_seconds: u8,
+    #[serde(default = "default_silence_level_threshold_percent")]
+    pub silence_level_threshold_percent: u8,
 }
 
 impl Default for DspSettings {
@@ -51,6 +53,7 @@ impl Default for DspSettings {
             mode: OrbitMode::SmoothStereoOrbit,
             skip_silence_enabled: false,
             silence_threshold_seconds: default_silence_threshold_seconds(),
+            silence_level_threshold_percent: default_silence_level_threshold_percent(),
         }
     }
 }
@@ -61,6 +64,10 @@ fn default_orbit_enabled() -> bool {
 
 fn default_silence_threshold_seconds() -> u8 {
     3
+}
+
+fn default_silence_level_threshold_percent() -> u8 {
+    1
 }
 
 #[derive(Clone, Debug)]
@@ -75,8 +82,7 @@ pub struct RenderInfo {
 const BASE_ORBIT_RATE_HZ: f32 = 0.20;
 const MAX_STEREO_DELAY_SECONDS: f32 = 0.00085;
 const MAX_SURROUND_DELAY_SECONDS: f32 = 0.00165;
-const SILENCE_FLOOR: f32 = 0.0035;
-const WAVEFORM_POINTS: usize = 160;
+const WAVEFORM_POINTS: usize = 2048;
 
 pub fn render_orbit_to_stereo(
     input_samples: &[f32],
@@ -92,6 +98,7 @@ pub fn render_orbit_to_stereo(
     let waveform = waveform_peaks(&mono, WAVEFORM_POINTS);
 
     let output_level = settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
+    let silence_floor = silence_floor_from_percent(settings.silence_level_threshold_percent);
 
     if !settings.orbit_enabled {
         let (output, rendered_duration_seconds) = render_plain_stereo(
@@ -103,6 +110,7 @@ pub fn render_orbit_to_stereo(
             output_level,
             settings.skip_silence_enabled,
             settings.silence_threshold_seconds,
+            silence_floor,
         );
 
         let original_duration_seconds = if sample_rate == 0 {
@@ -144,7 +152,7 @@ pub fn render_orbit_to_stereo(
 
     for frame_index in start_frame..frame_count {
         let source_sample = mono[frame_index];
-        let is_silent = source_sample.abs() <= SILENCE_FLOOR;
+        let is_silent = source_sample.abs() <= silence_floor;
         if is_silent {
             consecutive_silent_frames += 1;
         } else {
@@ -225,6 +233,10 @@ pub fn render_orbit_to_stereo(
     )
 }
 
+fn silence_floor_from_percent(percent: u8) -> f32 {
+    percent.clamp(1, 20) as f32 / 100.0
+}
+
 fn render_plain_stereo(
     input_samples: &[f32],
     channels: usize,
@@ -234,6 +246,7 @@ fn render_plain_stereo(
     output_level: f32,
     skip_silence_enabled: bool,
     silence_threshold_seconds: u8,
+    silence_floor: f32,
 ) -> (Vec<f32>, f32) {
     let frame_count = mono.len();
     let silence_limit = silence_threshold_seconds.max(1) as usize * sample_rate.max(1) as usize;
@@ -242,7 +255,7 @@ fn render_plain_stereo(
 
     for frame_index in start_frame..frame_count {
         let source_sample = mono[frame_index];
-        let is_silent = source_sample.abs() <= SILENCE_FLOOR;
+        let is_silent = source_sample.abs() <= silence_floor;
         if is_silent {
             consecutive_silent_frames += 1;
         } else {

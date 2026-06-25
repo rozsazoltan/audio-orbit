@@ -429,7 +429,7 @@ impl Default for SavedState {
 pub fn app_data_dir() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join("audio-orbit-data")))
+        .and_then(|path| path.parent().map(|parent| parent.join(".audio-orbit-data")))
 }
 
 pub fn state_path() -> Option<PathBuf> {

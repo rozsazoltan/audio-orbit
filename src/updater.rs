@@ -106,7 +106,7 @@ pub fn install_update(check: &UpdateCheck) -> Result<()> {
     let current_exe = env::current_exe().context("failed to resolve current executable path")?;
     let update_dir = current_exe
         .parent()
-        .map(|parent| parent.join("audio-orbit-data").join("update"))
+        .map(|parent| parent.join(".audio-orbit-data").join("update"))
         .unwrap_or_else(|| env::temp_dir().join("audio-orbit-update"));
     fs::create_dir_all(&update_dir)
         .with_context(|| format!("failed to create update folder: {}", update_dir.display()))?;
