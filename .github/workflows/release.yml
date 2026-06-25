@@ -104,7 +104,14 @@ jobs:
               $ManifestVersionMatch.Groups["patch"].Value
 
             $Manifest = Get-Content $ManifestPath -Raw
-            $Manifest = [regex]::Replace($Manifest, 'version="[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"', "version=`"$ManifestVersion`"", 1)
+            $ManifestIdentityPattern = '(?s)(<assemblyIdentity\b(?=[^>]*\bname="AudioOrbit")[^>]*?\bversion=")[^"]+(")'
+
+            if (-not [regex]::IsMatch($Manifest, $ManifestIdentityPattern)) {
+              Write-Error "Could not find the AudioOrbit assemblyIdentity version in $ManifestPath."
+              exit 1
+            }
+
+            $Manifest = [regex]::Replace($Manifest, $ManifestIdentityPattern, "`${1}$ManifestVersion`${2}", 1)
             Set-Content -Path $ManifestPath -Value $Manifest -NoNewline
           }
 
