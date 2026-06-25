@@ -179,10 +179,10 @@ impl Playlist {
             return;
         }
 
-        let root = self.source_folder.as_deref();
+        let root = self.source_folder.clone();
         let folder_depth = self.folder_depth;
         for path in files {
-            self.add_track_path(path, root, folder_depth);
+            self.add_track_path(path, root.as_deref(), folder_depth);
         }
         self.sort_tracks();
     }
@@ -197,11 +197,11 @@ impl Playlist {
     }
 
     pub fn replace_tracks_from_files(&mut self, files: Vec<PathBuf>) {
-        let root = self.source_folder.as_deref();
+        let root = self.source_folder.clone();
         let folder_depth = self.folder_depth;
         self.tracks = files
             .into_iter()
-            .map(|path| Track::from_path(path, root, folder_depth))
+            .map(|path| Track::from_path(path, root.as_deref(), folder_depth))
             .collect();
         self.sort_tracks();
         self.ensure_selected_group_exists();
