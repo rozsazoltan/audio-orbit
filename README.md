@@ -1,110 +1,189 @@
-# Audio Orbit
+# audio-orbit
 
-Audio Orbit is a Windows desktop music player with playlist management, local folder scanning, and headphone-focused orbit-style DSP effects.
+`audio-orbit` is a lightweight Windows music player for local audio libraries, folder-based playlists, smooth crossfade playback, silence skipping, and headphone-friendly orbit-style stereo movement.
 
-It does not modify the Windows system volume. Audio Orbit loads local audio files, decodes them, processes the audio samples, and plays the processed stereo output.
+It is designed for people who keep music in local folders and want an AIMP-like desktop player with portable app data, playlist backups, global media keys, release updates, and simple spatial stereo controls.
 
-## Features
+- [What it does](#what-it-does)
+  - [Local music libraries](#local-music-libraries)
+  - [Playback](#playback)
+  - [Sound profiles](#sound-profiles)
+  - [Backups](#backups)
+  - [Updates](#updates)
+- [Get started](#get-started)
+- [Usage](#usage)
+  - [Create a folder playlist](#create-a-folder-playlist)
+  - [Play music](#play-music)
+  - [Use repeat modes](#use-repeat-modes)
+  - [Search tracks](#search-tracks)
+  - [Manage Favorites](#manage-favorites)
+  - [Export and import backups](#export-and-import-backups)
+  - [Check for updates](#check-for-updates)
+- [Data location](#data-location)
+- [Known limitations](#known-limitations)
+- [Contributing](#contributing)
 
-- Local music playback from files and folder-based libraries.
-- Folder playlists with configurable grouping depth, for example `D:\mp3\Artist\Album\song.mp3` grouped as `Artist / Album` when depth is `2`.
-- Manual playlists and a built-in non-deletable Favorites playlist.
-- Track double-click playback.
-- Previous, play/pause, stop, next, auto-next, optional crossfade mixing, and clickable seek waveform.
-- Track metadata display: duration, sample rate, bitrate, channel count, and file size when available.
-- Waveform-style progress display.
-- Track context menu with:
-  - play now,
-  - show file in File Explorer,
-  - add to playlist,
-  - remove from playlist,
-  - delete from disk.
-- Sound profiles with live re-rendering from the current playback position.
-- Smooth stereo orbit and experimental virtual 8-direction headphone orbit.
-- Optional long-silence skipping, such as skipping silence after 3 seconds.
-- Optional AIMP-style crossfade: mix the end of one track into the start of the next for a configurable number of seconds.
-- Output device refresh and change detection.
-- Full app state backup/export and import using a compressed ZIP file.
-- Fixed app data location for upgrades.
-- GitHub release update check and Windows self-update support.
-- Prerelease update checking is available but disabled by default.
-- UI icons are rendered from Lucide icons through the bundled Rust `lucide-icons` font.
+## What it does
 
-## Playlist types
+Audio Orbit plays local music files from manual playlists or scanner-owned folder playlists. It can group a folder library by subfolder depth, so a structure such as `D:\Music\Artist\Album\song.mp3` can be browsed as `Artist / Album`.
 
-Audio Orbit has three playlist types:
+### Local music libraries
 
-- Favorites: built-in, cannot be deleted, tracks can be added with the Lucide heart button.
-- Manual playlist: editable playlist, tracks can be added manually.
-- Folder playlist: scanner-owned playlist generated from a folder. Tracks are updated by rescanning the folder, not by manual add.
+Folder playlists are created from a selected directory. You choose how many folder levels should be used for grouping, and Audio Orbit scans supported audio files under that folder.
 
-## Playback settings
+Folder playlists are scanner-owned. You do not manually add individual tracks to them; instead, you add files to the folder and rescan. Manual playlists and Favorites can receive individual tracks.
 
-Crossfade can be enabled from the top player controls. When enabled, Audio Orbit starts the next track before the current track ends and fades the two tracks into each other for the configured number of seconds. It applies to automatic next-track playback and manual Next when a track is currently playing.
+### Playback
 
-## Sound profiles
+Audio Orbit supports common desktop-player behavior:
 
-Sound profile changes are applied without restarting the track. Internally, Audio Orbit re-renders the current file from the current playback position with the new DSP settings.
+- double-click a track to play it
+- seek by clicking the waveform progress bar
+- use keyboard media keys for play/pause, stop, previous, and next
+- automatically continue to the next track
+- crossfade tracks with configurable overlap seconds
+- skip long silence with configurable threshold seconds
+- repeat the current track or a selected set of tracks
 
-The virtual 8-direction mode is a headphone illusion using stereo panning, delay, crossfeed, and front/back tone cues. It is not true Dolby Atmos, real HRTF surround, or native multichannel output.
+Crossfade is an overlap mix: the current track fades out while the next track fades in. The visible track switch happens halfway through the crossfade, so a long mix does not feel like an abrupt early track change.
 
-## Backups
+### Sound profiles
 
-Backups are ZIP files containing Audio Orbit state, including playlists, profiles, Favorites, selected settings, and update preferences.
+Sound profiles store DSP settings such as orbit mode, output level, stereo width, orbit speed, motion smoothness, and surround cue strength.
 
-Backups store references to music file paths. They do not copy your actual music files into the backup.
+Profile changes are applied after the UI settles, reducing playback lag while sliders are being moved.
 
-## App data location
+### Backups
 
-Audio Orbit stores its app state under the platform app data directory resolved by `directories::ProjectDirs`.
+Backups are ZIP files containing the full app state:
 
-On Windows this is usually under the user's local app data folder, so app updates can replace the executable without losing library state.
+- music folder playlist definitions
+- manual playlists
+- Favorites
+- selected playlist and profile
+- playback settings
+- repeat settings
+- crossfade settings
+- silence skip settings
+- update settings
+- UI layout settings
 
-## Updates
+Audio files themselves are not embedded in the backup. The backup stores library and playlist state, not your music collection.
 
-The app checks GitHub Releases from:
+### Updates
 
-```text
-https://github.com/rozsazoltan/audio-orbit
-```
+Audio Orbit can check GitHub releases for new Windows executable builds. Stable releases are checked by default. Prerelease watching can be enabled in the release watcher.
 
-Stable releases are checked by default. Prereleases are ignored unless the prerelease option is enabled in the app.
+To avoid GitHub rate limiting, update checks are limited per app session.
 
-## Build
+## Get started
 
-```powershell
-cargo build --release
-```
+Download the Windows executable from the GitHub Releases page and place it in a folder where Audio Orbit can store its portable data next to the executable.
 
-## Release
-
-The GitHub Actions release workflow accepts a plain version input such as:
-
-```text
-0.5.0
-```
-
-The workflow turns it into:
+Recommended layout:
 
 ```text
-v0.5.0
+audio-orbit/
+├─ audio-orbit.exe
+└─ audio-orbit-data/
+   ├─ state.json
+   └─ update/
 ```
 
-Before building, the workflow verifies that `Cargo.toml` already has the same version. It does not rewrite version files; update the project version manually before starting a release.
+Run `audio-orbit.exe`, add a folder playlist, and start playback from the track list.
 
-Then it uploads a Windows x64 executable release asset.
+## Usage
 
+### Create a folder playlist
 
-## Keyboard media keys
+Use **Add folder...** from the Library panel.
 
-On Windows, Audio Orbit registers global keyboard media keys for Play/Pause, Stop, Previous Track, and Next Track, so supported keyboards can control playback while the app is in the background. If another media app already owns one of these keys, Audio Orbit reports partial availability in the status bar.
+Choose the music root folder, enter a playlist name, and set the grouping depth.
 
+Example:
 
-## Portable data and updates
+```text
+D:\Music\Artist A\Album A\song.mp3
+D:\Music\Artist A\Album B\song.mp3
+D:\Music\Artist B\Album A\song.mp3
+```
 
-Audio Orbit stores its application state next to the executable under `audio-orbit-data/state.json`.
-When an older AppData-based state file is found, it is migrated into the portable data folder on first launch.
+With grouping depth `2`, Audio Orbit groups this as:
 
-The release watcher checks GitHub releases from inside the app. Stable release checks use the latest-release endpoint; prerelease-aware checks scan releases. To avoid GitHub API rate limits, the app allows at most two release checks per app session.
+```text
+Artist A / Album A
+Artist A / Album B
+Artist B / Album A
+```
 
-When installing an update on Windows, Audio Orbit downloads the new executable to `audio-orbit-data/update`, closes itself, replaces the currently running executable, and starts the updated executable again.
+Folder groups can be collapsed or expanded in the track list.
+
+### Play music
+
+Use the center track list to browse tracks. Double-click a track to start it immediately.
+
+The top player bar shows the current track, playback metadata, waveform progress, and playback controls.
+
+### Use repeat modes
+
+Audio Orbit supports three repeat modes:
+
+| Mode | Behavior |
+|---|---|
+| Repeat off | Normal playback order. |
+| Repeat track | Repeats the current track. |
+| Repeat selection | Repeats only the checked tracks in playlist order. |
+
+When repeat selection is active, checkboxes appear in the track list so you can choose the tracks that should loop.
+
+### Search tracks
+
+Use the search button in the track list header to reveal search. Search filters by track title, folder group, and file path. Use **Next result** to jump between matches.
+
+### Manage Favorites
+
+Use the heart button next to a track to add or remove it from Favorites. Favorites is a built-in playlist and cannot be deleted.
+
+### Export and import backups
+
+Open **Settings**, then use **Backup and data**.
+
+Export creates a compressed ZIP backup of the full app state. Import restores the state from a ZIP backup.
+
+### Check for updates
+
+Open **Settings** or **Release watcher**.
+
+By default, only stable releases are checked. Enable prerelease watching when you want to include prerelease builds.
+
+If an update is available, Audio Orbit can replace its current executable and restart itself.
+
+## Data location
+
+Audio Orbit stores app data next to the executable:
+
+```text
+audio-orbit-data/state.json
+```
+
+This keeps settings portable across version updates when the new executable replaces the old one in the same folder.
+
+## Known limitations
+
+Audio Orbit is a local music player, not a system-wide Windows audio processor. It plays files through the app and applies its own playback DSP to those files.
+
+The orbit effect is headphone-friendly stereo processing, not true HRTF-based 3D surround virtualization.
+
+Support for audio formats depends on the bundled Rust audio decoding stack. Common formats such as MP3, WAV, FLAC, OGG, OPUS, M4A, MP4, and AAC are intended to work, but every possible codec/container combination cannot be guaranteed without an FFmpeg backend.
+
+## Contributing
+
+Development notes, local build steps, release workflow notes, and contribution guidance live in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License & Acknowledgments
+
+Audio Orbit is open source and released under the [GNU Affero General Public License v3.0 (AGPL-3.0)](https://www.gnu.org/licenses/agpl-3.0.html).
+
+The app uses Rust ecosystem libraries for the desktop UI, audio decoding/playback, metadata reading, ZIP backups, HTTP update checks, and Lucide icons.
+
+Copyright (C) 2020–present [Zoltán Rózsa](https://github.com/rozsazoltan)

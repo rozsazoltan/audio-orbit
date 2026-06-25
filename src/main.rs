@@ -54,6 +54,16 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+#[derive(Clone, Debug)]
+struct PendingTrackSwitch {
+    switch_at: Instant,
+    started_at: Instant,
+    previous_position: f32,
+    previous_duration: f32,
+    index: Option<usize>,
+    info: PlaybackInfo,
+}
+
 struct AudioOrbitApp {
     player: Option<AudioPlayer>,
     state: SavedState,
@@ -65,6 +75,8 @@ struct AudioOrbitApp {
     status_message: String,
     error_message: Option<String>,
     crossfade_started_for_path: Option<PathBuf>,
+    pending_track_switch: Option<PendingTrackSwitch>,
+    pending_profile_apply_at: Option<Instant>,
     show_folder_import_modal: bool,
     show_settings_modal: bool,
     show_release_modal: bool,
@@ -115,6 +127,8 @@ impl AudioOrbitApp {
                     status_message: format!("Ready. Output device: {output_name}"),
                     error_message: None,
                     crossfade_started_for_path: None,
+                    pending_track_switch: None,
+                    pending_profile_apply_at: None,
                     show_folder_import_modal: false,
                     show_settings_modal: false,
                     show_release_modal: false,
@@ -150,6 +164,8 @@ impl AudioOrbitApp {
                 status_message: "No audio output device is available.".to_owned(),
                 error_message: Some(error.to_string()),
                 crossfade_started_for_path: None,
+                pending_track_switch: None,
+                pending_profile_apply_at: None,
                 show_folder_import_modal: false,
                 show_settings_modal: false,
                 show_release_modal: false,
@@ -187,6 +203,19 @@ impl AudioOrbitApp {
 
     fn current_playlist_mut(&mut self) -> Option<&mut Playlist> {
         self.state.playlists.get_mut(self.state.selected_playlist_index)
+    }
+
+    fn select_playlist(&mut self, index: usize) {
+        if index >= self.state.playlists.len() {
+            return;
+        }
+
+        self.state.selected_playlist_index = index;
+        self.selected_track_indexes.clear();
+        self.selected_track_index = self.eligible_track_indexes().first().copied();
+        self.collapsed_groups.clear();
+        self.search_cursor = 0;
+        self.save_state_silently();
     }
 
     fn current_settings(&self) -> DspSettings {
@@ -512,7 +541,7 @@ impl AudioOrbitApp {
         self.state.selected_profile_index = self.state.selected_profile_index.saturating_sub(1);
         self.status_message = "Removed sound profile.".to_owned();
         self.save_state_silently();
-        self.apply_current_profile_live();
+        self.schedule_current_profile_apply();
     }
 
     fn play_selected_or_first_track(&mut self) {
@@ -540,6 +569,14 @@ impl AudioOrbitApp {
         crossfade_seconds: f32,
     ) {
         let settings = self.current_settings();
+        let crossfade_ui_delay = if crossfade_seconds > 0.05 && self.active_track_path.is_some() {
+            let previous_position = self.displayed_playback_position_seconds();
+            let previous_duration = self.displayed_playback_duration_seconds();
+            Some((previous_position, previous_duration, Instant::now()))
+        } else {
+            None
+        };
+
         let Some(player) = &mut self.player else {
             self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
             return;
@@ -561,24 +598,43 @@ impl AudioOrbitApp {
         match result {
             Ok(info) => {
                 let mode_label = settings.mode.label();
-                self.status_message = if crossfade_seconds > 0.05 {
-                    format!(
-                        "Crossfading to {} through {}.",
+                if let Some((previous_position, previous_duration, started_at)) = crossfade_ui_delay {
+                    let switch_after = Duration::from_secs_f32((crossfade_seconds * 0.5).max(0.1));
+                    self.pending_track_switch = Some(PendingTrackSwitch {
+                        switch_at: started_at + switch_after,
+                        started_at,
+                        previous_position,
+                        previous_duration,
+                        index,
+                        info: info.clone(),
+                    });
+                    self.selected_track_index = index;
+                    self.status_message = format!(
+                        "Crossfading to {} through {}; display switches halfway through the mix.",
                         display_file_name(&info.path),
                         mode_label
-                    )
+                    );
                 } else {
-                    format!(
-                        "Playing {} through {}.",
-                        display_file_name(&info.path),
-                        mode_label
-                    )
-                };
-                self.active_track_index = index;
-                self.active_track_path = Some(info.path.clone());
-                self.crossfade_started_for_path = None;
-                self.store_playback_metadata(&info);
-                self.last_playback = Some(info);
+                    self.status_message = if crossfade_seconds > 0.05 {
+                        format!(
+                            "Crossfading to {} through {}.",
+                            display_file_name(&info.path),
+                            mode_label
+                        )
+                    } else {
+                        format!(
+                            "Playing {} through {}.",
+                            display_file_name(&info.path),
+                            mode_label
+                        )
+                    };
+                    self.active_track_index = index;
+                    self.active_track_path = Some(info.path.clone());
+                    self.pending_track_switch = None;
+                    self.crossfade_started_for_path = None;
+                    self.store_playback_metadata(&info);
+                    self.last_playback = Some(info);
+                }
             }
             Err(error) => {
                 self.error_message = Some(error.to_string());
@@ -688,6 +744,24 @@ impl AudioOrbitApp {
         }
     }
 
+    fn schedule_current_profile_apply(&mut self) {
+        self.pending_profile_apply_at = Some(Instant::now() + Duration::from_millis(450));
+    }
+
+    fn process_pending_profile_apply(&mut self) {
+        let Some(apply_at) = self.pending_profile_apply_at else {
+            return;
+        };
+
+        if Instant::now() < apply_at {
+            return;
+        }
+
+        self.pending_profile_apply_at = None;
+        self.save_state_silently();
+        self.apply_current_profile_live();
+    }
+
     fn apply_current_profile_live(&mut self) {
         let settings = self.current_settings();
         let Some(player) = &mut self.player else {
@@ -700,7 +774,7 @@ impl AudioOrbitApp {
 
         match player.apply_settings_to_current(settings) {
             Ok(Some(info)) => {
-                self.status_message = "Applied sound profile without restarting the track.".to_owned();
+                self.status_message = "Applied sound profile after settings settled.".to_owned();
                 self.store_playback_metadata(&info);
                 self.last_playback = Some(info);
                 self.error_message = None;
@@ -710,6 +784,48 @@ impl AudioOrbitApp {
                 self.error_message = Some(error.to_string());
             }
         }
+    }
+
+    fn process_pending_track_switch(&mut self) {
+        let Some(pending) = self.pending_track_switch.clone() else {
+            return;
+        };
+
+        if Instant::now() < pending.switch_at {
+            return;
+        }
+
+        self.pending_track_switch = None;
+        self.active_track_index = pending.index;
+        self.active_track_path = Some(pending.info.path.clone());
+        self.selected_track_index = pending.index;
+        self.crossfade_started_for_path = None;
+        self.store_playback_metadata(&pending.info);
+        self.last_playback = Some(pending.info);
+    }
+
+    fn displayed_playback_position_seconds(&self) -> f32 {
+        if let Some(pending) = &self.pending_track_switch {
+            let elapsed = pending.started_at.elapsed().as_secs_f32();
+            return (pending.previous_position + elapsed).min(pending.previous_duration);
+        }
+
+        self.player
+            .as_ref()
+            .map(AudioPlayer::playback_position_seconds)
+            .unwrap_or(0.0)
+    }
+
+    fn displayed_playback_duration_seconds(&self) -> f32 {
+        if let Some(pending) = &self.pending_track_switch {
+            return pending.previous_duration;
+        }
+
+        self.player
+            .as_ref()
+            .and_then(AudioPlayer::playback_duration_seconds)
+            .or_else(|| self.last_playback.as_ref().map(|playback| playback.original_duration_seconds))
+            .unwrap_or(0.0)
     }
 
     fn process_media_key_events(&mut self) {
@@ -758,6 +874,7 @@ impl AudioOrbitApp {
 
         self.active_track_index = None;
         self.active_track_path = None;
+        self.pending_track_switch = None;
         self.crossfade_started_for_path = None;
         self.status_message = "Playback stopped.".to_owned();
     }
@@ -1001,6 +1118,7 @@ impl AudioOrbitApp {
         }
 
         let playlist_name = playlist.name.clone();
+        let selected_playlist_label = format!("{} {}", playlist.kind.icon(), playlist_name);
         if playlist.add_track_path(path, None, 0) {
             self.status_message = format!("Added track to {playlist_name}.");
         } else {
@@ -1088,6 +1206,8 @@ impl eframe::App for AudioOrbitApp {
         context.request_repaint_after(Duration::from_millis(33));
 
         self.process_media_key_events();
+        self.process_pending_track_switch();
+        self.process_pending_profile_apply();
         self.update_playback_status();
         self.poll_output_device_change();
 
@@ -1203,17 +1323,8 @@ impl AudioOrbitApp {
             });
         });
 
-        let position = self
-            .player
-            .as_ref()
-            .map(AudioPlayer::playback_position_seconds)
-            .unwrap_or(0.0);
-        let duration = self
-            .player
-            .as_ref()
-            .and_then(AudioPlayer::playback_duration_seconds)
-            .or_else(|| self.last_playback.as_ref().map(|playback| playback.original_duration_seconds))
-            .unwrap_or(0.0);
+        let position = self.displayed_playback_position_seconds();
+        let duration = self.displayed_playback_duration_seconds();
         let progress = if duration > 0.0 {
             (position / duration).clamp(0.0, 1.0)
         } else {
@@ -1343,8 +1454,7 @@ impl AudioOrbitApp {
         }
 
         if profile_changed {
-            self.save_state_silently();
-            self.apply_current_profile_live();
+            self.schedule_current_profile_apply();
         }
     }
 
@@ -1363,9 +1473,15 @@ impl AudioOrbitApp {
 
                     let row = ui.horizontal(|ui| {
                         let mut clicked_row = false;
+                        let action_width = if show_actions && playlist.kind != PlaylistKind::Favorites { 88.0 } else { 0.0 };
+                        let name_width = (ui.available_width() - action_width).max(120.0);
+
                         if self.editing_playlist_index == Some(index) {
                             let mut next_name = playlist.name.clone();
-                            let response = ui.text_edit_singleline(&mut next_name);
+                            let response = ui.add_sized(
+                                egui::vec2(name_width, 22.0),
+                                egui::TextEdit::singleline(&mut next_name),
+                            );
                             if response.changed() {
                                 if let Some(target) = self.state.playlists.get_mut(index) {
                                     if target.kind != PlaylistKind::Favorites {
@@ -1378,37 +1494,36 @@ impl AudioOrbitApp {
                                 self.editing_playlist_index = None;
                             }
                         } else {
-                            ui.vertical(|ui| {
-                                let label = format!("{} {}", playlist.kind.icon(), playlist.name);
-                                if ui.selectable_label(selected, label).clicked() {
-                                    clicked_row = true;
-                                }
-                                ui.small(format!("{} track(s)", playlist.tracks.len()));
-                            });
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(name_width, 42.0),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
+                                    let label = format!("{} {}", playlist.kind.icon(), playlist.name);
+                                    if ui.selectable_label(selected, label).clicked() {
+                                        clicked_row = true;
+                                    }
+                                    ui.small(format!("{} track(s)", playlist.tracks.len()));
+                                },
+                            );
                         }
 
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if show_actions && playlist.kind != PlaylistKind::Favorites {
-                                if ui.small_button(ui_icons::icon(Icon::ArrowDown)).on_hover_text("Move down").clicked() {
-                                    self.move_playlist(index, 1);
-                                }
-                                if ui.small_button(ui_icons::icon(Icon::ArrowUp)).on_hover_text("Move up").clicked() {
-                                    self.move_playlist(index, -1);
-                                }
-                                if ui.small_button(ui_icons::icon(Icon::Pencil)).on_hover_text("Rename").clicked() {
-                                    self.editing_playlist_index = Some(index);
-                                }
+                        if show_actions && playlist.kind != PlaylistKind::Favorites {
+                            if ui.small_button(ui_icons::icon(Icon::Pencil)).on_hover_text("Rename").clicked() {
+                                self.editing_playlist_index = Some(index);
                             }
-                        });
+                            if ui.small_button(ui_icons::icon(Icon::ArrowUp)).on_hover_text("Move up").clicked() {
+                                self.move_playlist(index, -1);
+                            }
+                            if ui.small_button(ui_icons::icon(Icon::ArrowDown)).on_hover_text("Move down").clicked() {
+                                self.move_playlist(index, 1);
+                            }
+                        }
 
                         clicked_row
                     });
 
                     if row.inner {
-                        self.state.selected_playlist_index = index;
-                        self.selected_track_indexes.clear();
-                        self.selected_track_index = self.eligible_track_indexes().first().copied();
-                        self.save_state_silently();
+                        self.select_playlist(index);
                     }
                 }
             });
@@ -1513,6 +1628,7 @@ impl AudioOrbitApp {
         };
 
         let playlist_name = playlist.name.clone();
+        let selected_playlist_label = format!("{} {}", playlist.kind.icon(), playlist_name);
         let selected_group_label = playlist.selected_group_label();
         let total_count = playlist.tracks.len();
         let show_group_headers = playlist.selected_group.is_none();
@@ -1520,8 +1636,33 @@ impl AudioOrbitApp {
         let visible_indexes = self.visible_track_indexes();
         let visible_count = visible_indexes.len();
 
+        let playlist_options: Vec<(usize, String)> = self
+            .state
+            .playlists
+            .iter()
+            .enumerate()
+            .map(|(index, playlist)| {
+                (
+                    index,
+                    format!("{} {}", playlist.kind.icon(), playlist.name),
+                )
+            })
+            .collect();
+
         ui.horizontal(|ui| {
-            ui.heading(format!("{} {}", playlist.kind.icon(), playlist_name));
+            egui::ComboBox::from_id_salt("track_panel_playlist_selector")
+                .selected_text(selected_playlist_label)
+                .width(260.0)
+                .show_ui(ui, |ui| {
+                    for (index, label) in playlist_options {
+                        if ui
+                            .selectable_label(self.state.selected_playlist_index == index, label)
+                            .clicked()
+                        {
+                            self.select_playlist(index);
+                        }
+                    }
+                });
             ui.label(format!("{visible_count}/{total_count} tracks · {selected_group_label}"));
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1664,7 +1805,11 @@ impl AudioOrbitApp {
                     } else {
                         egui::RichText::new("♡")
                     };
-                    if ui.button(heart).on_hover_text("Toggle favorite").clicked() {
+                    if ui
+                        .add_sized(egui::vec2(28.0, 24.0), egui::Button::new(heart))
+                        .on_hover_text("Toggle favorite")
+                        .clicked()
+                    {
                         self.toggle_favorite(path.clone());
                     }
 
@@ -1755,7 +1900,7 @@ impl AudioOrbitApp {
             });
         if previous_profile_index != self.state.selected_profile_index {
             self.save_state_silently();
-            self.apply_current_profile_live();
+            self.schedule_current_profile_apply();
         }
 
         ui.horizontal(|ui| {
@@ -1772,7 +1917,7 @@ impl AudioOrbitApp {
             }
         });
 
-        ui.separator();
+        ui.add_space(8.0);
 
         let mut profile_changed = false;
         if let Some(profile) = self.state.profiles.get_mut(self.state.selected_profile_index) {
@@ -1781,7 +1926,7 @@ impl AudioOrbitApp {
                 profile_changed |= ui.text_edit_singleline(&mut profile.name).changed();
             }
 
-            ui.separator();
+            ui.add_space(6.0);
             ui.label("Orbit mode");
             profile_changed |= ui
                 .radio_value(
@@ -1799,7 +1944,7 @@ impl AudioOrbitApp {
                 .changed();
             ui.small(profile.settings.mode.description());
 
-            ui.separator();
+            ui.add_space(8.0);
             profile_changed |= ui
                 .add(
                     egui::Slider::new(&mut profile.settings.output_level_percent, 1u8..=100u8)
@@ -1834,8 +1979,7 @@ impl AudioOrbitApp {
         }
 
         if profile_changed {
-            self.save_state_silently();
-            self.apply_current_profile_live();
+            self.schedule_current_profile_apply();
         }
     }
 
@@ -1868,8 +2012,10 @@ impl AudioOrbitApp {
                         });
                     });
                     ui.small("Checks GitHub releases with a strict per-session limit to avoid API rate limiting.");
-                    ui.separator();
-                    self.render_update_settings_section(ui, false);
+                    ui.add_space(10.0);
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        self.render_update_settings_section(ui, false);
+                    });
                 });
             });
 
@@ -1906,13 +2052,29 @@ impl AudioOrbitApp {
                     egui::ScrollArea::vertical()
                         .max_height(560.0)
                         .show(ui, |ui| {
-                            self.render_playback_settings_section(ui);
-                            ui.separator();
-                            self.render_profile_panel(ui);
-                            ui.separator();
-                            self.render_backup_settings_section(ui);
-                            ui.separator();
-                            self.render_update_settings_section(ui, true);
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                self.render_playback_settings_section(ui);
+                            });
+                            ui.add_space(12.0);
+
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                self.render_profile_panel(ui);
+                            });
+                            ui.add_space(12.0);
+
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                self.render_backup_settings_section(ui);
+                            });
+                            ui.add_space(12.0);
+
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                self.render_update_settings_section(ui, true);
+                            });
+                            ui.add_space(12.0);
+
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                self.render_about_section(ui);
+                            });
                         });
                 });
             });
@@ -1987,8 +2149,7 @@ impl AudioOrbitApp {
             }
         }
         if profile_changed {
-            self.save_state_silently();
-            self.apply_current_profile_live();
+            self.schedule_current_profile_apply();
         }
     }
 
@@ -2094,6 +2255,16 @@ impl AudioOrbitApp {
             ui.small(format!("Repository: {}", updater::repository_label()));
             ui.small("No release check has been run in this app session.");
         }
+    }
+
+    fn render_about_section(&mut self, ui: &mut egui::Ui) {
+        ui.heading("About Audio Orbit");
+        ui.small("Audio Orbit is a lightweight Windows music player focused on local libraries, folder-based playlists, smooth crossfade playback, silence skipping, and headphone-friendly orbit-style stereo movement.");
+        ui.add_space(8.0);
+        ui.label(format!("Version: v{}", env!("CARGO_PKG_VERSION")));
+        ui.label("Creator: Zoltán Rózsa");
+        ui.label("License: GNU Affero General Public License v3.0 (AGPL-3.0)");
+        ui.small("This app stores its portable state next to the executable in audio-orbit-data.");
     }
 
     fn render_status_panel(&mut self, ui: &mut egui::Ui) {
