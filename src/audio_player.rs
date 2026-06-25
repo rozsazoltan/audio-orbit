@@ -18,7 +18,6 @@ pub struct PlaybackInfo {
     pub rendered_duration_seconds: f32,
     pub input_channels: u16,
     pub sample_rate: u32,
-    pub output_samples: usize,
     pub size_bytes: Option<u64>,
     pub waveform: Vec<f32>,
 }
@@ -60,10 +59,6 @@ impl AudioPlayer {
 
     pub fn output_device_name(&self) -> &str {
         &self.output_device_name
-    }
-
-    pub fn play_file_with_orbit(&mut self, path: &Path, settings: DspSettings) -> Result<PlaybackInfo> {
-        self.play_file_with_orbit_from(path, settings, 0.0)
     }
 
     pub fn play_file_with_orbit_from(
@@ -309,7 +304,6 @@ fn playback_info(path: &Path, render_info: RenderInfo) -> PlaybackInfo {
         rendered_duration_seconds: render_info.rendered_duration_seconds,
         input_channels: render_info.input_channels,
         sample_rate: render_info.sample_rate,
-        output_samples: render_info.output_samples,
         size_bytes: fs::metadata(path).ok().map(|metadata| metadata.len()),
         waveform: render_info.waveform,
     }

@@ -16,7 +16,6 @@ const USER_AGENT: &str = "Audio-Orbit-Updater";
 pub struct UpdateCheck {
     pub current_version: String,
     pub latest_version: String,
-    pub release_url: String,
     pub asset_name: Option<String>,
     pub asset_download_url: Option<String>,
     pub is_update_available: bool,
@@ -26,7 +25,6 @@ pub struct UpdateCheck {
 #[derive(Debug, Deserialize)]
 struct GitHubRelease {
     tag_name: String,
-    html_url: String,
     draft: bool,
     prerelease: bool,
     assets: Vec<GitHubAsset>,
@@ -77,7 +75,6 @@ pub fn check_for_update(include_prereleases: bool) -> Result<UpdateCheck> {
     Ok(UpdateCheck {
         current_version,
         latest_version: latest_semver.to_string(),
-        release_url: latest_release.html_url,
         asset_name: asset.map(|asset| asset.name.clone()),
         asset_download_url: asset.map(|asset| asset.browser_download_url.clone()),
         is_update_available: latest_semver > current_semver,

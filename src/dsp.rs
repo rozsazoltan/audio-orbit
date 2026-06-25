@@ -62,7 +62,6 @@ pub struct RenderInfo {
     pub rendered_duration_seconds: f32,
     pub input_channels: u16,
     pub sample_rate: u32,
-    pub output_samples: usize,
     pub waveform: Vec<f32>,
 }
 
@@ -183,7 +182,6 @@ pub fn render_orbit_to_stereo(
             rendered_duration_seconds,
             input_channels,
             sample_rate,
-            output_samples: frame_count * 2,
             waveform,
         },
     )
