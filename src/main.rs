@@ -4,6 +4,7 @@ mod audio_player;
 mod config;
 mod dsp;
 mod icon;
+mod media_keys;
 mod ui_icons;
 mod updater;
 
@@ -23,6 +24,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::mpsc,
     time::{Duration, Instant},
 };
 
@@ -71,6 +73,8 @@ struct AudioOrbitApp {
     editing_playlist_index: Option<usize>,
     editing_profile_index: Option<usize>,
     last_update_check: Option<updater::UpdateCheck>,
+    media_key_receiver: Option<mpsc::Receiver<media_keys::MediaKeyEvent>>,
+    media_key_status: String,
 }
 
 impl AudioOrbitApp {
@@ -81,7 +85,7 @@ impl AudioOrbitApp {
         let pending_playlist_name = "Local music".to_owned();
         let current_output_name = current_default_output_device_name();
 
-        match AudioPlayer::new() {
+        let mut app = match AudioPlayer::new() {
             Ok(player) => {
                 let output_name = player.output_device_name().to_owned();
                 Self {
@@ -104,6 +108,8 @@ impl AudioOrbitApp {
                     editing_playlist_index: None,
                     editing_profile_index: None,
                     last_update_check: None,
+                    media_key_receiver: None,
+                    media_key_status: "Media keys: unavailable".to_owned(),
                 }
             }
             Err(error) => Self {
@@ -126,8 +132,15 @@ impl AudioOrbitApp {
                 editing_playlist_index: None,
                 editing_profile_index: None,
                 last_update_check: None,
+                media_key_receiver: None,
+                media_key_status: "Media keys: unavailable".to_owned(),
             },
-        }
+        };
+
+        let media_keys = media_keys::start_listener();
+        app.media_key_receiver = media_keys.receiver;
+        app.media_key_status = media_keys.status_message;
+        app
     }
 
     fn current_playlist(&self) -> Option<&Playlist> {
@@ -610,6 +623,45 @@ impl AudioOrbitApp {
         }
     }
 
+    fn process_media_key_events(&mut self) {
+        let events = match &self.media_key_receiver {
+            Some(receiver) => receiver.try_iter().collect::<Vec<_>>(),
+            None => return,
+        };
+
+        for event in events {
+            match event {
+                media_keys::MediaKeyEvent::Ready { registered, failed } => {
+                    self.media_key_status = media_key_status_message(&registered, &failed);
+                }
+                media_keys::MediaKeyEvent::Command(command) => {
+                    self.handle_media_key_command(command);
+                }
+            }
+        }
+    }
+
+    fn handle_media_key_command(&mut self, command: media_keys::MediaKeyCommand) {
+        match command {
+            media_keys::MediaKeyCommand::Previous => self.play_previous_track(),
+            media_keys::MediaKeyCommand::PlayPause => {
+                let is_active = self
+                    .player
+                    .as_ref()
+                    .map(|player| player.is_playing() || player.is_paused())
+                    .unwrap_or(false);
+
+                if is_active {
+                    self.pause_or_resume();
+                } else {
+                    self.play_selected_or_first_track();
+                }
+            }
+            media_keys::MediaKeyCommand::Stop => self.stop(),
+            media_keys::MediaKeyCommand::Next => self.play_next_track(),
+        }
+    }
+
     fn stop(&mut self) {
         if let Some(player) = &mut self.player {
             player.stop();
@@ -932,6 +984,7 @@ impl eframe::App for AudioOrbitApp {
         context.set_visuals(egui::Visuals::dark());
         context.request_repaint_after(Duration::from_millis(180));
 
+        self.process_media_key_events();
         self.update_playback_status();
         self.poll_output_device_change();
 
@@ -1560,6 +1613,8 @@ impl AudioOrbitApp {
     fn render_status_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(self.status_message.as_str());
+            ui.separator();
+            ui.small(self.media_key_status.as_str());
 
             if let Some(error_message) = &self.error_message {
                 ui.separator();
@@ -1623,6 +1678,27 @@ impl AudioOrbitApp {
 
         self.show_folder_import_modal = is_open;
     }
+}
+
+fn media_key_status_message(
+    registered: &[media_keys::MediaKeyCommand],
+    failed: &[media_keys::MediaKeyCommand],
+) -> String {
+    if registered.is_empty() {
+        return "Media keys: unavailable".to_owned();
+    }
+
+    if failed.is_empty() {
+        return "Media keys: enabled".to_owned();
+    }
+
+    let failed_labels = failed
+        .iter()
+        .map(|command| command.label())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!("Media keys: partially enabled; unavailable: {failed_labels}")
 }
 
 fn ensure_state_is_valid(state: &mut SavedState) {

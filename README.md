@@ -93,3 +93,8 @@ v0.5.0
 Before building, the workflow verifies that `Cargo.toml` already has the same version. It does not rewrite version files; update the project version manually before starting a release.
 
 Then it uploads a Windows x64 executable release asset.
+
+
+## Keyboard media keys
+
+On Windows, Audio Orbit registers global keyboard media keys for Play/Pause, Stop, Previous Track, and Next Track, so supported keyboards can control playback while the app is in the background. If another media app already owns one of these keys, Audio Orbit reports partial availability in the status bar.
