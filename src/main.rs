@@ -1196,7 +1196,6 @@ impl AudioOrbitApp {
         }
 
         let playlist_name = playlist.name.clone();
-        let selected_playlist_label = format!("{} {}", playlist.kind.icon(), playlist_name);
         if playlist.add_track_path(path, None, 0) {
             self.status_message = format!("Added track to {playlist_name}.");
         } else {
