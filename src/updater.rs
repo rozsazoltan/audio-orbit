@@ -5,7 +5,7 @@ use serde::Deserialize;
 use std::{
     env,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -104,6 +104,8 @@ pub fn install_update(check: &UpdateCheck) -> Result<()> {
     };
 
     let current_exe = env::current_exe().context("failed to resolve current executable path")?;
+    ensure_current_exe_can_be_replaced(&current_exe)?;
+
     let update_dir = current_exe
         .parent()
         .map(|parent| parent.join(".audio-orbit-data").join("update"))
@@ -136,35 +138,74 @@ pub fn install_update(check: &UpdateCheck) -> Result<()> {
 
 #[cfg(windows)]
 fn launch_windows_replacer(current_exe: &PathBuf, new_exe: &PathBuf) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
     let update_dir = new_exe
         .parent()
         .map(PathBuf::from)
         .unwrap_or_else(env::temp_dir);
-    let script = update_dir.join("audio-orbit-update.cmd");
+    let script = update_dir.join("audio-orbit-update.ps1");
     let script_contents = format!(
-        "@echo off\r\n\
-setlocal\r\n\
-set \"NEW_EXE={new_exe}\"\r\n\
-set \"CURRENT_EXE={current_exe}\"\r\n\
-for /L %%i in (1,1,30) do (\r\n\
-  copy /Y \"%NEW_EXE%\" \"%CURRENT_EXE%\" > nul 2>&1 && goto copied\r\n\
-  timeout /t 1 /nobreak > nul\r\n\
-)\r\n\
-exit /b 1\r\n\
-:copied\r\n\
-start \"\" \"%CURRENT_EXE%\"\r\n\
-del \"%NEW_EXE%\" > nul 2>&1\r\n\
-del \"%~f0\"\r\n",
-        new_exe = new_exe.display(),
-        current_exe = current_exe.display()
+        "$ErrorActionPreference = 'SilentlyContinue'\r\n\
+$newExe = '{new_exe}'\r\n\
+$currentExe = '{current_exe}'\r\n\
+for ($i = 0; $i -lt 40; $i++) {{\r\n\
+  try {{\r\n\
+    Copy-Item -LiteralPath $newExe -Destination $currentExe -Force -ErrorAction Stop\r\n\
+    Start-Process -FilePath $currentExe\r\n\
+    Remove-Item -LiteralPath $newExe -Force -ErrorAction SilentlyContinue\r\n\
+    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\r\n\
+    exit 0\r\n\
+  }} catch {{\r\n\
+    Start-Sleep -Milliseconds 500\r\n\
+  }}\r\n\
+}}\r\n\
+exit 1\r\n",
+        new_exe = powershell_single_quoted_path(new_exe),
+        current_exe = powershell_single_quoted_path(current_exe),
     );
     fs::write(&script, script_contents)
         .with_context(|| format!("failed to write updater script: {}", script.display()))?;
-    let script_string = script.to_string_lossy().to_string();
-    Command::new("cmd")
-        .args(["/C", "start", "", script_string.as_str()])
+
+    let script_path = script.to_string_lossy().to_string();
+    Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+            script_path.as_str(),
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
-        .context("failed to launch updater script")?;
+        .context("failed to launch hidden updater helper")?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn powershell_single_quoted_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\'', "''")
+}
+
+fn ensure_current_exe_can_be_replaced(current_exe: &Path) -> Result<()> {
+    let Some(exe_dir) = current_exe.parent() else {
+        anyhow::bail!("could not resolve the executable folder for update replacement");
+    };
+
+    let probe = exe_dir.join(".audio-orbit-update-write-test.tmp");
+    fs::write(&probe, b"write-test").with_context(|| {
+        format!(
+            "Audio Orbit cannot update itself because the executable folder is not writable: {}. Move the app to a user-writable folder or run the update with sufficient permissions.",
+            exe_dir.display()
+        )
+    })?;
+    let _ = fs::remove_file(probe);
     Ok(())
 }
 
@@ -176,8 +217,13 @@ fn launch_windows_replacer(_current_exe: &PathBuf, _new_exe: &PathBuf) -> Result
 pub fn open_releases_page() -> Result<()> {
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+
         Command::new("cmd")
             .args(["/C", "start", "", "https://github.com/rozsazoltan/audio-orbit/releases"])
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .context("failed to open releases page")?;
     }
