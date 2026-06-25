@@ -10,7 +10,7 @@ It does not modify the Windows system volume. Audio Orbit loads local audio file
 - Folder playlists with configurable grouping depth, for example `D:\mp3\Artist\Album\song.mp3` grouped as `Artist / Album` when depth is `2`.
 - Manual playlists and a built-in non-deletable Favorites playlist.
 - Track double-click playback.
-- Previous, play/pause, stop, next, auto-next, and clickable seek waveform.
+- Previous, play/pause, stop, next, auto-next, optional crossfade mixing, and clickable seek waveform.
 - Track metadata display: duration, sample rate, bitrate, channel count, and file size when available.
 - Waveform-style progress display.
 - Track context menu with:
@@ -22,19 +22,25 @@ It does not modify the Windows system volume. Audio Orbit loads local audio file
 - Sound profiles with live re-rendering from the current playback position.
 - Smooth stereo orbit and experimental virtual 8-direction headphone orbit.
 - Optional long-silence skipping, such as skipping silence after 3 seconds.
+- Optional AIMP-style crossfade: mix the end of one track into the start of the next for a configurable number of seconds.
 - Output device refresh and change detection.
 - Full app state backup/export and import using a compressed ZIP file.
 - Fixed app data location for upgrades.
 - GitHub release update check and Windows self-update support.
 - Prerelease update checking is available but disabled by default.
+- UI icons are rendered from Lucide icons through the bundled Rust `lucide-icons` font.
 
 ## Playlist types
 
 Audio Orbit has three playlist types:
 
-- `♥ Favorites`: built-in, cannot be deleted, tracks can be added with the heart button.
-- `♫ Manual playlist`: editable playlist, tracks can be added manually.
-- `📁 Folder playlist`: scanner-owned playlist generated from a folder. Tracks are updated by rescanning the folder, not by manual add.
+- Favorites: built-in, cannot be deleted, tracks can be added with the Lucide heart button.
+- Manual playlist: editable playlist, tracks can be added manually.
+- Folder playlist: scanner-owned playlist generated from a folder. Tracks are updated by rescanning the folder, not by manual add.
+
+## Playback settings
+
+Crossfade can be enabled from the top player controls. When enabled, Audio Orbit starts the next track before the current track ends and fades the two tracks into each other for the configured number of seconds. It applies to automatic next-track playback and manual Next when a track is currently playing.
 
 ## Sound profiles
 
@@ -84,4 +90,6 @@ The workflow turns it into:
 v0.5.0
 ```
 
-and uploads a Windows x64 executable release asset.
+Before building, the workflow verifies that `Cargo.toml` already has the same version. It does not rewrite version files; update the project version manually before starting a release.
+
+Then it uploads a Windows x64 executable release asset.

@@ -2,6 +2,7 @@ use crate::dsp::{DspSettings, OrbitMode};
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use lofty::file::AudioFile;
+use lucide_icons::Icon;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -29,12 +30,14 @@ impl Default for PlaylistKind {
 }
 
 impl PlaylistKind {
-    pub fn icon(&self) -> &'static str {
-        match self {
-            Self::Favorites => "♥",
-            Self::Manual => "♫",
-            Self::Folder => "📁",
-        }
+    pub fn icon(&self) -> String {
+        let icon = match self {
+            Self::Favorites => Icon::Heart,
+            Self::Manual => Icon::ListMusic,
+            Self::Folder => Icon::Folder,
+        };
+
+        char::from(icon).to_string()
     }
 
     pub fn label(&self) -> &'static str {
@@ -295,6 +298,34 @@ impl Default for UpdateSettings {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlaybackSettings {
+    #[serde(default = "default_auto_advance")]
+    pub auto_advance: bool,
+    #[serde(default)]
+    pub crossfade_enabled: bool,
+    #[serde(default = "default_crossfade_seconds")]
+    pub crossfade_seconds: u8,
+}
+
+impl Default for PlaybackSettings {
+    fn default() -> Self {
+        Self {
+            auto_advance: true,
+            crossfade_enabled: false,
+            crossfade_seconds: default_crossfade_seconds(),
+        }
+    }
+}
+
+fn default_auto_advance() -> bool {
+    true
+}
+
+fn default_crossfade_seconds() -> u8 {
+    5
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SavedState {
     pub playlists: Vec<Playlist>,
     pub profiles: Vec<DspProfile>,
@@ -302,6 +333,8 @@ pub struct SavedState {
     pub selected_profile_index: usize,
     #[serde(default)]
     pub update_settings: UpdateSettings,
+    #[serde(default)]
+    pub playback: PlaybackSettings,
 }
 
 impl Default for SavedState {
@@ -322,6 +355,7 @@ impl Default for SavedState {
             selected_playlist_index: 1,
             selected_profile_index: 0,
             update_settings: UpdateSettings::default(),
+            playback: PlaybackSettings::default(),
         }
     }
 }

@@ -7,6 +7,7 @@ use std::{
     fs::File,
     io::BufReader,
     path::{Path, PathBuf},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -71,8 +72,49 @@ impl AudioPlayer {
         settings: DspSettings,
         start_seconds: f32,
     ) -> Result<PlaybackInfo> {
-        self.stop();
+        let (processed_samples, render_info, sample_rate) = self.render_file(path, settings, start_seconds)?;
 
+        self.stop();
+        let rendered_duration = Duration::from_secs_f32(render_info.rendered_duration_seconds.max(0.0));
+        self.play_processed_samples(processed_samples, sample_rate, rendered_duration, path, settings, start_seconds)?;
+
+        Ok(playback_info(path, render_info))
+    }
+
+    pub fn crossfade_to_file_with_orbit_from(
+        &mut self,
+        path: &Path,
+        settings: DspSettings,
+        start_seconds: f32,
+        crossfade_seconds: f32,
+    ) -> Result<PlaybackInfo> {
+        let (mut processed_samples, render_info, sample_rate) = self.render_file(path, settings, start_seconds)?;
+        let fade_seconds = crossfade_seconds
+            .max(0.0)
+            .min(render_info.rendered_duration_seconds.max(0.0));
+
+        apply_fade_in(&mut processed_samples, sample_rate, fade_seconds);
+
+        if fade_seconds > 0.05 {
+            if let Some(old_sink) = self.sink.take() {
+                fade_out_and_stop(old_sink, fade_seconds);
+            }
+        } else {
+            self.stop();
+        }
+
+        let rendered_duration = Duration::from_secs_f32(render_info.rendered_duration_seconds.max(0.0));
+        self.play_processed_samples(processed_samples, sample_rate, rendered_duration, path, settings, start_seconds)?;
+
+        Ok(playback_info(path, render_info))
+    }
+
+    fn render_file(
+        &self,
+        path: &Path,
+        settings: DspSettings,
+        start_seconds: f32,
+    ) -> Result<(Vec<f32>, RenderInfo, u32)> {
         let file = File::open(path)
             .with_context(|| format!("failed to open audio file: {}", path.display()))?;
         let decoder = Decoder::new(BufReader::new(file))
@@ -96,10 +138,7 @@ impl AudioPlayer {
             anyhow::bail!("the rendered audio was empty after processing; disable silence skip or seek earlier in the track");
         }
 
-        let rendered_duration = Duration::from_secs_f32(render_info.rendered_duration_seconds.max(0.0));
-        self.play_processed_samples(processed_samples, sample_rate, rendered_duration, path, settings, start_seconds)?;
-
-        Ok(playback_info(path, render_info))
+        Ok((processed_samples, render_info, sample_rate))
     }
 
     pub fn seek_current(&mut self, seconds: f32) -> Result<Option<PlaybackInfo>> {
@@ -219,6 +258,40 @@ impl AudioPlayer {
 
         Ok(())
     }
+}
+
+fn apply_fade_in(samples: &mut [f32], sample_rate: u32, fade_seconds: f32) {
+    if fade_seconds <= 0.0 || sample_rate == 0 {
+        return;
+    }
+
+    let frame_count = samples.len() / 2;
+    let fade_frames = ((fade_seconds * sample_rate as f32) as usize).min(frame_count);
+    if fade_frames == 0 {
+        return;
+    }
+
+    for frame in 0..fade_frames {
+        let gain = frame as f32 / fade_frames as f32;
+        let left = frame * 2;
+        let right = left + 1;
+        samples[left] *= gain;
+        samples[right] *= gain;
+    }
+}
+
+fn fade_out_and_stop(sink: Sink, fade_seconds: f32) {
+    let steps = ((fade_seconds * 30.0) as usize).clamp(8, 180);
+    let sleep_duration = Duration::from_secs_f32((fade_seconds / steps as f32).max(0.005));
+
+    thread::spawn(move || {
+        for step in 0..steps {
+            let remaining = 1.0 - (step as f32 / steps as f32);
+            sink.set_volume(remaining.max(0.0));
+            thread::sleep(sleep_duration);
+        }
+        sink.stop();
+    });
 }
 
 pub fn current_default_output_device_name() -> String {
