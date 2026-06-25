@@ -2,7 +2,7 @@
 
 `audio-orbit` is a lightweight Windows music player for local audio libraries, folder-based playlists, smooth crossfade playback, silence skipping, and headphone-friendly orbit-style stereo movement.
 
-It is designed for people who keep music in local folders and want an AIMP-like desktop player with portable app data, playlist backups, global media keys, release updates, and simple spatial stereo controls.
+It is designed for people who keep music in local folders and want an AIMP-like desktop player with portable app data, playlist backups, global media keys, release updates, and simple spatial stereo controls. The orbit effect can be turned off per sound profile, so the app can also be used as a normal stereo music player.
 
 - [What it does](#what-it-does)
   - [Local music libraries](#local-music-libraries)
@@ -49,7 +49,7 @@ Crossfade is an overlap mix: the current track fades out while the next track fa
 
 ### Sound profiles
 
-Sound profiles store DSP settings such as orbit mode, output level, stereo width, orbit speed, motion smoothness, and surround cue strength.
+Sound profiles store DSP settings such as whether orbit processing is enabled, orbit mode, output level, stereo width, orbit speed, motion smoothness, and surround cue strength.
 
 Profile changes are applied after the UI settles, reducing playback lag while sliders are being moved.
 

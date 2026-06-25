@@ -25,6 +25,8 @@ impl OrbitMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DspSettings {
+    #[serde(default = "default_orbit_enabled")]
+    pub orbit_enabled: bool,
     pub output_level_percent: u8,
     pub stereo_width_percent: u8,
     pub orbit_speed_percent: u8,
@@ -40,6 +42,7 @@ pub struct DspSettings {
 impl Default for DspSettings {
     fn default() -> Self {
         Self {
+            orbit_enabled: true,
             output_level_percent: 90,
             stereo_width_percent: 100,
             orbit_speed_percent: 70,
@@ -50,6 +53,10 @@ impl Default for DspSettings {
             silence_threshold_seconds: default_silence_threshold_seconds(),
         }
     }
+}
+
+fn default_orbit_enabled() -> bool {
+    true
 }
 
 fn default_silence_threshold_seconds() -> u8 {
@@ -85,6 +92,37 @@ pub fn render_orbit_to_stereo(
     let waveform = waveform_peaks(&mono, WAVEFORM_POINTS);
 
     let output_level = settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
+
+    if !settings.orbit_enabled {
+        let (output, rendered_duration_seconds) = render_plain_stereo(
+            input_samples,
+            channels,
+            &mono,
+            start_frame,
+            sample_rate,
+            output_level,
+            settings.skip_silence_enabled,
+            settings.silence_threshold_seconds,
+        );
+
+        let original_duration_seconds = if sample_rate == 0 {
+            0.0
+        } else {
+            frame_count as f32 / sample_rate as f32
+        };
+
+        return (
+            output,
+            RenderInfo {
+                original_duration_seconds,
+                rendered_duration_seconds,
+                input_channels,
+                sample_rate,
+                waveform,
+            },
+        );
+    }
+
     let width = settings.stereo_width_percent.min(100) as f32 / 100.0;
     let speed = settings.orbit_speed_percent.clamp(10, 200) as f32 / 100.0;
     let depth_amount = settings.depth_cue_percent.min(100) as f32 / 100.0;
@@ -185,6 +223,58 @@ pub fn render_orbit_to_stereo(
             waveform,
         },
     )
+}
+
+fn render_plain_stereo(
+    input_samples: &[f32],
+    channels: usize,
+    mono: &[f32],
+    start_frame: usize,
+    sample_rate: u32,
+    output_level: f32,
+    skip_silence_enabled: bool,
+    silence_threshold_seconds: u8,
+) -> (Vec<f32>, f32) {
+    let frame_count = mono.len();
+    let silence_limit = silence_threshold_seconds.max(1) as usize * sample_rate.max(1) as usize;
+    let mut consecutive_silent_frames = 0usize;
+    let mut output = Vec::with_capacity((frame_count.saturating_sub(start_frame)) * 2);
+
+    for frame_index in start_frame..frame_count {
+        let source_sample = mono[frame_index];
+        let is_silent = source_sample.abs() <= SILENCE_FLOOR;
+        if is_silent {
+            consecutive_silent_frames += 1;
+        } else {
+            consecutive_silent_frames = 0;
+        }
+
+        if skip_silence_enabled && consecutive_silent_frames > silence_limit {
+            continue;
+        }
+
+        let offset = frame_index * channels;
+        let (left, right) = if channels == 1 {
+            let sample = input_samples.get(offset).copied().unwrap_or(source_sample);
+            (sample, sample)
+        } else {
+            (
+                input_samples.get(offset).copied().unwrap_or(source_sample),
+                input_samples.get(offset + 1).copied().unwrap_or(source_sample),
+            )
+        };
+
+        output.push(left * output_level);
+        output.push(right * output_level);
+    }
+
+    let rendered_duration_seconds = if sample_rate == 0 {
+        0.0
+    } else {
+        (output.len() / 2) as f32 / sample_rate as f32
+    };
+
+    (output, rendered_duration_seconds)
 }
 
 #[derive(Clone, Copy)]

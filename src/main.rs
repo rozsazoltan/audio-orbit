@@ -597,7 +597,11 @@ impl AudioOrbitApp {
 
         match result {
             Ok(info) => {
-                let mode_label = settings.mode.label();
+                let mode_label = if settings.orbit_enabled {
+                    settings.mode.label()
+                } else {
+                    "normal stereo playback"
+                };
                 if let Some((previous_position, previous_duration, started_at)) = crossfade_ui_delay {
                     let switch_after = Duration::from_secs_f32((crossfade_seconds * 0.5).max(0.1));
                     self.pending_track_switch = Some(PendingTrackSwitch {
@@ -1441,6 +1445,10 @@ impl AudioOrbitApp {
         if let Some(profile) = self.state.profiles.get_mut(profile_index) {
             ui.separator();
             profile_changed |= ui
+                .checkbox(&mut profile.settings.orbit_enabled, "Orbit")
+                .on_hover_text("Enable orbit-style stereo movement. Turn this off for normal stereo playback.")
+                .changed();
+            profile_changed |= ui
                 .checkbox(&mut profile.settings.skip_silence_enabled, "Skip silence")
                 .changed();
             if profile.settings.skip_silence_enabled {
@@ -1927,22 +1935,29 @@ impl AudioOrbitApp {
             }
 
             ui.add_space(6.0);
-            ui.label("Orbit mode");
             profile_changed |= ui
-                .radio_value(
-                    &mut profile.settings.mode,
-                    OrbitMode::SmoothStereoOrbit,
-                    OrbitMode::SmoothStereoOrbit.label(),
-                )
+                .checkbox(&mut profile.settings.orbit_enabled, "Enable orbit mode")
+                .on_hover_text("Turn off orbit processing and keep normal stereo playback while preserving other playback settings.")
                 .changed();
-            profile_changed |= ui
-                .radio_value(
-                    &mut profile.settings.mode,
-                    OrbitMode::VirtualEightDirectionOrbit,
-                    OrbitMode::VirtualEightDirectionOrbit.label(),
-                )
-                .changed();
-            ui.small(profile.settings.mode.description());
+
+            ui.add_enabled_ui(profile.settings.orbit_enabled, |ui| {
+                ui.label("Orbit mode");
+                profile_changed |= ui
+                    .radio_value(
+                        &mut profile.settings.mode,
+                        OrbitMode::SmoothStereoOrbit,
+                        OrbitMode::SmoothStereoOrbit.label(),
+                    )
+                    .changed();
+                profile_changed |= ui
+                    .radio_value(
+                        &mut profile.settings.mode,
+                        OrbitMode::VirtualEightDirectionOrbit,
+                        OrbitMode::VirtualEightDirectionOrbit.label(),
+                    )
+                    .changed();
+                ui.small(profile.settings.mode.description());
+            });
 
             ui.add_space(8.0);
             profile_changed |= ui
@@ -1951,30 +1966,32 @@ impl AudioOrbitApp {
                         .text("Output Level (%)"),
                 )
                 .changed();
-            profile_changed |= ui
-                .add(
-                    egui::Slider::new(&mut profile.settings.stereo_width_percent, 0u8..=100u8)
-                        .text("Stereo Width (%)"),
-                )
-                .changed();
-            profile_changed |= ui
-                .add(
-                    egui::Slider::new(&mut profile.settings.orbit_speed_percent, 10u8..=200u8)
-                        .text("Orbit Speed (%)"),
-                )
-                .changed();
-            profile_changed |= ui
-                .add(
-                    egui::Slider::new(&mut profile.settings.transition_smoothness_percent, 0u8..=100u8)
-                        .text("Motion Smoothness (%)"),
-                )
-                .changed();
-            profile_changed |= ui
-                .add(
-                    egui::Slider::new(&mut profile.settings.depth_cue_percent, 0u8..=100u8)
-                        .text("Surround Cue Strength (%)"),
-                )
-                .changed();
+            ui.add_enabled_ui(profile.settings.orbit_enabled, |ui| {
+                profile_changed |= ui
+                    .add(
+                        egui::Slider::new(&mut profile.settings.stereo_width_percent, 0u8..=100u8)
+                            .text("Stereo Width (%)"),
+                    )
+                    .changed();
+                profile_changed |= ui
+                    .add(
+                        egui::Slider::new(&mut profile.settings.orbit_speed_percent, 10u8..=200u8)
+                            .text("Orbit Speed (%)"),
+                    )
+                    .changed();
+                profile_changed |= ui
+                    .add(
+                        egui::Slider::new(&mut profile.settings.transition_smoothness_percent, 0u8..=100u8)
+                            .text("Motion Smoothness (%)"),
+                    )
+                    .changed();
+                profile_changed |= ui
+                    .add(
+                        egui::Slider::new(&mut profile.settings.depth_cue_percent, 0u8..=100u8)
+                            .text("Surround Cue Strength (%)"),
+                    )
+                    .changed();
+            });
 
         }
 
@@ -2089,6 +2106,21 @@ impl AudioOrbitApp {
     fn render_playback_settings_section(&mut self, ui: &mut egui::Ui) {
         ui.heading("Playback");
         ui.small("Crossfade is a real overlap: the current track fades out while the next track fades in over the configured seconds.");
+
+        let profile_index = self.state.selected_profile_index;
+        let mut orbit_profile_changed = false;
+        if let Some(profile) = self.state.profiles.get_mut(profile_index) {
+            orbit_profile_changed |= ui
+                .checkbox(&mut profile.settings.orbit_enabled, "Enable orbit effect")
+                .on_hover_text("Disable this to use Audio Orbit as a normal stereo music player.")
+                .changed();
+            if !profile.settings.orbit_enabled {
+                ui.small("Orbit processing is off for the active sound profile. Playback stays in normal stereo.");
+            }
+        }
+        if orbit_profile_changed {
+            self.schedule_current_profile_apply();
+        }
 
         let mut playback_changed = false;
         playback_changed |= ui
