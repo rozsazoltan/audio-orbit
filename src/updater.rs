@@ -10,6 +10,7 @@ use std::{
 };
 
 const RELEASES_API: &str = "https://api.github.com/repos/rozsazoltan/audio-orbit/releases";
+const LATEST_RELEASE_API: &str = "https://api.github.com/repos/rozsazoltan/audio-orbit/releases/latest";
 const USER_AGENT: &str = "Audio-Orbit-Updater";
 
 #[derive(Clone, Debug)]
@@ -38,33 +39,48 @@ struct GitHubAsset {
 
 pub fn check_for_update(include_prereleases: bool) -> Result<UpdateCheck> {
     let client = Client::builder().user_agent(USER_AGENT).build()?;
-    let releases: Vec<GitHubRelease> = client
-        .get(RELEASES_API)
-        .send()
-        .context("failed to contact GitHub releases")?
-        .error_for_status()
-        .context("GitHub releases request failed")?
-        .json()
-        .context("failed to parse GitHub releases response")?;
+
+    let latest_release = if include_prereleases {
+        let releases: Vec<GitHubRelease> = client
+            .get(RELEASES_API)
+            .send()
+            .context("failed to contact GitHub releases")?
+            .error_for_status()
+            .context("GitHub releases request failed")?
+            .json()
+            .context("failed to parse GitHub releases response")?;
+
+        let mut candidates = releases
+            .into_iter()
+            .filter(|release| !release.draft)
+            .filter_map(|release| {
+                let parsed = Version::parse(release.tag_name.trim_start_matches('v')).ok()?;
+                Some((parsed, release))
+            })
+            .collect::<Vec<_>>();
+
+        candidates.sort_by(|left, right| right.0.cmp(&left.0));
+
+        candidates
+            .into_iter()
+            .next()
+            .map(|(_, release)| release)
+            .context("no suitable GitHub release was found")?
+    } else {
+        client
+            .get(LATEST_RELEASE_API)
+            .send()
+            .context("failed to contact GitHub latest release")?
+            .error_for_status()
+            .context("GitHub latest release request failed")?
+            .json()
+            .context("failed to parse GitHub latest release response")?
+    };
 
     let current_version = env!("CARGO_PKG_VERSION").to_owned();
     let current_semver = Version::parse(&current_version).context("invalid current application version")?;
-
-    let mut candidates = releases
-        .into_iter()
-        .filter(|release| !release.draft)
-        .filter(|release| include_prereleases || !release.prerelease)
-        .filter_map(|release| {
-            let parsed = Version::parse(release.tag_name.trim_start_matches('v')).ok()?;
-            Some((parsed, release))
-        })
-        .collect::<Vec<_>>();
-
-    candidates.sort_by(|left, right| right.0.cmp(&left.0));
-
-    let Some((latest_semver, latest_release)) = candidates.into_iter().next() else {
-        anyhow::bail!("no suitable GitHub release was found");
-    };
+    let latest_semver = Version::parse(latest_release.tag_name.trim_start_matches('v'))
+        .context("invalid latest GitHub release version")?;
 
     let asset = latest_release
         .assets
@@ -88,7 +104,10 @@ pub fn install_update(check: &UpdateCheck) -> Result<()> {
     };
 
     let current_exe = env::current_exe().context("failed to resolve current executable path")?;
-    let update_dir = env::temp_dir().join("audio-orbit-update");
+    let update_dir = current_exe
+        .parent()
+        .map(|parent| parent.join("audio-orbit-data").join("update"))
+        .unwrap_or_else(|| env::temp_dir().join("audio-orbit-update"));
     fs::create_dir_all(&update_dir)
         .with_context(|| format!("failed to create update folder: {}", update_dir.display()))?;
 
@@ -117,12 +136,27 @@ pub fn install_update(check: &UpdateCheck) -> Result<()> {
 
 #[cfg(windows)]
 fn launch_windows_replacer(current_exe: &PathBuf, new_exe: &PathBuf) -> Result<()> {
-    let script = env::temp_dir().join("audio-orbit-update.cmd");
+    let update_dir = new_exe
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir);
+    let script = update_dir.join("audio-orbit-update.cmd");
     let script_contents = format!(
-        "@echo off\r\ntimeout /t 2 /nobreak > nul\r\ncopy /Y \"{}\" \"{}\" > nul\r\nstart \"\" \"{}\"\r\ndel \"%~f0\"\r\n",
-        new_exe.display(),
-        current_exe.display(),
-        current_exe.display()
+        "@echo off\r\n\
+setlocal\r\n\
+set \"NEW_EXE={new_exe}\"\r\n\
+set \"CURRENT_EXE={current_exe}\"\r\n\
+for /L %%i in (1,1,30) do (\r\n\
+  copy /Y \"%NEW_EXE%\" \"%CURRENT_EXE%\" > nul 2>&1 && goto copied\r\n\
+  timeout /t 1 /nobreak > nul\r\n\
+)\r\n\
+exit /b 1\r\n\
+:copied\r\n\
+start \"\" \"%CURRENT_EXE%\"\r\n\
+del \"%NEW_EXE%\" > nul 2>&1\r\n\
+del \"%~f0\"\r\n",
+        new_exe = new_exe.display(),
+        current_exe = current_exe.display()
     );
     fs::write(&script, script_contents)
         .with_context(|| format!("failed to write updater script: {}", script.display()))?;

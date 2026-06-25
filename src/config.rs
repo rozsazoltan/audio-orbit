@@ -361,11 +361,18 @@ impl Default for SavedState {
 }
 
 pub fn app_data_dir() -> Option<PathBuf> {
-    ProjectDirs::from("dev", "AudioOrbit", "Audio Orbit").map(|dirs| dirs.data_local_dir().to_path_buf())
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join("audio-orbit-data")))
 }
 
 pub fn state_path() -> Option<PathBuf> {
     app_data_dir().map(|dir| dir.join("state.json"))
+}
+
+fn legacy_state_path() -> Option<PathBuf> {
+    ProjectDirs::from("dev", "AudioOrbit", "Audio Orbit")
+        .map(|dirs| dirs.data_local_dir().join("state.json"))
 }
 
 pub fn load_state() -> SavedState {
@@ -373,11 +380,19 @@ pub fn load_state() -> SavedState {
         return SavedState::default();
     };
 
-    let Ok(contents) = fs::read_to_string(path) else {
-        return SavedState::default();
-    };
+    if let Ok(contents) = fs::read_to_string(&path) {
+        return serde_json::from_str(&contents).unwrap_or_default();
+    }
 
-    serde_json::from_str(&contents).unwrap_or_default()
+    if let Some(legacy_path) = legacy_state_path() {
+        if let Ok(contents) = fs::read_to_string(&legacy_path) {
+            let state = serde_json::from_str(&contents).unwrap_or_default();
+            let _ = write_state_to_path(&state, &path);
+            return state;
+        }
+    }
+
+    SavedState::default()
 }
 
 pub fn save_state(state: &SavedState) -> Result<()> {

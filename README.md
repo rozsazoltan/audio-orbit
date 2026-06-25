@@ -98,3 +98,13 @@ Then it uploads a Windows x64 executable release asset.
 ## Keyboard media keys
 
 On Windows, Audio Orbit registers global keyboard media keys for Play/Pause, Stop, Previous Track, and Next Track, so supported keyboards can control playback while the app is in the background. If another media app already owns one of these keys, Audio Orbit reports partial availability in the status bar.
+
+
+## Portable data and updates
+
+Audio Orbit stores its application state next to the executable under `audio-orbit-data/state.json`.
+When an older AppData-based state file is found, it is migrated into the portable data folder on first launch.
+
+The release watcher checks GitHub releases from inside the app. Stable release checks use the latest-release endpoint; prerelease-aware checks scan releases. To avoid GitHub API rate limits, the app allows at most two release checks per app session.
+
+When installing an update on Windows, Audio Orbit downloads the new executable to `audio-orbit-data/update`, closes itself, replaces the currently running executable, and starts the updated executable again.

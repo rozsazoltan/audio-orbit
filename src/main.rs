@@ -65,6 +65,7 @@ struct AudioOrbitApp {
     crossfade_started_for_path: Option<PathBuf>,
     show_folder_import_modal: bool,
     show_settings_modal: bool,
+    show_release_modal: bool,
     pending_folder_path: Option<PathBuf>,
     pending_playlist_name: String,
     pending_folder_depth: usize,
@@ -74,6 +75,7 @@ struct AudioOrbitApp {
     editing_playlist_index: Option<usize>,
     editing_profile_index: Option<usize>,
     last_update_check: Option<updater::UpdateCheck>,
+    update_check_count: u8,
     media_key_receiver: Option<mpsc::Receiver<media_keys::MediaKeyEvent>>,
     media_key_status: String,
 }
@@ -101,6 +103,7 @@ impl AudioOrbitApp {
                     crossfade_started_for_path: None,
                     show_folder_import_modal: false,
                     show_settings_modal: false,
+                    show_release_modal: false,
                     pending_folder_path: None,
                     pending_playlist_name,
                     pending_folder_depth: 2,
@@ -110,6 +113,7 @@ impl AudioOrbitApp {
                     editing_playlist_index: None,
                     editing_profile_index: None,
                     last_update_check: None,
+                    update_check_count: 0,
                     media_key_receiver: None,
                     media_key_status: "Media keys: unavailable".to_owned(),
                 }
@@ -126,6 +130,7 @@ impl AudioOrbitApp {
                 crossfade_started_for_path: None,
                 show_folder_import_modal: false,
                 show_settings_modal: false,
+                show_release_modal: false,
                 pending_folder_path: None,
                 pending_playlist_name,
                 pending_folder_depth: 2,
@@ -135,6 +140,7 @@ impl AudioOrbitApp {
                 editing_playlist_index: None,
                 editing_profile_index: None,
                 last_update_check: None,
+                update_check_count: 0,
                 media_key_receiver: None,
                 media_key_status: "Media keys: unavailable".to_owned(),
             },
@@ -719,6 +725,18 @@ impl AudioOrbitApp {
     }
 
     fn check_for_updates(&mut self) {
+        const MAX_UPDATE_CHECKS_PER_SESSION: u8 = 2;
+
+        if self.update_check_count >= MAX_UPDATE_CHECKS_PER_SESSION {
+            self.error_message = Some(
+                "Update check limit reached for this app session. Restart Audio Orbit before checking again."
+                    .to_owned(),
+            );
+            return;
+        }
+
+        self.update_check_count += 1;
+
         match updater::check_for_update(self.state.update_settings.include_prereleases) {
             Ok(check) => {
                 if check.is_update_available {
@@ -728,7 +746,7 @@ impl AudioOrbitApp {
                         if check.prerelease { " prerelease" } else { "" }
                     );
                 } else {
-                    self.status_message = format!("Audio Orbit is up to date: v{}.", check.current_version);
+                    self.status_message = format!("Audio Orbit is already on the latest release: v{}.", check.current_version);
                 }
                 self.last_update_check = Some(check);
                 self.error_message = None;
@@ -1017,6 +1035,10 @@ impl eframe::App for AudioOrbitApp {
         if self.show_settings_modal {
             self.render_settings_modal(context);
         }
+
+        if self.show_release_modal {
+            self.render_release_modal(context);
+        }
     }
 }
 
@@ -1286,30 +1308,14 @@ impl AudioOrbitApp {
 
         ui.separator();
         ui.heading("Updates");
-        let prerelease_changed = ui
-            .checkbox(&mut self.state.update_settings.include_prereleases, "Include prereleases")
-            .changed();
-        if prerelease_changed {
-            self.save_state_silently();
+        if ui.button(ui_icons::label(Icon::Bell, "Release watcher...")).clicked() {
+            self.show_release_modal = true;
         }
-        ui.horizontal(|ui| {
-            if ui.button(ui_icons::label(Icon::Search, "Check")).clicked() {
-                self.check_for_updates();
-            }
-            let can_install = self
-                .last_update_check
-                .as_ref()
-                .map(|check| check.is_update_available && check.asset_download_url.is_some())
-                .unwrap_or(false);
-            if ui.add_enabled(can_install, egui::Button::new(ui_icons::label(Icon::Download, "Install"))).clicked() {
-                self.install_update();
-            }
-        });
-        if ui.button(ui_icons::label(Icon::ExternalLink, "Open releases")).clicked() {
-            if let Err(error) = updater::open_releases_page() {
-                self.error_message = Some(error.to_string());
-            }
-        }
+        ui.small(format!(
+            "Checks used this session: {}/2 · Repository: {}",
+            self.update_check_count,
+            updater::repository_label()
+        ));
         if let Some(check) = &self.last_update_check {
             ui.small(format!(
                 "Current v{} · Latest v{}{}",
@@ -1317,8 +1323,6 @@ impl AudioOrbitApp {
                 check.latest_version,
                 if check.prerelease { " prerelease" } else { "" }
             ));
-        } else {
-            ui.small(format!("Repository: {}", updater::repository_label()));
         }
     }
 
@@ -1624,6 +1628,120 @@ impl AudioOrbitApp {
             self.save_state_silently();
             self.apply_current_profile_live();
         }
+    }
+
+    fn render_release_modal(&mut self, context: &egui::Context) {
+        const MAX_UPDATE_CHECKS_PER_SESSION: u8 = 2;
+
+        let screen_rect = context.content_rect();
+        let painter = context.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("release_modal_backdrop"),
+        ));
+        painter.rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(160));
+
+        let mut is_open = self.show_release_modal;
+        egui::Window::new("Release watcher")
+            .open(&mut is_open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(560.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(context, |ui| {
+                ui.heading("Release watcher");
+                ui.small("Checks GitHub releases with a strict per-session limit to avoid API rate limiting.");
+                ui.separator();
+
+                let prerelease_changed = ui
+                    .checkbox(
+                        &mut self.state.update_settings.include_prereleases,
+                        "Also watch prereleases",
+                    )
+                    .changed();
+                if prerelease_changed {
+                    self.save_state_silently();
+                }
+
+                ui.small(if self.state.update_settings.include_prereleases {
+                    "Mode: stable releases and prereleases."
+                } else {
+                    "Mode: latest stable release only."
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "Checks used: {}/{}",
+                        self.update_check_count,
+                        MAX_UPDATE_CHECKS_PER_SESSION
+                    ));
+
+                    let can_check = self.update_check_count < MAX_UPDATE_CHECKS_PER_SESSION;
+                    if ui
+                        .add_enabled(can_check, egui::Button::new(ui_icons::label(Icon::Search, "Check releases")))
+                        .clicked()
+                    {
+                        self.check_for_updates();
+                    }
+
+                    if ui.button(ui_icons::label(Icon::ExternalLink, "Open releases")).clicked() {
+                        if let Err(error) = updater::open_releases_page() {
+                            self.error_message = Some(error.to_string());
+                        }
+                    }
+                });
+
+                if self.update_check_count >= MAX_UPDATE_CHECKS_PER_SESSION {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        "Check limit reached. Restart the app before checking again.",
+                    );
+                }
+
+                ui.separator();
+
+                if let Some(check) = self.last_update_check.clone() {
+                    ui.label(format!("Current version: v{}", check.current_version));
+                    ui.label(format!(
+                        "Latest version: v{}{}",
+                        check.latest_version,
+                        if check.prerelease { " prerelease" } else { "" }
+                    ));
+
+                    if check.is_update_available {
+                        ui.colored_label(egui::Color32::LIGHT_GREEN, "A newer executable is available.");
+                    } else {
+                        ui.colored_label(egui::Color32::LIGHT_GREEN, "Latest is OK. No update is required.");
+                    }
+
+                    if let Some(asset_name) = &check.asset_name {
+                        ui.small(format!("Asset: {asset_name}"));
+                    } else {
+                        ui.small("No Windows executable asset was found on the selected release.");
+                    }
+
+                    let can_install = check.is_update_available && check.asset_download_url.is_some();
+                    if ui
+                        .add_enabled(can_install, egui::Button::new(ui_icons::label(Icon::Download, "Replace current executable")))
+                        .clicked()
+                    {
+                        self.install_update();
+                    }
+                } else {
+                    ui.small("No release check has been run in this app session.");
+                }
+
+                ui.separator();
+                if let Some(path) = app_data_dir() {
+                    ui.small(format!("Portable data folder: {}", path.display()));
+                }
+            });
+
+        if context.input(|input| input.key_pressed(egui::Key::Escape)) {
+            is_open = false;
+        }
+
+        self.show_release_modal = is_open;
     }
 
     fn render_settings_modal(&mut self, context: &egui::Context) {
