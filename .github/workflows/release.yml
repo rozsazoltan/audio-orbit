@@ -38,26 +38,44 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Verify project version
+      - name: Sync release metadata for build
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          $CargoToml = Get-Content "Cargo.toml" -Raw
-          $PackageMatch = [regex]::Match($CargoToml, '(?s)\[package\].*?^version\s*=\s*"(?<version>[^"]+)"', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+          $CargoTomlPath = "Cargo.toml"
+          $CargoToml = Get-Content $CargoTomlPath -Raw
+          $CargoPattern = '(?ms)(^\[package\]\s*.*?^version\s*=\s*")[^"]+(")'
 
-          if (-not $PackageMatch.Success) {
+          if (-not [regex]::IsMatch($CargoToml, $CargoPattern)) {
             Write-Error "Could not find the package version in Cargo.toml."
             exit 1
           }
 
-          $CargoVersion = $PackageMatch.Groups["version"].Value
-          if ($CargoVersion -ne $env:VERSION) {
-            Write-Error "Release input is $env:VERSION, but Cargo.toml is $CargoVersion. Update the project version manually before releasing."
-            exit 1
+          $CargoToml = [regex]::Replace($CargoToml, $CargoPattern, "`${1}$env:VERSION`${2}", 1)
+          Set-Content -Path $CargoTomlPath -Value $CargoToml -NoNewline
+
+          $ManifestPath = "src/audio-orbit.exe.manifest"
+          if (Test-Path $ManifestPath) {
+            $ManifestVersionMatch = [regex]::Match($env:VERSION, '^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)')
+            if (-not $ManifestVersionMatch.Success) {
+              Write-Error "Could not derive a Windows manifest version from '$env:VERSION'."
+              exit 1
+            }
+
+            $ManifestVersion = "{0}.{1}.{2}.0" -f `
+              $ManifestVersionMatch.Groups["major"].Value, `
+              $ManifestVersionMatch.Groups["minor"].Value, `
+              $ManifestVersionMatch.Groups["patch"].Value
+
+            $Manifest = Get-Content $ManifestPath -Raw
+            $Manifest = [regex]::Replace($Manifest, 'version="[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"', "version=`"$ManifestVersion`"", 1)
+            Set-Content -Path $ManifestPath -Value $Manifest -NoNewline
           }
 
-          Write-Host "Project version is already set to $CargoVersion. No files were modified."
+          cargo generate-lockfile
+
+          Write-Host "Release metadata was synced for this build only: $env:VERSION ($env:TAG)."
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
