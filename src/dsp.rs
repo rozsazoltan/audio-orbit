@@ -10,15 +10,15 @@ pub enum OrbitMode {
 impl OrbitMode {
     pub fn label(self) -> &'static str {
         match self {
-            Self::SmoothStereoOrbit => "Smooth stereo orbit",
-            Self::VirtualEightDirectionOrbit => "Virtual 8-direction orbit",
+            Self::SmoothStereoOrbit => "Smooth stereo sweep",
+            Self::VirtualEightDirectionOrbit => "Headphone surround orbit",
         }
     }
 
     pub fn description(self) -> &'static str {
         match self {
-            Self::SmoothStereoOrbit => "Continuous left/right headphone panning with a stable volume curve.",
-            Self::VirtualEightDirectionOrbit => "Experimental stereo cues for left/front/back/right positions. This is not real Dolby/HRTF surround.",
+            Self::SmoothStereoOrbit => "Continuous left/right movement with an equal-power volume curve.",
+            Self::VirtualEightDirectionOrbit => "Experimental 8-zone headphone illusion using stereo pan, delay, crossfeed, and front/back tone cues. This is not true Dolby Atmos or real multichannel surround.",
         }
     }
 }
@@ -36,11 +36,11 @@ pub struct DspSettings {
 impl Default for DspSettings {
     fn default() -> Self {
         Self {
-            output_level_percent: 92,
+            output_level_percent: 90,
             stereo_width_percent: 100,
-            orbit_speed_percent: 75,
-            transition_smoothness_percent: 85,
-            depth_cue_percent: 60,
+            orbit_speed_percent: 70,
+            transition_smoothness_percent: 92,
+            depth_cue_percent: 75,
             mode: OrbitMode::SmoothStereoOrbit,
         }
     }
@@ -53,8 +53,9 @@ pub struct RenderInfo {
     pub output_samples: usize,
 }
 
-const BASE_ORBIT_RATE_HZ: f32 = 0.22;
-const MAX_INTERAURAL_DELAY_SECONDS: f32 = 0.00085;
+const BASE_ORBIT_RATE_HZ: f32 = 0.20;
+const MAX_STEREO_DELAY_SECONDS: f32 = 0.00075;
+const MAX_SURROUND_DELAY_SECONDS: f32 = 0.00120;
 
 pub fn render_orbit_to_stereo(
     input_samples: &[f32],
@@ -71,16 +72,16 @@ pub fn render_orbit_to_stereo(
     let speed = settings.orbit_speed_percent.clamp(10, 200) as f32 / 100.0;
     let depth_amount = settings.depth_cue_percent.min(100) as f32 / 100.0;
     let orbit_rate = BASE_ORBIT_RATE_HZ * speed;
-    let max_delay_samples = MAX_INTERAURAL_DELAY_SECONDS * sample_rate as f32;
 
     let smoothness = settings.transition_smoothness_percent.min(100) as f32 / 100.0;
-    let smoothing_time_seconds = 0.008 + smoothness * 0.28;
+    let smoothing_time_seconds = 0.025 + smoothness * 0.42;
     let smoothing_coeff = (-1.0 / (sample_rate as f32 * smoothing_time_seconds)).exp();
 
     let mut smoothed_pan = 0.0_f32;
     let mut smoothed_frontness = 1.0_f32;
     let mut smoothed_backness = 0.0_f32;
-    let mut rear_filter_state = 0.0_f32;
+    let mut rear_low_pass_state = 0.0_f32;
+    let mut front_presence_state = 0.0_f32;
     let mut output = Vec::with_capacity(frame_count * 2);
 
     for frame_index in 0..frame_count {
@@ -93,7 +94,7 @@ pub fn render_orbit_to_stereo(
                 frontness: 1.0,
                 backness: 0.0,
             },
-            OrbitMode::VirtualEightDirectionOrbit => virtual_eight_direction_position(angle, width),
+            OrbitMode::VirtualEightDirectionOrbit => virtual_surround_position(angle, width),
         };
 
         smoothed_pan = smooth_value(smoothed_pan, target.pan, smoothing_coeff);
@@ -101,31 +102,32 @@ pub fn render_orbit_to_stereo(
         smoothed_backness = smooth_value(smoothed_backness, target.backness, smoothing_coeff);
 
         let source_sample = mono[frame_index];
-        rear_filter_state = low_pass(rear_filter_state, source_sample, smoothed_backness, depth_amount);
+        front_presence_state = high_passish(front_presence_state, source_sample);
+        rear_low_pass_state = rear_low_pass(rear_low_pass_state, source_sample, smoothed_backness, depth_amount);
 
-        let depth_mix = smoothed_backness * depth_amount;
-        let spatial_sample = source_sample * (1.0 - depth_mix) + rear_filter_state * depth_mix;
-
-        let delay_samples = smoothed_pan.abs() * max_delay_samples;
-        let delayed_sample = delayed_sample(&mono, frame_index, delay_samples);
-
-        let (left_source, right_source) = if smoothed_pan >= 0.0 {
-            (delayed_sample, spatial_sample)
-        } else {
-            (spatial_sample, delayed_sample)
+        let (left, right) = match settings.mode {
+            OrbitMode::SmoothStereoOrbit => render_smooth_stereo_frame(
+                &mono,
+                frame_index,
+                sample_rate,
+                source_sample,
+                smoothed_pan,
+                output_level,
+            ),
+            OrbitMode::VirtualEightDirectionOrbit => render_surround_frame(
+                &mono,
+                frame_index,
+                sample_rate,
+                source_sample,
+                front_presence_state,
+                rear_low_pass_state,
+                smoothed_pan,
+                smoothed_frontness,
+                smoothed_backness,
+                depth_amount,
+                output_level,
+            ),
         };
-
-        let (mut left_gain, mut right_gain) = equal_power_pan_gains(smoothed_pan);
-
-        if matches!(settings.mode, OrbitMode::VirtualEightDirectionOrbit) {
-            let rear_attenuation = 1.0 - (smoothed_backness * depth_amount * 0.22);
-            let front_presence = 1.0 + (smoothed_frontness * depth_amount * 0.035);
-            left_gain *= rear_attenuation * front_presence;
-            right_gain *= rear_attenuation * front_presence;
-        }
-
-        let left = soft_limit(left_source * left_gain * output_level);
-        let right = soft_limit(right_source * right_gain * output_level);
 
         output.push(left);
         output.push(right);
@@ -155,18 +157,89 @@ struct OrbitPosition {
     backness: f32,
 }
 
-fn virtual_eight_direction_position(angle: f32, width: f32) -> OrbitPosition {
-    // Continuous path through eight perceived zones:
-    // front-center, right-front, right-mid, right-back, rear-center,
-    // left-back, left-mid, left-front.
-    let x = angle.sin();
-    let y = angle.cos();
+fn virtual_surround_position(angle: f32, width: f32) -> OrbitPosition {
+    // Continuous orbit around eight perceived headphone zones:
+    // front-center, right-front, right-center, right-back,
+    // rear-center, left-back, left-center, left-front.
+    let side = angle.sin();
+    let depth = angle.cos();
 
     OrbitPosition {
-        pan: x * width,
-        frontness: y.max(0.0),
-        backness: (-y).max(0.0),
+        pan: side * width,
+        frontness: depth.max(0.0),
+        backness: (-depth).max(0.0),
     }
+}
+
+fn render_smooth_stereo_frame(
+    mono: &[f32],
+    frame_index: usize,
+    sample_rate: u32,
+    source_sample: f32,
+    pan: f32,
+    output_level: f32,
+) -> (f32, f32) {
+    let delay_samples = pan.abs() * MAX_STEREO_DELAY_SECONDS * sample_rate as f32;
+    let delayed_sample = delayed_sample(mono, frame_index, delay_samples);
+    let (left_source, right_source) = if pan >= 0.0 {
+        (delayed_sample, source_sample)
+    } else {
+        (source_sample, delayed_sample)
+    };
+    let (left_gain, right_gain) = equal_power_pan_gains(pan);
+
+    (
+        soft_limit(left_source * left_gain * output_level),
+        soft_limit(right_source * right_gain * output_level),
+    )
+}
+
+fn render_surround_frame(
+    mono: &[f32],
+    frame_index: usize,
+    sample_rate: u32,
+    source_sample: f32,
+    front_presence_state: f32,
+    rear_low_pass_state: f32,
+    pan: f32,
+    frontness: f32,
+    backness: f32,
+    depth_amount: f32,
+    output_level: f32,
+) -> (f32, f32) {
+    let rear_mix = backness * depth_amount;
+    let front_mix = frontness * depth_amount;
+
+    let front_sample = source_sample + front_presence_state * front_mix * 0.20;
+    let rear_sample = (source_sample * (1.0 - rear_mix * 0.55)) + (rear_low_pass_state * rear_mix * 0.85);
+    let spatial_sample = front_sample * (1.0 - rear_mix) + rear_sample * rear_mix;
+
+    let delay_base = MAX_STEREO_DELAY_SECONDS + MAX_SURROUND_DELAY_SECONDS * rear_mix;
+    let delay_samples = pan.abs() * delay_base * sample_rate as f32;
+    let delayed_sample = delayed_sample(mono, frame_index, delay_samples);
+
+    let (left_source, right_source) = if pan >= 0.0 {
+        (delayed_sample, spatial_sample)
+    } else {
+        (spatial_sample, delayed_sample)
+    };
+
+    let (mut left_gain, mut right_gain) = equal_power_pan_gains(pan);
+    let rear_attenuation = 1.0 - rear_mix * 0.24;
+    let front_presence = 1.0 + front_mix * 0.08;
+    let side_focus = 1.0 + pan.abs() * depth_amount * 0.05;
+
+    left_gain *= rear_attenuation * front_presence * side_focus;
+    right_gain *= rear_attenuation * front_presence * side_focus;
+
+    let crossfeed = (0.10 + rear_mix * 0.18).min(0.28);
+    let left_mixed = left_source * left_gain + right_source * right_gain * crossfeed;
+    let right_mixed = right_source * right_gain + left_source * left_gain * crossfeed;
+
+    (
+        soft_limit(left_mixed * output_level),
+        soft_limit(right_mixed * output_level),
+    )
 }
 
 fn downmix_to_mono(input_samples: &[f32], channels: usize, frame_count: usize) -> Vec<f32> {
@@ -205,12 +278,17 @@ fn delayed_sample(samples: &[f32], frame_index: usize, delay_samples: f32) -> f3
     sample_a * (1.0 - delay_fraction) + sample_b * delay_fraction
 }
 
-fn low_pass(previous: f32, input: f32, backness: f32, depth_amount: f32) -> f32 {
-    let coefficient = 0.08 + (1.0 - backness * depth_amount) * 0.18;
-    previous + (input - previous) * coefficient.clamp(0.04, 0.35)
+fn rear_low_pass(previous: f32, input: f32, backness: f32, depth_amount: f32) -> f32 {
+    let coefficient = 0.035 + (1.0 - backness * depth_amount) * 0.10;
+    previous + (input - previous) * coefficient.clamp(0.025, 0.16)
+}
+
+fn high_passish(previous: f32, input: f32) -> f32 {
+    let low = previous + (input - previous) * 0.08;
+    input - low
 }
 
 fn soft_limit(value: f32) -> f32 {
-    let driven = value * 0.96;
-    (driven / (1.0 + driven.abs() * 0.12)).clamp(-1.0, 1.0)
+    let driven = value * 0.94;
+    (driven / (1.0 + driven.abs() * 0.16)).clamp(-1.0, 1.0)
 }

@@ -6,6 +6,7 @@ use std::{
     fs::File,
     io::BufReader,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 pub struct PlaybackInfo {
@@ -21,11 +22,15 @@ pub struct AudioPlayer {
     stream_handle: OutputStreamHandle,
     sink: Option<Sink>,
     output_device_name: String,
+    started_at: Option<Instant>,
+    paused_at: Option<Instant>,
+    accumulated_pause: Duration,
+    current_duration: Option<Duration>,
 }
 
 impl AudioPlayer {
     pub fn new() -> Result<Self> {
-        let output_device_name = default_output_device_name();
+        let output_device_name = current_default_output_device_name();
         let (_stream, stream_handle) = OutputStream::try_default()
             .context("failed to open the default audio output device")?;
 
@@ -34,6 +39,10 @@ impl AudioPlayer {
             stream_handle,
             sink: None,
             output_device_name,
+            started_at: None,
+            paused_at: None,
+            accumulated_pause: Duration::ZERO,
+            current_duration: None,
         })
     }
 
@@ -60,7 +69,8 @@ impl AudioPlayer {
         let (processed_samples, render_info) =
             render_orbit_to_stereo(&input_samples, input_channels, sample_rate, settings);
 
-        self.play_processed_samples(processed_samples, sample_rate)?;
+        let duration = Duration::from_secs_f32(render_info.duration_seconds.max(0.0));
+        self.play_processed_samples(processed_samples, sample_rate, duration)?;
 
         Ok(playback_info(path, render_info))
     }
@@ -69,15 +79,26 @@ impl AudioPlayer {
         if let Some(sink) = self.sink.take() {
             sink.stop();
         }
+
+        self.started_at = None;
+        self.paused_at = None;
+        self.accumulated_pause = Duration::ZERO;
+        self.current_duration = None;
     }
 
     pub fn pause_or_resume(&mut self) {
-        if let Some(sink) = &self.sink {
-            if sink.is_paused() {
-                sink.play();
-            } else {
-                sink.pause();
+        let Some(sink) = &self.sink else {
+            return;
+        };
+
+        if sink.is_paused() {
+            if let Some(paused_at) = self.paused_at.take() {
+                self.accumulated_pause += paused_at.elapsed();
             }
+            sink.play();
+        } else {
+            self.paused_at = Some(Instant::now());
+            sink.pause();
         }
     }
 
@@ -99,7 +120,32 @@ impl AudioPlayer {
         self.sink.as_ref().map(|sink| sink.empty()).unwrap_or(false)
     }
 
-    fn play_processed_samples(&mut self, samples: Vec<f32>, sample_rate: u32) -> Result<()> {
+    pub fn playback_position_seconds(&self) -> f32 {
+        let Some(started_at) = self.started_at else {
+            return 0.0;
+        };
+
+        let now = self.paused_at.unwrap_or_else(Instant::now);
+        let elapsed = now
+            .saturating_duration_since(started_at)
+            .saturating_sub(self.accumulated_pause);
+
+        match self.current_duration {
+            Some(duration) => elapsed.min(duration).as_secs_f32(),
+            None => elapsed.as_secs_f32(),
+        }
+    }
+
+    pub fn playback_duration_seconds(&self) -> Option<f32> {
+        self.current_duration.map(|duration| duration.as_secs_f32())
+    }
+
+    fn play_processed_samples(
+        &mut self,
+        samples: Vec<f32>,
+        sample_rate: u32,
+        duration: Duration,
+    ) -> Result<()> {
         let sink = Sink::try_new(&self.stream_handle)
             .context("failed to create audio playback sink")?;
         let source = SamplesBuffer::new(2, sample_rate, samples);
@@ -107,9 +153,21 @@ impl AudioPlayer {
         sink.append(source);
         sink.play();
         self.sink = Some(sink);
+        self.started_at = Some(Instant::now());
+        self.paused_at = None;
+        self.accumulated_pause = Duration::ZERO;
+        self.current_duration = Some(duration);
 
         Ok(())
     }
+}
+
+pub fn current_default_output_device_name() -> String {
+    let host = cpal::default_host();
+
+    host.default_output_device()
+        .and_then(|device| device.name().ok())
+        .unwrap_or_else(|| "Default output device".to_owned())
 }
 
 fn playback_info(path: &Path, render_info: RenderInfo) -> PlaybackInfo {
@@ -120,12 +178,4 @@ fn playback_info(path: &Path, render_info: RenderInfo) -> PlaybackInfo {
         sample_rate: render_info.sample_rate,
         output_samples: render_info.output_samples,
     }
-}
-
-fn default_output_device_name() -> String {
-    let host = cpal::default_host();
-
-    host.default_output_device()
-        .and_then(|device| device.name().ok())
-        .unwrap_or_else(|| "Default output device".to_owned())
 }

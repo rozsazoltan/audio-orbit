@@ -6,18 +6,24 @@ mod dsp;
 mod icon;
 
 use crate::{
-    audio_player::{AudioPlayer, PlaybackInfo},
-    config::{load_state, save_state, DspProfile, Playlist, SavedState},
+    audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo},
+    config::{
+        collect_audio_files_from_folder, export_state_to, import_state_from, load_state, save_state,
+        DspProfile, Playlist, SavedState,
+    },
     dsp::{DspSettings, OrbitMode},
 };
 use eframe::egui;
 use rfd::FileDialog;
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 
 fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([780.0, 650.0])
-        .with_min_inner_size([720.0, 600.0])
+        .with_inner_size([1120.0, 720.0])
+        .with_min_inner_size([920.0, 620.0])
         .with_resizable(true);
 
     if let Some(icon) = icon::load_window_icon() {
@@ -47,12 +53,22 @@ struct AudioOrbitApp {
     error_message: Option<String>,
     settings_changed_during_playback: bool,
     auto_advance: bool,
+    show_folder_import_modal: bool,
+    pending_folder_path: Option<PathBuf>,
+    pending_playlist_name: String,
+    pending_folder_depth: usize,
+    last_known_output_name: String,
+    detected_output_change: Option<String>,
+    last_output_check: Instant,
 }
 
 impl AudioOrbitApp {
     fn new() -> Self {
         let mut state = load_state();
         ensure_state_is_valid(&mut state);
+
+        let pending_playlist_name = "Local music".to_owned();
+        let current_output_name = current_default_output_device_name();
 
         match AudioPlayer::new() {
             Ok(player) => {
@@ -68,6 +84,13 @@ impl AudioOrbitApp {
                     error_message: None,
                     settings_changed_during_playback: false,
                     auto_advance: true,
+                    show_folder_import_modal: false,
+                    pending_folder_path: None,
+                    pending_playlist_name,
+                    pending_folder_depth: 2,
+                    last_known_output_name: output_name,
+                    detected_output_change: None,
+                    last_output_check: Instant::now(),
                 }
             }
             Err(error) => Self {
@@ -81,6 +104,13 @@ impl AudioOrbitApp {
                 error_message: Some(error.to_string()),
                 settings_changed_during_playback: false,
                 auto_advance: true,
+                show_folder_import_modal: false,
+                pending_folder_path: None,
+                pending_playlist_name,
+                pending_folder_depth: 2,
+                last_known_output_name: current_output_name,
+                detected_output_change: None,
+                last_output_check: Instant::now(),
             },
         }
     }
@@ -107,10 +137,28 @@ impl AudioOrbitApp {
             .unwrap_or_default()
     }
 
+    fn eligible_track_indexes(&self) -> Vec<usize> {
+        self.current_playlist()
+            .map(Playlist::filtered_track_indexes)
+            .unwrap_or_default()
+    }
+
     fn selected_track_path(&self) -> Option<PathBuf> {
         let playlist = self.current_playlist()?;
         let index = self.selected_track_index?;
-        playlist.tracks.get(index).cloned()
+        playlist.tracks.get(index).map(|track| track.path.clone())
+    }
+
+    fn active_track_title(&self) -> String {
+        self.active_track_index
+            .and_then(|index| self.current_playlist()?.tracks.get(index))
+            .map(|track| track.title.clone())
+            .or_else(|| {
+                self.last_playback
+                    .as_ref()
+                    .map(|playback| display_file_name(&playback.path))
+            })
+            .unwrap_or_else(|| "No track playing".to_owned())
     }
 
     fn add_audio_files(&mut self) {
@@ -126,22 +174,168 @@ impl AudioOrbitApp {
         let added_count = files.len();
         let Some((start_index, playlist_name)) = self.current_playlist_mut().map(|playlist| {
             let start_index = playlist.tracks.len();
-            playlist.tracks.extend(files);
+            playlist.add_files(files);
             (start_index, playlist.name.clone())
         }) else {
             return;
         };
 
         self.selected_track_index = Some(start_index);
+        self.ensure_selected_track_visible();
         self.status_message = format!("Added {added_count} track(s) to {playlist_name}.");
         self.error_message = None;
         self.save_state_silently();
+    }
+
+    fn open_folder_import_modal(&mut self) {
+        self.show_folder_import_modal = true;
+        self.error_message = None;
+    }
+
+    fn pick_music_folder(&mut self) {
+        let Some(folder) = FileDialog::new().pick_folder() else {
+            return;
+        };
+
+        if self.pending_playlist_name.trim().is_empty() || self.pending_playlist_name == "Local music" {
+            self.pending_playlist_name = folder
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| "Local music".to_owned());
+        }
+
+        self.pending_folder_path = Some(folder);
+    }
+
+    fn import_folder_playlist(&mut self) -> bool {
+        let Some(folder) = self.pending_folder_path.clone() else {
+            self.error_message = Some("Choose a music folder first.".to_owned());
+            return false;
+        };
+
+        let name = if self.pending_playlist_name.trim().is_empty() {
+            folder
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| "Local music".to_owned())
+        } else {
+            self.pending_playlist_name.trim().to_owned()
+        };
+
+        match collect_audio_files_from_folder(&folder) {
+            Ok(files) if files.is_empty() => {
+                self.error_message = Some(format!(
+                    "No supported audio files were found under {}.",
+                    folder.display()
+                ));
+                false
+            }
+            Ok(files) => {
+                let track_count = files.len();
+                let playlist = Playlist::from_folder(name.clone(), folder.clone(), self.pending_folder_depth, files);
+                self.state.playlists.push(playlist);
+                self.state.selected_playlist_index = self.state.playlists.len() - 1;
+                self.selected_track_index = self.eligible_track_indexes().first().copied();
+                self.status_message = format!(
+                    "Imported {track_count} track(s) from {} as {name}.",
+                    folder.display()
+                );
+                self.error_message = None;
+                self.save_state_silently();
+                true
+            }
+            Err(error) => {
+                self.error_message = Some(error.to_string());
+                false
+            }
+        }
+    }
+
+    fn rescan_current_folder(&mut self) {
+        let Some((folder, depth, name)) = self.current_playlist().and_then(|playlist| {
+            playlist
+                .source_folder
+                .clone()
+                .map(|folder| (folder, playlist.folder_depth, playlist.name.clone()))
+        }) else {
+            self.error_message = Some("This playlist was not created from a folder.".to_owned());
+            return;
+        };
+
+        match collect_audio_files_from_folder(&folder) {
+            Ok(files) => {
+                let track_count = files.len();
+                if let Some(playlist) = self.current_playlist_mut() {
+                    playlist.folder_depth = depth;
+                    playlist.replace_tracks_from_files(files);
+                }
+                self.selected_track_index = self.eligible_track_indexes().first().copied();
+                self.status_message = format!("Rescanned {name}: {track_count} track(s) found.");
+                self.error_message = None;
+                self.save_state_silently();
+            }
+            Err(error) => {
+                self.error_message = Some(error.to_string());
+            }
+        }
+    }
+
+    fn export_library_backup(&mut self) {
+        let Some(path) = FileDialog::new()
+            .add_filter("Audio Orbit library backup", &["json"])
+            .set_file_name("audio-orbit-library.json")
+            .save_file()
+        else {
+            return;
+        };
+
+        match export_state_to(&self.state, &path) {
+            Ok(()) => {
+                self.status_message = format!("Exported library backup to {}.", path.display());
+                self.error_message = None;
+            }
+            Err(error) => {
+                self.error_message = Some(error.to_string());
+            }
+        }
+    }
+
+    fn import_library_backup(&mut self) {
+        let Some(path) = FileDialog::new()
+            .add_filter("Audio Orbit library backup", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+
+        match import_state_from(&path) {
+            Ok(mut state) => {
+                ensure_state_is_valid(&mut state);
+                self.stop();
+                self.state = state;
+                self.selected_track_index = self.eligible_track_indexes().first().copied();
+                self.status_message = format!("Imported library backup from {}.", path.display());
+                self.error_message = None;
+                self.save_state_silently();
+            }
+            Err(error) => {
+                self.error_message = Some(error.to_string());
+            }
+        }
     }
 
     fn remove_selected_track(&mut self) {
         let Some(track_index) = self.selected_track_index else {
             return;
         };
+
+        if self.active_track_index == Some(track_index) {
+            self.stop();
+        }
 
         let Some(remaining_len) = self.current_playlist_mut().and_then(|playlist| {
             if track_index < playlist.tracks.len() {
@@ -154,7 +348,14 @@ impl AudioOrbitApp {
             return;
         };
 
+        if let Some(active_index) = self.active_track_index {
+            if active_index > track_index {
+                self.active_track_index = Some(active_index - 1);
+            }
+        }
+
         self.selected_track_index = next_valid_track_index(track_index, remaining_len);
+        self.ensure_selected_track_visible();
         self.status_message = "Removed selected track from playlist.".to_owned();
         self.save_state_silently();
     }
@@ -174,9 +375,10 @@ impl AudioOrbitApp {
             return;
         }
 
+        self.stop();
         self.state.playlists.remove(self.state.selected_playlist_index);
         self.state.selected_playlist_index = self.state.selected_playlist_index.saturating_sub(1);
-        self.selected_track_index = None;
+        self.selected_track_index = self.eligible_track_indexes().first().copied();
         self.status_message = "Removed playlist.".to_owned();
         self.save_state_silently();
     }
@@ -204,7 +406,11 @@ impl AudioOrbitApp {
         self.save_state_silently();
     }
 
-    fn play_selected_track(&mut self) {
+    fn play_selected_or_first_track(&mut self) {
+        if !self.selected_track_is_visible() {
+            self.selected_track_index = self.eligible_track_indexes().first().copied();
+        }
+
         let Some(path) = self.selected_track_path() else {
             self.error_message = Some("Select a track first.".to_owned());
             return;
@@ -244,18 +450,21 @@ impl AudioOrbitApp {
     }
 
     fn play_next_track(&mut self) {
-        let Some((next_index, path)) = self.current_playlist().and_then(|playlist| {
-            if playlist.tracks.is_empty() {
-                return None;
-            }
+        let indexes = self.eligible_track_indexes();
+        if indexes.is_empty() {
+            return;
+        }
 
-            let next_index = match self.active_track_index.or(self.selected_track_index) {
-                Some(index) => (index + 1) % playlist.tracks.len(),
-                None => 0,
-            };
+        let current_index = self.active_track_index.or(self.selected_track_index);
+        let current_position = current_index.and_then(|index| indexes.iter().position(|candidate| *candidate == index));
+        let next_position = current_position.map(|position| (position + 1) % indexes.len()).unwrap_or(0);
+        let next_index = indexes[next_position];
 
-            playlist.tracks.get(next_index).cloned().map(|path| (next_index, path))
-        }) else {
+        let Some(path) = self
+            .current_playlist()
+            .and_then(|playlist| playlist.tracks.get(next_index))
+            .map(|track| track.path.clone())
+        else {
             return;
         };
 
@@ -264,22 +473,23 @@ impl AudioOrbitApp {
     }
 
     fn play_previous_track(&mut self) {
-        let Some((previous_index, path)) = self.current_playlist().and_then(|playlist| {
-            if playlist.tracks.is_empty() {
-                return None;
-            }
+        let indexes = self.eligible_track_indexes();
+        if indexes.is_empty() {
+            return;
+        }
 
-            let previous_index = match self.active_track_index.or(self.selected_track_index) {
-                Some(0) | None => playlist.tracks.len() - 1,
-                Some(index) => index.saturating_sub(1),
-            };
+        let current_index = self.active_track_index.or(self.selected_track_index);
+        let current_position = current_index.and_then(|index| indexes.iter().position(|candidate| *candidate == index));
+        let previous_position = current_position
+            .map(|position| if position == 0 { indexes.len() - 1 } else { position - 1 })
+            .unwrap_or(0);
+        let previous_index = indexes[previous_position];
 
-            playlist
-                .tracks
-                .get(previous_index)
-                .cloned()
-                .map(|path| (previous_index, path))
-        }) else {
+        let Some(path) = self
+            .current_playlist()
+            .and_then(|playlist| playlist.tracks.get(previous_index))
+            .map(|track| track.path.clone())
+        else {
             return;
         };
 
@@ -322,6 +532,8 @@ impl AudioOrbitApp {
                 self.active_track_index = None;
                 self.active_settings = None;
                 self.settings_changed_during_playback = false;
+                self.detected_output_change = None;
+                self.last_known_output_name = output_name.clone();
                 self.status_message = format!("Output refreshed: {output_name}. Start playback again.");
                 self.error_message = None;
             }
@@ -336,6 +548,22 @@ impl AudioOrbitApp {
     fn save_state_silently(&mut self) {
         if let Err(error) = save_state(&self.state) {
             self.error_message = Some(error.to_string());
+        }
+    }
+
+    fn selected_track_is_visible(&self) -> bool {
+        let Some(index) = self.selected_track_index else {
+            return false;
+        };
+
+        self.current_playlist()
+            .and_then(|playlist| playlist.tracks.get(index).map(|track| playlist.track_matches_selected_group(track)))
+            .unwrap_or(false)
+    }
+
+    fn ensure_selected_track_visible(&mut self) {
+        if !self.selected_track_is_visible() {
+            self.selected_track_index = self.eligible_track_indexes().first().copied();
         }
     }
 
@@ -368,6 +596,22 @@ impl AudioOrbitApp {
             }
         }
     }
+
+    fn poll_output_device_change(&mut self) {
+        if self.last_output_check.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+
+        self.last_output_check = Instant::now();
+        let current_output = current_default_output_device_name();
+
+        if current_output != self.last_known_output_name {
+            self.detected_output_change = Some(current_output.clone());
+            self.status_message = format!(
+                "Output device changed to {current_output}. Refresh output device before starting the next track."
+            );
+        }
+    }
 }
 
 impl Drop for AudioOrbitApp {
@@ -381,178 +625,423 @@ impl Drop for AudioOrbitApp {
 
 impl eframe::App for AudioOrbitApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        context.set_visuals(egui::Visuals::dark());
+        context.request_repaint_after(Duration::from_millis(250));
+
         self.update_playback_status();
+        self.poll_output_device_change();
+
+        egui::TopBottomPanel::top("now_playing_panel").show(context, |ui| {
+            self.render_now_playing_panel(ui);
+        });
+
+        egui::SidePanel::left("library_panel")
+            .resizable(true)
+            .default_width(260.0)
+            .show(context, |ui| {
+                self.render_library_panel(ui);
+            });
+
+        egui::SidePanel::right("profile_panel")
+            .resizable(true)
+            .default_width(310.0)
+            .show(context, |ui| {
+                self.render_profile_panel(ui);
+            });
 
         egui::CentralPanel::default().show(context, |ui| {
-            ui.heading("Audio Orbit");
-            ui.label("A local DSP audio player for smooth stereo orbit and experimental virtual 8-direction headphone cues.");
-            ui.label("It processes files it plays itself. System-wide Spotify/YouTube/game audio needs a WASAPI loopback + virtual device/APO architecture.");
-            ui.separator();
+            self.render_track_panel(ui);
+        });
 
-            self.render_playlist_panel(ui);
-            ui.separator();
-            self.render_profile_panel(ui);
-            ui.separator();
-            self.render_transport_panel(ui);
-            ui.separator();
+        egui::TopBottomPanel::bottom("status_panel").show(context, |ui| {
             self.render_status_panel(ui);
         });
+
+        if self.show_folder_import_modal {
+            self.render_folder_import_window(context);
+        }
     }
 }
 
 impl AudioOrbitApp {
-    fn render_playlist_panel(&mut self, ui: &mut egui::Ui) {
+    fn render_now_playing_panel(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.strong("Playlists");
+            ui.vertical(|ui| {
+                ui.heading(self.active_track_title());
 
-            let playlist_names: Vec<String> = self
-                .state
-                .playlists
-                .iter()
-                .map(|playlist| playlist.name.clone())
-                .collect();
-            let selected_playlist_name = playlist_names
-                .get(self.state.selected_playlist_index)
-                .map(String::as_str)
-                .unwrap_or("No playlist");
+                if let Some(playback) = &self.last_playback {
+                    ui.small(format!(
+                        "{} · {} Hz · {} channel(s)",
+                        display_parent(&playback.path),
+                        playback.sample_rate,
+                        playback.input_channels
+                    ));
+                } else {
+                    ui.small("Choose a playlist, folder, or track to start playback.");
+                }
+            });
 
-            egui::ComboBox::from_id_salt("playlist_selector")
-                .selected_text(selected_playlist_name)
-                .show_ui(ui, |ui| {
-                    for (index, playlist_name) in playlist_names.iter().enumerate() {
-                        if ui
-                            .selectable_value(
-                                &mut self.state.selected_playlist_index,
-                                index,
-                                playlist_name.as_str(),
-                            )
-                            .clicked()
-                        {
-                            self.selected_track_index = None;
-                        }
-                    }
-                });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Refresh output").clicked() {
+                    self.refresh_output_device();
+                }
+                ui.small(self.last_known_output_name.as_str());
+            });
+        });
 
-            if ui.button("New playlist").clicked() {
-                self.add_playlist();
+        let position = self
+            .player
+            .as_ref()
+            .map(AudioPlayer::playback_position_seconds)
+            .unwrap_or(0.0);
+        let duration = self
+            .player
+            .as_ref()
+            .and_then(AudioPlayer::playback_duration_seconds)
+            .or_else(|| self.last_playback.as_ref().map(|playback| playback.duration_seconds))
+            .unwrap_or(0.0);
+        let progress = if duration > 0.0 {
+            (position / duration).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        ui.add_sized(
+            [ui.available_width(), 18.0],
+            egui::ProgressBar::new(progress).text(format!(
+                "{} / {}",
+                format_duration(position),
+                format_duration(duration)
+            )),
+        );
+
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(self.player.is_some(), egui::Button::new("⏮ Previous"))
+                .clicked()
+            {
+                self.play_previous_track();
             }
 
-            if ui.button("Remove playlist").clicked() {
+            let play_label = match self.player.as_ref() {
+                Some(player) if player.is_playing() => "⏸ Pause",
+                Some(player) if player.is_paused() => "▶ Resume",
+                _ => "▶ Play",
+            };
+
+            if ui
+                .add_enabled(self.player.is_some(), egui::Button::new(play_label))
+                .clicked()
+            {
+                let is_active = self
+                    .player
+                    .as_ref()
+                    .map(|player| player.is_playing() || player.is_paused())
+                    .unwrap_or(false);
+
+                if is_active {
+                    self.pause_or_resume();
+                } else {
+                    self.play_selected_or_first_track();
+                }
+            }
+
+            if ui
+                .add_enabled(self.player.is_some(), egui::Button::new("⏹ Stop"))
+                .clicked()
+            {
+                self.stop();
+            }
+
+            if ui
+                .add_enabled(self.player.is_some(), egui::Button::new("Next ⏭"))
+                .clicked()
+            {
+                self.play_next_track();
+            }
+
+            ui.separator();
+            ui.checkbox(&mut self.auto_advance, "Auto-play next");
+        });
+
+        if self.settings_changed_during_playback {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "Sound profile changed. Restart the track to hear the new DSP render.",
+            );
+        }
+
+        if let Some(output_name) = self.detected_output_change.clone() {
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!("Output changed to {output_name}."),
+                );
+                if ui.button("Refresh now").clicked() {
+                    self.refresh_output_device();
+                }
+            });
+        }
+
+        ui.add_space(6.0);
+    }
+
+    fn render_library_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Library");
+        ui.small("Playlists, folder imports, and backups.");
+        ui.separator();
+
+        egui::ScrollArea::vertical()
+            .max_height(220.0)
+            .show(ui, |ui| {
+                for index in 0..self.state.playlists.len() {
+                    let playlist = &self.state.playlists[index];
+                    let selected = self.state.selected_playlist_index == index;
+                    let label = format!("{}  ·  {} tracks", playlist.name, playlist.tracks.len());
+
+                    if ui.selectable_label(selected, label).clicked() {
+                        self.state.selected_playlist_index = index;
+                        self.selected_track_index = self.eligible_track_indexes().first().copied();
+                        self.save_state_silently();
+                    }
+                }
+            });
+
+        ui.horizontal(|ui| {
+            if ui.button("New").clicked() {
+                self.add_playlist();
+            }
+            if ui.button("Remove").clicked() {
                 self.remove_current_playlist();
             }
         });
 
-        let mut playlist_name_changed = false;
-        if let Some(playlist) = self.current_playlist_mut() {
-            ui.horizontal(|ui| {
-                ui.label("Name:");
-                playlist_name_changed |= ui.text_edit_singleline(&mut playlist.name).changed();
-            });
-        }
-        if playlist_name_changed {
-            self.save_state_silently();
-        }
+        ui.separator();
+        self.render_current_playlist_controls(ui);
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Add files...").clicked() {
+                self.add_audio_files();
+            }
+            if ui.button("Add folder...").clicked() {
+                self.open_folder_import_modal();
+            }
+        });
 
         ui.horizontal(|ui| {
-            if ui.button("Add audio files...").clicked() {
-                self.add_audio_files();
+            let can_rescan = self
+                .current_playlist()
+                .and_then(|playlist| playlist.source_folder.as_ref())
+                .is_some();
+
+            if ui
+                .add_enabled(can_rescan, egui::Button::new("Rescan folder"))
+                .clicked()
+            {
+                self.rescan_current_folder();
             }
 
             if ui
-                .add_enabled(self.selected_track_index.is_some(), egui::Button::new("Remove selected track"))
+                .add_enabled(self.selected_track_index.is_some(), egui::Button::new("Remove track"))
                 .clicked()
             {
                 self.remove_selected_track();
             }
-
-            ui.checkbox(&mut self.auto_advance, "Auto-play next track");
         });
 
-        let tracks: Vec<PathBuf> = self
-            .current_playlist()
-            .map(|playlist| playlist.tracks.clone())
-            .unwrap_or_default();
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Export backup").clicked() {
+                self.export_library_backup();
+            }
+            if ui.button("Import backup").clicked() {
+                self.import_library_backup();
+            }
+        });
+    }
 
-        egui::ScrollArea::vertical()
-            .max_height(150.0)
-            .show(ui, |ui| {
-                if tracks.is_empty() {
-                    ui.small("No tracks yet. Add multiple files to build a playlist.");
+    fn render_current_playlist_controls(&mut self, ui: &mut egui::Ui) {
+        let mut playlist_changed = false;
+        if let Some(playlist) = self.current_playlist_mut() {
+            ui.label("Playlist name");
+            playlist_changed |= ui.text_edit_singleline(&mut playlist.name).changed();
+        }
+
+        if playlist_changed {
+            self.save_state_silently();
+        }
+
+        let Some(playlist) = self.current_playlist() else {
+            return;
+        };
+
+        let groups = playlist.folder_groups();
+        let selected_group = playlist.selected_group.clone();
+        let selected_label = playlist.selected_group_label();
+        let source_folder = playlist.source_folder.clone();
+        let folder_depth = playlist.folder_depth;
+
+        if let Some(folder) = source_folder {
+            ui.small(format!("Folder: {}", folder.display()));
+            ui.small(format!("Grouping depth: {folder_depth} folder level(s)"));
+        }
+
+        let mut next_group = selected_group.clone();
+        egui::ComboBox::from_id_salt("folder_group_selector")
+            .selected_text(selected_label)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(next_group.is_none(), "All folders")
+                    .clicked()
+                {
+                    next_group = None;
                 }
 
-                for (index, track) in tracks.iter().enumerate() {
-                    let label = format!("{}  {}", index + 1, display_file_name(track));
-                    let selected = self.selected_track_index == Some(index);
-                    if ui.selectable_label(selected, label).clicked() {
-                        self.selected_track_index = Some(index);
+                for group in groups {
+                    let is_selected = next_group.as_ref() == Some(&group);
+                    if ui.selectable_label(is_selected, group.as_str()).clicked() {
+                        next_group = Some(group);
                     }
                 }
             });
+
+        if next_group != selected_group {
+            if let Some(playlist) = self.current_playlist_mut() {
+                playlist.set_selected_group(next_group);
+            }
+            self.ensure_selected_track_visible();
+            self.save_state_silently();
+        }
+    }
+
+    fn render_track_panel(&mut self, ui: &mut egui::Ui) {
+        let Some(playlist) = self.current_playlist() else {
+            ui.heading("No playlist");
+            return;
+        };
+
+        let playlist_name = playlist.name.clone();
+        let selected_group_label = playlist.selected_group_label();
+        let filtered_indexes = playlist.filtered_track_indexes();
+        let visible_count = filtered_indexes.len();
+        let total_count = playlist.tracks.len();
+
+        ui.heading(playlist_name);
+        ui.label(format!(
+            "Showing {visible_count} of {total_count} track(s) · {selected_group_label}"
+        ));
+        ui.separator();
+
+        if visible_count == 0 {
+            ui.centered_and_justified(|ui| {
+                ui.label("No tracks in this view. Add files or import a music folder.");
+            });
+            return;
+        }
+
+        let visible_tracks: Vec<(usize, String, String, PathBuf)> = self
+            .current_playlist()
+            .map(|playlist| {
+                filtered_indexes
+                    .into_iter()
+                    .filter_map(|index| {
+                        playlist.tracks.get(index).map(|track| {
+                            (index, track.title.clone(), track.group.clone(), track.path.clone())
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for (index, title, group, path) in visible_tracks {
+                let is_selected = self.selected_track_index == Some(index);
+                let is_active = self.active_track_index == Some(index);
+                let marker = if is_active { "▶" } else { " " };
+                let label = format!("{marker} {:03}. {}", index + 1, title);
+
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(is_selected, label).clicked() {
+                            self.selected_track_index = Some(index);
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.small(group);
+                        });
+                    });
+                    ui.small(path.display().to_string());
+                });
+            }
+        });
     }
 
     fn render_profile_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Sound profiles");
+        ui.small("Changes are saved immediately. Restart the current track to apply them.");
+        ui.separator();
+
+        let profile_names: Vec<String> = self
+            .state
+            .profiles
+            .iter()
+            .map(|profile| profile.name.clone())
+            .collect();
+        let selected_profile_name = profile_names
+            .get(self.state.selected_profile_index)
+            .map(String::as_str)
+            .unwrap_or("No profile");
+
+        egui::ComboBox::from_id_salt("profile_selector")
+            .selected_text(selected_profile_name)
+            .show_ui(ui, |ui| {
+                for (index, profile_name) in profile_names.iter().enumerate() {
+                    ui.selectable_value(
+                        &mut self.state.selected_profile_index,
+                        index,
+                        profile_name.as_str(),
+                    );
+                }
+            });
+
         ui.horizontal(|ui| {
-            ui.strong("Sound profiles");
-
-            let profile_names: Vec<String> = self
-                .state
-                .profiles
-                .iter()
-                .map(|profile| profile.name.clone())
-                .collect();
-            let selected_profile_name = profile_names
-                .get(self.state.selected_profile_index)
-                .map(String::as_str)
-                .unwrap_or("No profile");
-
-            egui::ComboBox::from_id_salt("profile_selector")
-                .selected_text(selected_profile_name)
-                .show_ui(ui, |ui| {
-                    for (index, profile_name) in profile_names.iter().enumerate() {
-                        ui.selectable_value(
-                            &mut self.state.selected_profile_index,
-                            index,
-                            profile_name.as_str(),
-                        );
-                    }
-                });
-
             if ui.button("New profile").clicked() {
                 self.add_profile();
             }
 
-            if ui.button("Remove profile").clicked() {
+            if ui.button("Remove").clicked() {
                 self.remove_current_profile();
             }
         });
 
+        ui.separator();
+
         let mut profile_changed = false;
         if let Some(profile) = self.current_profile_mut() {
-            ui.horizontal(|ui| {
-                ui.label("Name:");
-                profile_changed |= ui.text_edit_singleline(&mut profile.name).changed();
-            });
+            ui.label("Profile name");
+            profile_changed |= ui.text_edit_singleline(&mut profile.name).changed();
 
-            ui.horizontal(|ui| {
-                ui.label("Mode:");
-                profile_changed |= ui
-                    .radio_value(
-                        &mut profile.settings.mode,
-                        OrbitMode::SmoothStereoOrbit,
-                        OrbitMode::SmoothStereoOrbit.label(),
-                    )
-                    .changed();
-                profile_changed |= ui
-                    .radio_value(
-                        &mut profile.settings.mode,
-                        OrbitMode::VirtualEightDirectionOrbit,
-                        OrbitMode::VirtualEightDirectionOrbit.label(),
-                    )
-                    .changed();
-            });
-
+            ui.separator();
+            ui.label("Orbit mode");
+            profile_changed |= ui
+                .radio_value(
+                    &mut profile.settings.mode,
+                    OrbitMode::SmoothStereoOrbit,
+                    OrbitMode::SmoothStereoOrbit.label(),
+                )
+                .changed();
+            profile_changed |= ui
+                .radio_value(
+                    &mut profile.settings.mode,
+                    OrbitMode::VirtualEightDirectionOrbit,
+                    OrbitMode::VirtualEightDirectionOrbit.label(),
+                )
+                .changed();
             ui.small(profile.settings.mode.description());
 
+            ui.separator();
             profile_changed |= ui
                 .add(
                     egui::Slider::new(&mut profile.settings.output_level_percent, 1u8..=100u8)
@@ -574,13 +1063,13 @@ impl AudioOrbitApp {
             profile_changed |= ui
                 .add(
                     egui::Slider::new(&mut profile.settings.transition_smoothness_percent, 0u8..=100u8)
-                        .text("Transition Smoothness (%)"),
+                        .text("Motion Smoothness (%)"),
                 )
                 .changed();
             profile_changed |= ui
                 .add(
                     egui::Slider::new(&mut profile.settings.depth_cue_percent, 0u8..=100u8)
-                        .text("Front/Back Cue Strength (%)"),
+                        .text("Surround Cue Strength (%)"),
                 )
                 .changed();
         }
@@ -593,92 +1082,72 @@ impl AudioOrbitApp {
         }
     }
 
-    fn render_transport_panel(&mut self, ui: &mut egui::Ui) {
+    fn render_status_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    self.player.is_some() && self.selected_track_path().is_some(),
-                    egui::Button::new("Play selected"),
-                )
-                .clicked()
-            {
-                self.play_selected_track();
-            }
+            ui.label(self.status_message.as_str());
 
-            if ui
-                .add_enabled(self.player.is_some(), egui::Button::new("Previous"))
-                .clicked()
-            {
-                self.play_previous_track();
-            }
-
-            if ui
-                .add_enabled(self.player.is_some(), egui::Button::new("Next"))
-                .clicked()
-            {
-                self.play_next_track();
-            }
-
-            if ui
-                .add_enabled(self.player.is_some(), egui::Button::new("Pause / Resume"))
-                .clicked()
-            {
-                self.pause_or_resume();
-            }
-
-            if ui
-                .add_enabled(self.player.is_some(), egui::Button::new("Stop"))
-                .clicked()
-            {
-                self.stop();
-            }
-
-            if ui.button("Refresh output device").clicked() {
-                self.refresh_output_device();
+            if let Some(error_message) = &self.error_message {
+                ui.separator();
+                ui.colored_label(egui::Color32::RED, error_message);
             }
         });
-
-        let output_name = self
-            .player
-            .as_ref()
-            .map(|player| player.output_device_name().to_owned())
-            .unwrap_or_else(|| "No output device".to_owned());
-        ui.small(format!("Output: {output_name}"));
     }
 
-    fn render_status_panel(&mut self, ui: &mut egui::Ui) {
-        ui.strong("Status");
-        ui.label(&self.status_message);
+    fn render_folder_import_window(&mut self, context: &egui::Context) {
+        let mut is_open = self.show_folder_import_modal;
+        let mut close_after_import = false;
 
-        if self.settings_changed_during_playback {
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                "Settings changed. Restart playback to hear the updated DSP render.",
-            );
-        }
+        egui::Window::new("Add music folder")
+            .open(&mut is_open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(520.0)
+            .show(context, |ui| {
+                ui.label("Create a playlist from a folder and group tracks by the first N subfolder levels.");
+                ui.add_space(8.0);
 
-        if let Some(info) = &self.last_playback {
-            ui.small(format!(
-                "Source: {} channel(s), {} Hz, {:.1}s. Rendered stereo samples: {}.",
-                info.input_channels,
-                info.sample_rate,
-                info.duration_seconds,
-                info.output_samples
-            ));
-        }
+                ui.horizontal(|ui| {
+                    ui.label("Folder:");
+                    let folder_label = self
+                        .pending_folder_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "No folder selected".to_owned());
+                    ui.monospace(folder_label);
+                });
 
-        if let Some(error_message) = &self.error_message {
-            ui.colored_label(egui::Color32::RED, error_message);
-        }
+                if ui.button("Choose folder...").clicked() {
+                    self.pick_music_folder();
+                }
 
-        ui.add_space(8.0);
-        ui.small("Virtual 8-direction mode is a stereo headphone illusion, not real Dolby Atmos/HRTF. For true system-wide audio processing, the next architecture step is WASAPI loopback capture plus a virtual output device or APO.");
+                ui.separator();
+                ui.label("Playlist name");
+                ui.text_edit_singleline(&mut self.pending_playlist_name);
+
+                ui.add(
+                    egui::Slider::new(&mut self.pending_folder_depth, 0usize..=5usize)
+                        .text("Group by folder levels"),
+                );
+                ui.small("Example: depth 2 turns D:\\mp3\\Artist\\Album\\song.mp3 into Artist / Album.");
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Import folder as playlist").clicked() {
+                        close_after_import = self.import_folder_playlist();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close_after_import = true;
+                    }
+                });
+            });
+
+        self.show_folder_import_modal = is_open && !close_after_import;
     }
 }
 
 fn ensure_state_is_valid(state: &mut SavedState) {
     if state.playlists.is_empty() {
-        state.playlists.push(Playlist::new("Main playlist"));
+        state.playlists.push(Playlist::new("Local music"));
     }
 
     if state.profiles.is_empty() {
@@ -694,13 +1163,19 @@ fn ensure_state_is_valid(state: &mut SavedState) {
     if state.selected_profile_index >= state.profiles.len() {
         state.selected_profile_index = 0;
     }
+
+    for playlist in &mut state.playlists {
+        playlist.set_selected_group(playlist.selected_group.clone());
+    }
 }
 
 fn next_valid_track_index(previous_index: usize, remaining_len: usize) -> Option<usize> {
     if remaining_len == 0 {
         None
+    } else if previous_index >= remaining_len {
+        Some(remaining_len - 1)
     } else {
-        Some(previous_index.min(remaining_len - 1))
+        Some(previous_index)
     }
 }
 
@@ -709,4 +1184,17 @@ fn display_file_name(path: &Path) -> String {
         .and_then(|name| name.to_str())
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| path.display().to_string())
+}
+
+fn display_parent(path: &Path) -> String {
+    path.parent()
+        .map(|parent| parent.display().to_string())
+        .unwrap_or_else(|| "Unknown folder".to_owned())
+}
+
+fn format_duration(seconds: f32) -> String {
+    let total_seconds = seconds.max(0.0).round() as u64;
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    format!("{minutes}:{seconds:02}")
 }
