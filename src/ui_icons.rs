@@ -16,7 +16,7 @@ pub fn install(context: &egui::Context) {
             .families
             .entry(family)
             .or_default()
-            .insert(0, LUCIDE_FONT_NAME.to_owned());
+            .push(LUCIDE_FONT_NAME.to_owned());
     }
 
     context.set_fonts(fonts);

@@ -64,6 +64,7 @@ struct AudioOrbitApp {
     error_message: Option<String>,
     crossfade_started_for_path: Option<PathBuf>,
     show_folder_import_modal: bool,
+    show_settings_modal: bool,
     pending_folder_path: Option<PathBuf>,
     pending_playlist_name: String,
     pending_folder_depth: usize,
@@ -99,6 +100,7 @@ impl AudioOrbitApp {
                     error_message: None,
                     crossfade_started_for_path: None,
                     show_folder_import_modal: false,
+                    show_settings_modal: false,
                     pending_folder_path: None,
                     pending_playlist_name,
                     pending_folder_depth: 2,
@@ -123,6 +125,7 @@ impl AudioOrbitApp {
                 error_message: Some(error.to_string()),
                 crossfade_started_for_path: None,
                 show_folder_import_modal: false,
+                show_settings_modal: false,
                 pending_folder_path: None,
                 pending_playlist_name,
                 pending_folder_depth: 2,
@@ -999,13 +1002,6 @@ impl eframe::App for AudioOrbitApp {
                 self.render_library_panel(ui);
             });
 
-        egui::SidePanel::right("profile_panel")
-            .resizable(true)
-            .default_width(320.0)
-            .show(context, |ui| {
-                self.render_profile_panel(ui);
-            });
-
         egui::CentralPanel::default().show(context, |ui| {
             self.render_track_panel(ui);
         });
@@ -1016,6 +1012,10 @@ impl eframe::App for AudioOrbitApp {
 
         if self.show_folder_import_modal {
             self.render_folder_import_window(context);
+        }
+
+        if self.show_settings_modal {
+            self.render_settings_modal(context);
         }
     }
 }
@@ -1042,6 +1042,9 @@ impl AudioOrbitApp {
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button(ui_icons::label(Icon::Settings2, "Settings")).clicked() {
+                    self.show_settings_modal = true;
+                }
                 if ui.button(ui_icons::label(Icon::RefreshCw, "Refresh output")).clicked() {
                     self.refresh_output_device();
                 }
@@ -1171,12 +1174,18 @@ impl AudioOrbitApp {
                 for index in 0..self.state.playlists.len() {
                     let selected = self.state.selected_playlist_index == index;
                     let playlist = self.state.playlists[index].clone();
+                    let show_actions = selected;
+
                     let row = ui.horizontal(|ui| {
-                        if ui.small_button(ui_icons::icon(Icon::ArrowUp)).clicked() {
-                            self.move_playlist(index, -1);
-                        }
-                        if ui.small_button(ui_icons::icon(Icon::ArrowDown)).clicked() {
-                            self.move_playlist(index, 1);
+                        if show_actions {
+                            if ui.small_button(ui_icons::icon(Icon::ArrowUp)).on_hover_text("Move up").clicked() {
+                                self.move_playlist(index, -1);
+                            }
+                            if ui.small_button(ui_icons::icon(Icon::ArrowDown)).on_hover_text("Move down").clicked() {
+                                self.move_playlist(index, 1);
+                            }
+                        } else {
+                            ui.add_space(44.0);
                         }
 
                         let mut clicked_row = false;
@@ -1195,15 +1204,22 @@ impl AudioOrbitApp {
                                 self.editing_playlist_index = None;
                             }
                         } else {
-                            let label = format!("{} {}  ·  {}", playlist.kind.icon(), playlist.name, playlist.tracks.len());
-                            if ui.selectable_label(selected, label).clicked() {
-                                clicked_row = true;
-                            }
+                            ui.vertical(|ui| {
+                                let label = format!("{} {}", playlist.kind.icon(), playlist.name);
+                                if ui.selectable_label(selected, label).clicked() {
+                                    clicked_row = true;
+                                }
+                                ui.small(format!("{} track(s)", playlist.tracks.len()));
+                            });
                         }
 
-                        if ui.small_button(ui_icons::icon(Icon::Pencil)).on_hover_text("Rename").clicked() && playlist.kind != PlaylistKind::Favorites {
-                            self.editing_playlist_index = Some(index);
-                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if show_actions && playlist.kind != PlaylistKind::Favorites {
+                                if ui.small_button(ui_icons::icon(Icon::Pencil)).on_hover_text("Rename").clicked() {
+                                    self.editing_playlist_index = Some(index);
+                                }
+                            }
+                        });
 
                         clicked_row
                     });
@@ -1608,6 +1624,33 @@ impl AudioOrbitApp {
             self.save_state_silently();
             self.apply_current_profile_live();
         }
+    }
+
+    fn render_settings_modal(&mut self, context: &egui::Context) {
+        let screen_rect = context.content_rect();
+        let painter = context.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("settings_modal_backdrop")));
+        painter.rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(160));
+
+        let mut is_open = self.show_settings_modal;
+        egui::Window::new("Settings")
+            .open(&mut is_open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(620.0)
+            .default_height(640.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(context, |ui| {
+                ui.heading("Playback and sound settings");
+                ui.small("Mac-style modal layout with focused settings and dimmed background.");
+                ui.separator();
+                self.render_profile_panel(ui);
+            });
+
+        if context.input(|input| input.key_pressed(egui::Key::Escape)) {
+            is_open = false;
+        }
+
+        self.show_settings_modal = is_open;
     }
 
     fn render_status_panel(&mut self, ui: &mut egui::Ui) {
