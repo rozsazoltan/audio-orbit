@@ -1,5 +1,6 @@
 use crate::dsp::{render_orbit_to_stereo, DspSettings, RenderInfo};
 use anyhow::{Context, Result};
+use cpal::traits::{DeviceTrait, HostTrait};
 use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 use std::{
     fs::File,
@@ -19,10 +20,12 @@ pub struct AudioPlayer {
     _stream: OutputStream,
     stream_handle: OutputStreamHandle,
     sink: Option<Sink>,
+    output_device_name: String,
 }
 
 impl AudioPlayer {
     pub fn new() -> Result<Self> {
+        let output_device_name = default_output_device_name();
         let (_stream, stream_handle) = OutputStream::try_default()
             .context("failed to open the default audio output device")?;
 
@@ -30,7 +33,12 @@ impl AudioPlayer {
             _stream,
             stream_handle,
             sink: None,
+            output_device_name,
         })
+    }
+
+    pub fn output_device_name(&self) -> &str {
+        &self.output_device_name
     }
 
     pub fn play_file_with_orbit(&mut self, path: &Path, settings: DspSettings) -> Result<PlaybackInfo> {
@@ -87,6 +95,10 @@ impl AudioPlayer {
             .unwrap_or(false)
     }
 
+    pub fn has_finished(&self) -> bool {
+        self.sink.as_ref().map(|sink| sink.empty()).unwrap_or(false)
+    }
+
     fn play_processed_samples(&mut self, samples: Vec<f32>, sample_rate: u32) -> Result<()> {
         let sink = Sink::try_new(&self.stream_handle)
             .context("failed to create audio playback sink")?;
@@ -108,4 +120,12 @@ fn playback_info(path: &Path, render_info: RenderInfo) -> PlaybackInfo {
         sample_rate: render_info.sample_rate,
         output_samples: render_info.output_samples,
     }
+}
+
+fn default_output_device_name() -> String {
+    let host = cpal::default_host();
+
+    host.default_output_device()
+        .and_then(|device| device.name().ok())
+        .unwrap_or_else(|| "Default output device".to_owned())
 }

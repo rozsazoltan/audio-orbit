@@ -1,37 +1,54 @@
 # Audio Orbit
 
-Audio Orbit is a lightweight desktop audio player that creates an orbit-style effect by processing the selected music file directly and moving the decoded signal across the stereo field.
+Audio Orbit is a lightweight desktop audio player that applies smooth orbit-style DSP to local music files. It decodes the selected audio, renders a processed stereo signal, and plays that processed output instead of changing Windows volume or endpoint channel levels.
 
-This version does **not** change Windows system volume or endpoint channel levels. It loads an audio file, decodes it, renders a processed stereo signal, and plays that processed audio through your default output device.
+## What it does
 
-## Features
+- Plays local audio files such as MP3, WAV, FLAC, and OGG.
+- Supports multiple playlists with multiple tracks.
+- Supports multiple sound profiles with separate DSP settings.
+- Applies smooth stereo orbit panning to the decoded audio signal.
+- Includes an experimental virtual 8-direction orbit mode for headphone cues.
+- Shows a warning when DSP settings change during playback, because the current track must be restarted to hear the new render.
+- Lets you refresh the output device if the Windows speaker/headphone output changes while the app is open.
+- Uses the project icon for both the embedded Windows executable resource and the native egui window icon.
+- Builds Windows `.exe` releases through GitHub Actions.
 
-- Open local audio files such as MP3, WAV, FLAC, and OGG.
-- Process the music signal itself instead of changing system volume.
-- Smooth left/right sweep mode for strong headphone panning.
-- 8-step orbit cue mode for a more directional, stepped movement effect.
-- Adjustable output level, stereo width, and orbit speed.
-- Native desktop GUI built with Rust and egui.
-- Windows `.exe` release builds through GitHub Actions.
+## Important audio limitation
 
-## Important limitation
+Audio Orbit currently processes audio files that it plays itself. It cannot directly modify Spotify, YouTube, browser, game, or other app audio.
 
-Audio Orbit can move the audio it plays itself. It cannot directly move audio from Spotify, YouTube, games, browsers, or other applications.
+Processing the current Windows system sound is possible as a different architecture: capture the default render endpoint with WASAPI loopback, process the captured samples, then route the processed output to another device or to a virtual audio device. Without a virtual audio device/APO style setup, a normal desktop player cannot cleanly replace the system mix in-place.
 
-To process all system audio from other apps, the project would need a virtual audio device, audio driver, or system-wide audio plugin/APO. That is a different architecture from a normal desktop player.
+## About virtual 8-direction mode
 
-The 8-step orbit mode is a stereo headphone cue. It is not true HRTF surround and cannot perfectly place sound in front, behind, above, or below you. Real 8-direction spatial audio requires HRTF/DSP processing or a dedicated spatial audio engine.
+The virtual 8-direction mode is not the old “8 step” mode. It is intended as a continuous headphone cue path through these perceived zones:
 
-## Recommended test settings
+```text
+front-center -> right-front -> right-mid -> right-back -> rear-center -> left-back -> left-mid -> left-front
+```
 
-For the strongest effect:
+This is still stereo DSP, not true Dolby Atmos, HRTF, or real surround. It uses left/right panning, interaural delay, front/back tone cues, and smoother transition filtering to create a stronger illusion through headphones.
+
+## Recommended settings
+
+For a strong but smoother effect:
 
 - Use headphones.
-- Open a normal stereo music file.
-- Set Output Level to 95-100%.
-- Set Stereo Width to 100%.
-- Start with Smooth left/right sweep.
-- Try Orbit Speed between 80% and 150%.
+- Start with `Smooth stereo orbit`.
+- Set `Stereo Width` to 100%.
+- Set `Orbit Speed` between 60% and 100%.
+- Set `Transition Smoothness` between 80% and 100%.
+- Try `Virtual 8-direction orbit` with `Front/Back Cue Strength` around 60-80%.
+
+## Icon note on Windows
+
+If the executable icon looks old in File Explorer or the taskbar, Windows may be showing a cached icon. The app now sets both:
+
+- the embedded `.exe` icon through `build.rs` and `winresource`, and
+- the native window/taskbar icon through `egui::ViewportBuilder::with_icon`.
+
+If Windows still shows the previous icon, rebuild the release executable and refresh the Windows icon cache or rename the exe/release asset so Explorer treats it as a new file.
 
 ## Requirements
 
@@ -61,11 +78,11 @@ target\release\audio-orbit.exe
 Open GitHub Actions, choose the `Release` workflow, and run it manually with a version input such as:
 
 ```text
-0.2.0
+0.3.0
 ```
 
-The workflow validates the version, converts it to the Git tag `v0.2.0`, updates the release metadata in `Cargo.toml`, `Cargo.lock`, and the Windows executable manifest before building, then uploads the executable to a new GitHub Release as:
+The workflow validates the version, converts it to the Git tag `v0.3.0`, updates the release metadata in `Cargo.toml`, `Cargo.lock`, and the Windows executable manifest before building, then uploads the executable to a new GitHub Release as:
 
 ```text
-audio-orbit-v0.2.0-windows-x64.exe
+audio-orbit-v0.3.0-windows-x64.exe
 ```
