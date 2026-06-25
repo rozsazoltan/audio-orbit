@@ -1,25 +1,21 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod audio;
+mod audio_player;
+mod dsp;
 
-use crate::audio::{AudioController, VolumeIntensity};
-use eframe::egui;
-use std::f32::consts::PI;
-use std::sync::{
-    atomic::{AtomicBool, AtomicU8, Ordering},
-    Arc,
+use crate::{
+    audio_player::{AudioPlayer, PlaybackInfo},
+    dsp::{DspSettings, OrbitMode},
 };
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
-
-const DEFAULT_ORBIT_RATE_HZ: f32 = 0.9;
-const ORBIT_UPDATES_PER_SECOND: f32 = 60.0;
+use eframe::egui;
+use rfd::FileDialog;
+use std::path::{Path, PathBuf};
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([560.0, 450.0])
-            .with_min_inner_size([500.0, 410.0])
+            .with_inner_size([620.0, 480.0])
+            .with_min_inner_size([560.0, 440.0])
             .with_resizable(false),
         ..Default::default()
     };
@@ -27,305 +23,214 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         &format!("Audio Orbit v{}", env!("CARGO_PKG_VERSION")),
         options,
-        Box::new(|_creation_context| Ok(Box::new(BalanceApp::new()))),
+        Box::new(|_creation_context| Ok(Box::new(AudioOrbitApp::new()))),
     )
 }
 
-struct BalanceApp {
-    controller: Option<AudioController>,
-    interface_name: String,
+struct AudioOrbitApp {
+    player: Option<AudioPlayer>,
+    selected_file: Option<PathBuf>,
+    last_playback: Option<PlaybackInfo>,
+    settings: DspSettings,
+    status_message: String,
     error_message: Option<String>,
-    left_percent: u8,
-    right_percent: u8,
-    output_level_percent: u8,
-    stereo_width_percent: u8,
-    orbit_speed_percent: u8,
-    is_orbit_enabled: bool,
-    worker_running: Arc<AtomicBool>,
-    worker_output_level_percent: Arc<AtomicU8>,
-    worker_stereo_width_percent: Arc<AtomicU8>,
-    worker_speed_percent: Arc<AtomicU8>,
-    worker_handle: Option<JoinHandle<()>>,
 }
 
-impl BalanceApp {
+impl AudioOrbitApp {
     fn new() -> Self {
-        let worker_running = Arc::new(AtomicBool::new(false));
-        let worker_output_level_percent = Arc::new(AtomicU8::new(100));
-        let worker_stereo_width_percent = Arc::new(AtomicU8::new(100));
-        let worker_speed_percent = Arc::new(AtomicU8::new(100));
-
-        match AudioController::new() {
-            Ok(controller) => {
-                let balance = controller
-                    .get_balance()
-                    .unwrap_or_else(|_| VolumeIntensity::new(100, 100));
-                let interface_name = controller.interface_name();
-
-                Self {
-                    controller: Some(controller),
-                    interface_name,
-                    error_message: None,
-                    left_percent: balance.left_percent,
-                    right_percent: balance.right_percent,
-                    output_level_percent: 100,
-                    stereo_width_percent: 100,
-                    orbit_speed_percent: 100,
-                    is_orbit_enabled: false,
-                    worker_running,
-                    worker_output_level_percent,
-                    worker_stereo_width_percent,
-                    worker_speed_percent,
-                    worker_handle: None,
-                }
-            }
+        match AudioPlayer::new() {
+            Ok(player) => Self {
+                player: Some(player),
+                selected_file: None,
+                last_playback: None,
+                settings: DspSettings::default(),
+                status_message: "Open an audio file, then play it through the orbit DSP.".to_owned(),
+                error_message: None,
+            },
             Err(error) => Self {
-                controller: None,
-                interface_name: "No supported audio endpoint".to_owned(),
+                player: None,
+                selected_file: None,
+                last_playback: None,
+                settings: DspSettings::default(),
+                status_message: "No audio output device is available.".to_owned(),
                 error_message: Some(error.to_string()),
-                left_percent: 100,
-                right_percent: 100,
-                output_level_percent: 100,
-                stereo_width_percent: 100,
-                orbit_speed_percent: 100,
-                is_orbit_enabled: false,
-                worker_running,
-                worker_output_level_percent,
-                worker_stereo_width_percent,
-                worker_speed_percent,
-                worker_handle: None,
             },
         }
     }
 
-    fn apply_manual_balance(&mut self) {
-        if self.is_orbit_enabled {
-            return;
-        }
+    fn open_file(&mut self) {
+        let picked_file = FileDialog::new()
+            .add_filter("Audio files", &["mp3", "wav", "flac", "ogg"])
+            .add_filter("All files", &["*"])
+            .pick_file();
 
-        if let Some(controller) = &self.controller {
-            if let Err(error) = controller.set_balance(VolumeIntensity::new(
-                self.left_percent,
-                self.right_percent,
-            )) {
-                self.error_message = Some(error.to_string());
-            }
+        if let Some(path) = picked_file {
+            self.selected_file = Some(path.clone());
+            self.status_message = format!("Selected: {}", display_file_name(&path));
+            self.error_message = None;
         }
     }
 
-    fn set_test_pan(&mut self, pan: f32) {
-        if self.is_orbit_enabled {
+    fn play_selected_file(&mut self) {
+        let Some(path) = self.selected_file.clone() else {
+            self.error_message = Some("Select an audio file first.".to_owned());
             return;
-        }
-
-        let level = self.output_level_percent.min(100);
-        let intensity = if pan < 0.0 {
-            VolumeIntensity::new(level, 0)
-        } else if pan > 0.0 {
-            VolumeIntensity::new(0, level)
-        } else {
-            VolumeIntensity::new(level, level)
         };
 
-        self.left_percent = intensity.left_percent;
-        self.right_percent = intensity.right_percent;
-
-        if let Some(controller) = &self.controller {
-            if let Err(error) = controller.set_balance(intensity) {
-                self.error_message = Some(error.to_string());
-            }
-        }
-    }
-
-    fn start_orbit(&mut self) {
-        if self.controller.is_none() || self.worker_running.load(Ordering::SeqCst) {
+        let Some(player) = &mut self.player else {
+            self.error_message = Some("No audio output device is available.".to_owned());
             return;
-        }
+        };
 
-        self.worker_running.store(true, Ordering::SeqCst);
-        self.worker_output_level_percent
-            .store(self.output_level_percent, Ordering::SeqCst);
-        self.worker_stereo_width_percent
-            .store(self.stereo_width_percent, Ordering::SeqCst);
-        self.worker_speed_percent
-            .store(self.orbit_speed_percent, Ordering::SeqCst);
+        self.status_message = "Decoding and processing audio...".to_owned();
+        self.error_message = None;
 
-        let worker_running = Arc::clone(&self.worker_running);
-        let worker_output_level_percent = Arc::clone(&self.worker_output_level_percent);
-        let worker_stereo_width_percent = Arc::clone(&self.worker_stereo_width_percent);
-        let worker_speed_percent = Arc::clone(&self.worker_speed_percent);
-
-        self.worker_handle = Some(thread::spawn(move || {
-            let Ok(controller) = AudioController::new() else {
-                worker_running.store(false, Ordering::SeqCst);
-                return;
-            };
-
-            let interval = Duration::from_secs_f32(1.0 / ORBIT_UPDATES_PER_SECOND);
-            let mut elapsed = 0.0_f32;
-
-            while worker_running.load(Ordering::SeqCst) {
-                let output_level_percent = worker_output_level_percent.load(Ordering::SeqCst);
-                let width = worker_stereo_width_percent.load(Ordering::SeqCst) as f32 / 100.0;
-                let speed = (worker_speed_percent.load(Ordering::SeqCst) as f32 / 100.0).max(0.05);
-                let pan = (2.0 * PI * DEFAULT_ORBIT_RATE_HZ * speed * elapsed).sin() * width;
-
-                let _ = controller.set_balance(equal_power_stereo_pan(pan, output_level_percent));
-
-                elapsed += interval.as_secs_f32();
-                thread::sleep(interval);
+        match player.play_file_with_orbit(&path, self.settings) {
+            Ok(info) => {
+                self.status_message = format!(
+                    "Playing {} through {}.",
+                    display_file_name(&info.path),
+                    self.settings.mode.label()
+                );
+                self.last_playback = Some(info);
             }
-        }));
-
-        self.is_orbit_enabled = true;
+            Err(error) => {
+                self.error_message = Some(error.to_string());
+                self.status_message = "Playback failed.".to_owned();
+            }
+        }
     }
 
-    fn stop_orbit(&mut self) {
-        self.worker_running.store(false, Ordering::SeqCst);
-
-        if let Some(handle) = self.worker_handle.take() {
-            let _ = handle.join();
+    fn stop(&mut self) {
+        if let Some(player) = &mut self.player {
+            player.stop();
         }
 
-        self.is_orbit_enabled = false;
+        self.status_message = "Playback stopped.".to_owned();
+    }
+
+    fn pause_or_resume(&mut self) {
+        if let Some(player) = &mut self.player {
+            player.pause_or_resume();
+
+            if player.is_paused() {
+                self.status_message = "Playback paused.".to_owned();
+            } else if player.is_playing() {
+                self.status_message = "Playback resumed.".to_owned();
+            }
+        }
     }
 }
 
-impl Drop for BalanceApp {
+impl Drop for AudioOrbitApp {
     fn drop(&mut self) {
-        self.stop_orbit();
+        self.stop();
     }
 }
 
-impl eframe::App for BalanceApp {
+impl eframe::App for AudioOrbitApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(context, |ui| {
             ui.heading("Audio Orbit");
-            ui.label("Stereo left/right panning for Windows headphones and stereo output devices.");
-            ui.label("This is not true 8-direction/HRTF surround; it only moves sound between left and right.");
+            ui.label("A local audio player that moves the decoded music signal across the stereo field.");
+            ui.label("It processes the selected file itself; it does not control Spotify, YouTube, or other apps.");
             ui.separator();
 
             ui.horizontal(|ui| {
-                ui.strong("Interface:");
-                ui.label(&self.interface_name);
+                if ui.button("Open audio file...").clicked() {
+                    self.open_file();
+                }
+
+                let selected = self
+                    .selected_file
+                    .as_ref()
+                    .map(|path| display_file_name(path))
+                    .unwrap_or_else(|| "No file selected".to_owned());
+                ui.label(selected);
             });
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label("Mode:");
+                ui.radio_value(
+                    &mut self.settings.mode,
+                    OrbitMode::SmoothLeftRight,
+                    OrbitMode::SmoothLeftRight.label(),
+                );
+                ui.radio_value(
+                    &mut self.settings.mode,
+                    OrbitMode::EightStepOrbit,
+                    OrbitMode::EightStepOrbit.label(),
+                );
+            });
+
+            ui.add(
+                egui::Slider::new(&mut self.settings.output_level_percent, 1u8..=100u8)
+                    .text("Output Level (%)"),
+            );
+            ui.add(
+                egui::Slider::new(&mut self.settings.stereo_width_percent, 0u8..=100u8)
+                    .text("Stereo Width (%)"),
+            );
+            ui.add(
+                egui::Slider::new(&mut self.settings.orbit_speed_percent, 10u8..=200u8)
+                    .text("Orbit Speed (%)"),
+            );
+
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        self.player.is_some() && self.selected_file.is_some(),
+                        egui::Button::new("Play with orbit DSP"),
+                    )
+                    .clicked()
+                {
+                    self.play_selected_file();
+                }
+
+                if ui
+                    .add_enabled(self.player.is_some(), egui::Button::new("Pause / Resume"))
+                    .clicked()
+                {
+                    self.pause_or_resume();
+                }
+
+                if ui
+                    .add_enabled(self.player.is_some(), egui::Button::new("Stop"))
+                    .clicked()
+                {
+                    self.stop();
+                }
+            });
+
+            ui.separator();
+            ui.strong("Status");
+            ui.label(&self.status_message);
+
+            if let Some(info) = &self.last_playback {
+                ui.small(format!(
+                    "Source: {} channel(s), {} Hz, {:.1}s. Rendered stereo samples: {}.",
+                    info.input_channels,
+                    info.sample_rate,
+                    info.duration_seconds,
+                    info.output_samples
+                ));
+            }
 
             if let Some(error_message) = &self.error_message {
                 ui.colored_label(egui::Color32::RED, error_message);
             }
 
             ui.add_space(8.0);
-
-            ui.add_enabled_ui(!self.is_orbit_enabled && self.controller.is_some(), |ui| {
-                let left_changed = ui
-                    .add(egui::Slider::new(&mut self.left_percent, 0u8..=100u8).text("Left (%)"))
-                    .changed();
-                let right_changed = ui
-                    .add(egui::Slider::new(&mut self.right_percent, 0u8..=100u8).text("Right (%)"))
-                    .changed();
-
-                if left_changed || right_changed {
-                    self.apply_manual_balance();
-                }
-            });
-
-            ui.separator();
-            ui.add_enabled_ui(self.controller.is_some(), |ui| {
-                if ui
-                    .add(
-                        egui::Slider::new(&mut self.output_level_percent, 0u8..=100u8)
-                            .text("Output Level (%)"),
-                    )
-                    .changed()
-                {
-                    self.worker_output_level_percent
-                        .store(self.output_level_percent, Ordering::SeqCst);
-                }
-
-                if ui
-                    .add(
-                        egui::Slider::new(&mut self.stereo_width_percent, 0u8..=100u8)
-                            .text("Stereo Width (%)"),
-                    )
-                    .changed()
-                {
-                    self.worker_stereo_width_percent
-                        .store(self.stereo_width_percent, Ordering::SeqCst);
-                }
-
-                if ui
-                    .add(
-                        egui::Slider::new(&mut self.orbit_speed_percent, 10u8..=200u8)
-                            .text("Orbit Speed (%)"),
-                    )
-                    .changed()
-                {
-                    self.worker_speed_percent
-                        .store(self.orbit_speed_percent, Ordering::SeqCst);
-                }
-            });
-
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.label("Channel test:");
-
-                if ui
-                    .add_enabled(!self.is_orbit_enabled && self.controller.is_some(), egui::Button::new("Left only"))
-                    .clicked()
-                {
-                    self.set_test_pan(-1.0);
-                }
-
-                if ui
-                    .add_enabled(!self.is_orbit_enabled && self.controller.is_some(), egui::Button::new("Center"))
-                    .clicked()
-                {
-                    self.set_test_pan(0.0);
-                }
-
-                if ui
-                    .add_enabled(!self.is_orbit_enabled && self.controller.is_some(), egui::Button::new("Right only"))
-                    .clicked()
-                {
-                    self.set_test_pan(1.0);
-                }
-            });
-            ui.small("If Left only / Right only still sounds centered or only changes loudness, the selected Windows output device does not expose usable per-channel endpoint control.");
-
-            ui.add_space(12.0);
-
-            ui.horizontal(|ui| {
-                let button_text = if self.is_orbit_enabled {
-                    "Disable Orbit Mode"
-                } else {
-                    "Enable Orbit Mode"
-                };
-
-                if ui
-                    .add_enabled(self.controller.is_some(), egui::Button::new(button_text))
-                    .clicked()
-                {
-                    if self.is_orbit_enabled {
-                        self.stop_orbit();
-                    } else {
-                        self.start_orbit();
-                    }
-                }
-
-                let status = if self.is_orbit_enabled { "Orbit ON" } else { "Orbit OFF" };
-                ui.label(status);
-            });
+            ui.small("For a strong test, use headphones, set Stereo Width to 100%, and try Smooth left/right sweep first. The 8-step mode is a stereo cue, not true HRTF surround.");
         });
     }
 }
 
-fn equal_power_stereo_pan(pan: f32, output_level_percent: u8) -> VolumeIntensity {
-    let pan = pan.clamp(-1.0, 1.0);
-    let output_level = output_level_percent.min(100) as f32;
-    let angle = (pan + 1.0) * PI / 4.0;
-
-    let left = angle.cos() * output_level;
-    let right = angle.sin() * output_level;
-
-    VolumeIntensity::new(left.round() as u8, right.round() as u8)
+fn display_file_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| path.display().to_string())
 }

@@ -1,38 +1,41 @@
 # Audio Orbit
 
-Audio Orbit is a lightweight Windows desktop app for stereo left/right audio panning.
+Audio Orbit is a lightweight desktop audio player that creates an orbit-style effect by processing the selected music file directly and moving the decoded signal across the stereo field.
 
-It can create a simple orbit-style headphone effect by moving the Windows output endpoint balance between the left and right channels. It does **not** create true 8-direction, front/back, up/down, or HRTF surround audio.
+This version does **not** change Windows system volume or endpoint channel levels. It loads an audio file, decodes it, renders a processed stereo signal, and plays that processed audio through your default output device.
 
 ## Features
 
-- Manual left/right channel volume sliders.
-- Toggleable stereo orbit panning using an equal-power pan curve.
+- Open local audio files such as MP3, WAV, FLAC, and OGG.
+- Process the music signal itself instead of changing system volume.
+- Smooth left/right sweep mode for strong headphone panning.
+- 8-step orbit cue mode for a more directional, stepped movement effect.
 - Adjustable output level, stereo width, and orbit speed.
-- Left-only, center, and right-only channel test buttons.
-- Native Windows Core Audio integration through Rust.
+- Native desktop GUI built with Rust and egui.
 - Windows `.exe` release builds through GitHub Actions.
 
-## What to expect
+## Important limitation
 
-Audio Orbit controls the default Windows output endpoint channel levels. This means it can only move sound between the left and right channels when the selected audio device exposes usable per-channel volume control.
+Audio Orbit can move the audio it plays itself. It cannot directly move audio from Spotify, YouTube, games, browsers, or other applications.
 
-It cannot move audio in 8 real directions. It cannot place sound in front, behind, above, or below you. For that, the app would need real audio processing, such as a virtual audio device, DSP pipeline, or HRTF-based engine.
+To process all system audio from other apps, the project would need a virtual audio device, audio driver, or system-wide audio plugin/APO. That is a different architecture from a normal desktop player.
+
+The 8-step orbit mode is a stereo headphone cue. It is not true HRTF surround and cannot perfectly place sound in front, behind, above, or below you. Real 8-direction spatial audio requires HRTF/DSP processing or a dedicated spatial audio engine.
+
+## Recommended test settings
 
 For the strongest effect:
 
 - Use headphones.
-- Use a stereo output device.
-- Disable mono audio in Windows accessibility settings.
-- Set Output Level to 100%.
+- Open a normal stereo music file.
+- Set Output Level to 95-100%.
 - Set Stereo Width to 100%.
-- Set Orbit Speed between 100% and 200%.
-
-Use the **Left only** and **Right only** test buttons first. If those buttons only change loudness or still sound centered, the selected Windows audio device or driver does not expose usable left/right endpoint control, so Orbit Mode will also sound like volume pumping instead of stereo movement.
+- Start with Smooth left/right sweep.
+- Try Orbit Speed between 80% and 150%.
 
 ## Requirements
 
-- Windows 10 or newer.
+- Windows 10 or newer for release executables.
 - Rust stable toolchain for local builds.
 
 ## Run locally
@@ -58,11 +61,11 @@ target\release\audio-orbit.exe
 Open GitHub Actions, choose the `Release` workflow, and run it manually with a version input such as:
 
 ```text
-0.1.1
+0.2.0
 ```
 
-The workflow validates the version, converts it to the Git tag `v0.1.1`, updates the release metadata in `Cargo.toml`, `Cargo.lock`, and the Windows executable manifest before building, then uploads the executable to a new GitHub Release as:
+The workflow validates the version, converts it to the Git tag `v0.2.0`, updates the release metadata in `Cargo.toml`, `Cargo.lock`, and the Windows executable manifest before building, then uploads the executable to a new GitHub Release as:
 
 ```text
-audio-orbit-v0.1.1-windows-x64.exe
+audio-orbit-v0.2.0-windows-x64.exe
 ```
