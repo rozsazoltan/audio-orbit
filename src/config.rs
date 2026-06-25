@@ -364,6 +364,26 @@ fn default_crossfade_seconds() -> u8 {
 }
 
 
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct WindowGeometry {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl WindowGeometry {
+    pub fn is_valid(&self) -> bool {
+        self.width >= 640.0
+            && self.height >= 420.0
+            && self.width.is_finite()
+            && self.height.is_finite()
+            && self.x.is_finite()
+            && self.y.is_finite()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UiSettings {
     #[serde(default = "default_true")]
@@ -374,6 +394,8 @@ pub struct UiSettings {
     pub player_only_mode: bool,
     #[serde(default)]
     pub show_track_search: bool,
+    #[serde(default)]
+    pub window_geometry: Option<WindowGeometry>,
 }
 
 impl Default for UiSettings {
@@ -383,6 +405,7 @@ impl Default for UiSettings {
             show_profile_panel: true,
             player_only_mode: false,
             show_track_search: false,
+            window_geometry: None,
         }
     }
 }

@@ -5,6 +5,7 @@ mod config;
 mod dsp;
 mod icon;
 mod media_keys;
+mod single_instance;
 mod ui_icons;
 mod updater;
 
@@ -13,7 +14,7 @@ use crate::{
     config::{
         app_data_dir, collect_audio_files_from_folder, display_file_name, export_state_zip,
         import_state_zip, load_state, same_path, save_state, Playlist, PlaylistKind, RepeatMode, SavedState,
-        Track, FAVORITES_PLAYLIST_NAME,
+        Track, WindowGeometry, FAVORITES_PLAYLIST_NAME,
     },
     dsp::{DspSettings, OrbitMode},
 };
@@ -34,10 +35,26 @@ const MAX_UPDATE_CHECKS_PER_SESSION: u8 = 2;
 const AUTOMATIC_UPDATE_CHECK_INTERVAL_SECONDS: u64 = 60 * 60;
 
 fn main() -> eframe::Result<()> {
+    let _single_instance_guard = match single_instance::acquire() {
+        Ok(Some(guard)) => guard,
+        Ok(None) => return Ok(()),
+        Err(error) => {
+            eprintln!("{error}");
+            return Ok(());
+        }
+    };
+
+    let mut state = load_state();
+    ensure_state_is_valid(&mut state);
+
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1240.0, 780.0])
+        .with_inner_size(initial_window_size(&state))
         .with_min_inner_size([980.0, 640.0])
         .with_resizable(true);
+
+    if let Some(position) = initial_window_position(&state) {
+        viewport = viewport.with_position(position);
+    }
 
     if let Some(icon) = icon::load_window_icon() {
         viewport = viewport.with_icon(icon);
@@ -51,12 +68,30 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         &format!("Audio Orbit v{}", env!("CARGO_PKG_VERSION")),
         options,
-        Box::new(|creation_context| {
+        Box::new(move |creation_context| {
             ui_icons::install(&creation_context.egui_ctx);
-            Ok(Box::new(AudioOrbitApp::new()))
+            Ok(Box::new(AudioOrbitApp::new(state)))
         }),
     )
 }
+
+fn initial_window_size(state: &SavedState) -> egui::Vec2 {
+    state
+        .ui
+        .window_geometry
+        .filter(WindowGeometry::is_valid)
+        .map(|geometry| egui::vec2(geometry.width.max(980.0), geometry.height.max(640.0)))
+        .unwrap_or_else(|| egui::vec2(1240.0, 780.0))
+}
+
+fn initial_window_position(state: &SavedState) -> Option<egui::Pos2> {
+    state
+        .ui
+        .window_geometry
+        .filter(WindowGeometry::is_valid)
+        .map(|geometry| egui::pos2(geometry.x, geometry.y))
+}
+
 
 #[derive(Clone, Debug)]
 struct PendingTrackSwitch {
@@ -107,10 +142,7 @@ struct AudioOrbitApp {
 }
 
 impl AudioOrbitApp {
-    fn new() -> Self {
-        let mut state = load_state();
-        ensure_state_is_valid(&mut state);
-
+    fn new(state: SavedState) -> Self {
         let pending_playlist_name = "Local music".to_owned();
         let current_output_name = current_default_output_device_name();
         let show_library_panel = state.ui.show_library_panel;
@@ -203,6 +235,30 @@ impl AudioOrbitApp {
         app.media_key_status = media_keys.status_message;
         app.start_automatic_update_check_if_due();
         app
+    }
+
+    fn remember_window_geometry(&mut self, context: &egui::Context) {
+        let (inner_rect, outer_rect) = context.input(|input| {
+            let viewport = input.viewport();
+            (viewport.inner_rect, viewport.outer_rect)
+        });
+
+        let Some(inner_rect) = inner_rect else {
+            return;
+        };
+
+        if inner_rect.width() < 640.0 || inner_rect.height() < 420.0 {
+            return;
+        }
+
+        let position = outer_rect.map(|rect| rect.min).unwrap_or(inner_rect.min);
+
+        self.state.ui.window_geometry = Some(WindowGeometry {
+            x: position.x,
+            y: position.y,
+            width: inner_rect.width(),
+            height: inner_rect.height(),
+        });
     }
 
     fn current_playlist(&self) -> Option<&Playlist> {
@@ -1348,6 +1404,7 @@ impl eframe::App for AudioOrbitApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         context.set_visuals(egui::Visuals::dark());
         context.request_repaint_after(Duration::from_millis(33));
+        self.remember_window_geometry(context);
 
         self.process_media_key_events();
         self.process_update_check_events();

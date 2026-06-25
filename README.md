@@ -19,6 +19,7 @@ It is designed for people who keep music in local folders and want an AIMP-like 
   - [Manage Favorites](#manage-favorites)
   - [Export and import backups](#export-and-import-backups)
   - [Check for updates](#check-for-updates)
+- [Window behavior](#window-behavior)
 - [Data location](#data-location)
 - [Known limitations](#known-limitations)
 - [Contributing](#contributing)
@@ -44,6 +45,8 @@ Audio Orbit supports common desktop-player behavior:
 - crossfade tracks with configurable overlap seconds
 - skip long silence with configurable threshold seconds
 - repeat the current track or a selected set of tracks
+- remember the window size and position between app launches
+- prevent multiple app instances from running at the same time
 
 Crossfade is an overlap mix: the current track fades out while the next track fades in. The visible track switch happens halfway through the crossfade, so a long mix does not feel like an abrupt early track change.
 
@@ -157,6 +160,12 @@ Open **Settings** or **Release watcher**.
 By default, only stable releases are checked. Enable prerelease watching when you want to include prerelease builds.
 
 If an update is available, Audio Orbit can replace its current executable and restart itself.
+
+## Window behavior
+
+Audio Orbit remembers the window size and position when the app closes and restores the same layout on the next launch.
+
+Only one Audio Orbit instance can run at a time. If the app is already open, starting the executable again exits immediately instead of opening a second player window.
 
 ## Data location
 
