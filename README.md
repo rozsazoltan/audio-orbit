@@ -41,7 +41,7 @@ Open GitHub Actions, choose the `Release` workflow, and run it manually with a v
 0.1.0
 ```
 
-The workflow validates the version, converts it to the Git tag `v0.1.0`, builds the Windows executable, and uploads it to a new GitHub Release as:
+The workflow validates the version, converts it to the Git tag `v0.1.0`, updates the release metadata in `Cargo.toml`, `Cargo.lock`, and the Windows executable manifest before building, then uploads the executable to a new GitHub Release as:
 
 ```text
 audio-orbit-v0.1.0-windows-x64.exe

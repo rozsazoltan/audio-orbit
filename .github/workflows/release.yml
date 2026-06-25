@@ -30,20 +30,74 @@ jobs:
             exit 1
           }
 
+          $NumericVersion = $Version.Split('-')[0].Split('+')[0]
+          $ManifestVersion = "$NumericVersion.0"
+
           "VERSION=$Version" >> $env:GITHUB_ENV
           "TAG=v$Version" >> $env:GITHUB_ENV
-
-      - name: Apply release version to Cargo.toml
-        shell: pwsh
-        run: |
-          $cargoToml = Get-Content Cargo.toml -Raw
-          $cargoToml = $cargoToml -replace '(?m)^version\s*=\s*".*"$', "version = `"$env:VERSION`""
-          Set-Content Cargo.toml $cargoToml -Encoding UTF8
+          "MANIFEST_VERSION=$ManifestVersion" >> $env:GITHUB_ENV
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+
+      - name: Apply release version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $CargoTomlPath = "Cargo.toml"
+          $CargoTomlLines = Get-Content $CargoTomlPath
+          $InPackageSection = $false
+          $CargoVersionUpdated = $false
+
+          for ($Index = 0; $Index -lt $CargoTomlLines.Count; $Index++) {
+            if ($CargoTomlLines[$Index] -match '^\s*\[package\]\s*$') {
+              $InPackageSection = $true
+              continue
+            }
+
+            if ($InPackageSection -and $CargoTomlLines[$Index] -match '^\s*\[') {
+              break
+            }
+
+            if ($InPackageSection -and $CargoTomlLines[$Index] -match '^\s*version\s*=') {
+              $CargoTomlLines[$Index] = "version = `"$env:VERSION`""
+              $CargoVersionUpdated = $true
+              break
+            }
+          }
+
+          if (-not $CargoVersionUpdated) {
+            Write-Error "Could not find the package version in Cargo.toml."
+            exit 1
+          }
+
+          Set-Content -Path $CargoTomlPath -Value $CargoTomlLines -Encoding UTF8
+
+          $ManifestPath = "src/audio-orbit.exe.manifest"
+          if (Test-Path $ManifestPath) {
+            $Manifest = Get-Content $ManifestPath -Raw
+            $Pattern = '(<assemblyIdentity\b(?=[^>]*\bname="AudioOrbit")[^>]*\bversion=")[^"]+(")'
+            $Replacement = '${1}' + $env:MANIFEST_VERSION + '${2}'
+            $Regex = [regex]::new($Pattern, [System.Text.RegularExpressions.RegexOptions]::Singleline)
+            $UpdatedManifest = $Regex.Replace($Manifest, $Replacement, 1)
+
+            if ($UpdatedManifest -eq $Manifest) {
+              Write-Error "Could not update the AudioOrbit assembly version in the executable manifest."
+              exit 1
+            }
+
+            Set-Content -Path $ManifestPath -Value $UpdatedManifest -Encoding UTF8
+          }
+
+          cargo generate-lockfile
+
+          Write-Host "Updated release metadata:"
+          Write-Host "- Cargo package version: $env:VERSION"
+          Write-Host "- Windows manifest version: $env:MANIFEST_VERSION"
+          Write-Host "- Release tag: $env:TAG"
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
