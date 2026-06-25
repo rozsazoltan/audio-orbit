@@ -185,10 +185,14 @@ jobs:
           "ASSET=$ExeName" >> $env:GITHUB_ENV
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.TAG }}
-          target_commitish: ${{ env.MERGED_SHA }}
-          name: ${{ env.TAG }}
-          generate_release_notes: true
-          files: ${{ env.ASSET }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          gh release create $env:TAG $env:ASSET `
+            --repo ${{ github.repository }} `
+            --target $env:MERGED_SHA `
+            --title $env:TAG `
+            --generate-notes
