@@ -137,6 +137,20 @@ jobs:
 
           Write-Host "Merged $env:RELEASE_BRANCH into $DefaultBranch at $MergedSha."
 
+      - name: Delete release branch after merge
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          git push origin --delete $env:RELEASE_BRANCH
+
+          $LocalReleaseBranch = git branch --list $env:RELEASE_BRANCH
+          if ($LocalReleaseBranch) {
+            git branch -D $env:RELEASE_BRANCH
+          }
+
+          Write-Host "Deleted temporary release branch $env:RELEASE_BRANCH."
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
