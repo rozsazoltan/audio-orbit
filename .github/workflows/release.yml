@@ -130,12 +130,29 @@ jobs:
           git checkout $DefaultBranch
           git pull --ff-only origin $DefaultBranch
           git merge --squash $env:RELEASE_BRANCH
+
+          git diff --cached --quiet
+          $HasStagedChanges = $LASTEXITCODE -ne 0
+
+          if (-not $HasStagedChanges) {
+            git reset --hard HEAD
+
+            $MergedSha = git rev-parse HEAD
+            "MERGED_SHA=$MergedSha" >> $env:GITHUB_ENV
+            "RELEASE_BRANCH_WAS_MERGED=false" >> $env:GITHUB_ENV
+
+            Write-Host "Release branch $env:RELEASE_BRANCH has no version metadata changes to squash merge."
+            Write-Host "Using existing $DefaultBranch commit $MergedSha for the release build."
+            exit 0
+          }
+
           git status --short
-          git commit --allow-empty -m $CommitMessage
+          git commit -m $CommitMessage
           git push origin $DefaultBranch
 
           $MergedSha = git rev-parse HEAD
           "MERGED_SHA=$MergedSha" >> $env:GITHUB_ENV
+          "RELEASE_BRANCH_WAS_MERGED=true" >> $env:GITHUB_ENV
 
           Write-Host "Squash merged $env:RELEASE_BRANCH into $DefaultBranch at $MergedSha."
 
