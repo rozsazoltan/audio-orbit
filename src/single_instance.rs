@@ -49,4 +49,4 @@ mod platform {
     }
 }
 
-pub use platform::{acquire, SingleInstanceGuard};
+pub use platform::acquire;
