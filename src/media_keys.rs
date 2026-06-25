@@ -66,11 +66,10 @@ fn start_platform_listener() -> MediaKeyListener {
 #[cfg(windows)]
 fn run_windows_media_key_loop(sender: mpsc::Sender<MediaKeyEvent>) {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK, VK_MEDIA_STOP,
+        RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT, VK_MEDIA_NEXT_TRACK,
+        VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK, VK_MEDIA_STOP,
     };
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetMessageW, RegisterHotKey, UnregisterHotKey, MSG, MOD_NOREPEAT, WM_HOTKEY,
-    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
 
     const HOTKEY_PREVIOUS: i32 = 0x4101;
     const HOTKEY_PLAY_PAUSE: i32 = 0x4102;
@@ -89,7 +88,7 @@ fn run_windows_media_key_loop(sender: mpsc::Sender<MediaKeyEvent>) {
     let mut failed_commands = Vec::new();
 
     for (id, key, command) in hotkeys {
-        let registered = unsafe { RegisterHotKey(0, id, MOD_NOREPEAT, key) != 0 };
+        let registered = unsafe { RegisterHotKey(std::ptr::null_mut(), id, MOD_NOREPEAT, key) != 0 };
         if registered {
             registered_ids.push(id);
             registered_commands.push(command);
@@ -109,7 +108,7 @@ fn run_windows_media_key_loop(sender: mpsc::Sender<MediaKeyEvent>) {
 
     loop {
         let mut message = unsafe { std::mem::zeroed::<MSG>() };
-        let result = unsafe { GetMessageW(&mut message, 0, 0, 0) };
+        let result = unsafe { GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) };
         if result <= 0 {
             break;
         }
@@ -133,7 +132,7 @@ fn run_windows_media_key_loop(sender: mpsc::Sender<MediaKeyEvent>) {
 
     for id in registered_ids {
         unsafe {
-            UnregisterHotKey(0, id);
+            UnregisterHotKey(std::ptr::null_mut(), id);
         }
     }
 }

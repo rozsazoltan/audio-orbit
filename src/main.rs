@@ -1633,7 +1633,7 @@ impl AudioOrbitApp {
     fn render_release_modal(&mut self, context: &egui::Context) {
         const MAX_UPDATE_CHECKS_PER_SESSION: u8 = 2;
 
-        let screen_rect = context.content_rect();
+        let screen_rect = context.screen_rect();
         let painter = context.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
             egui::Id::new("release_modal_backdrop"),
@@ -1745,7 +1745,7 @@ impl AudioOrbitApp {
     }
 
     fn render_settings_modal(&mut self, context: &egui::Context) {
-        let screen_rect = context.content_rect();
+        let screen_rect = context.screen_rect();
         let painter = context.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("settings_modal_backdrop")));
         painter.rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(160));
 
