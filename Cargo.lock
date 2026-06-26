@@ -501,7 +501,7 @@ dependencies = [
 
 [[package]]
 name = "audio-orbit"
-version = "0.8.3"
+version = "0.8.5"
 dependencies = [
  "anyhow",
  "cpal",
