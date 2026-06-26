@@ -34,6 +34,34 @@ use std::{
 const MAX_UPDATE_CHECKS_PER_SESSION: u8 = 2;
 const AUTOMATIC_UPDATE_CHECK_INTERVAL_SECONDS: u64 = 60 * 60;
 
+fn min_window_size_for_mode(player_only_mode: bool) -> egui::Vec2 {
+    if player_only_mode {
+        egui::vec2(380.0, 220.0)
+    } else {
+        egui::vec2(900.0, 560.0)
+    }
+}
+
+fn default_window_size_for_mode(player_only_mode: bool) -> egui::Vec2 {
+    if player_only_mode {
+        egui::vec2(520.0, 300.0)
+    } else {
+        egui::vec2(1240.0, 780.0)
+    }
+}
+
+fn saved_window_geometry_for_mode(state: &SavedState, player_only_mode: bool) -> Option<WindowGeometry> {
+    let geometry = if player_only_mode {
+        state.ui.player_only_window_geometry
+    } else {
+        state.ui.full_layout_window_geometry
+    };
+
+    geometry
+        .or(state.ui.window_geometry)
+        .filter(WindowGeometry::is_valid)
+}
+
 fn main() -> eframe::Result<()> {
     let _single_instance_guard = match single_instance::acquire() {
         Ok(Some(guard)) => guard,
@@ -49,7 +77,7 @@ fn main() -> eframe::Result<()> {
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size(initial_window_size(&state))
-        .with_min_inner_size([980.0, 640.0])
+        .with_min_inner_size(min_window_size_for_mode(state.ui.player_only_mode))
         .with_resizable(true);
 
     if let Some(position) = initial_window_position(&state) {
@@ -85,19 +113,17 @@ fn configure_app_style(context: &egui::Context) {
 }
 
 fn initial_window_size(state: &SavedState) -> egui::Vec2 {
-    state
-        .ui
-        .window_geometry
-        .filter(WindowGeometry::is_valid)
-        .map(|geometry| egui::vec2(geometry.width.max(980.0), geometry.height.max(640.0)))
-        .unwrap_or_else(|| egui::vec2(1240.0, 780.0))
+    let player_only_mode = state.ui.player_only_mode;
+    let min_size = min_window_size_for_mode(player_only_mode);
+
+    saved_window_geometry_for_mode(state, player_only_mode)
+        .map(|geometry| egui::vec2(geometry.width.max(min_size.x), geometry.height.max(min_size.y)))
+        .unwrap_or_else(|| default_window_size_for_mode(player_only_mode))
 }
 
 fn initial_window_position(state: &SavedState) -> Option<egui::Pos2> {
-    state
-        .ui
-        .window_geometry
-        .filter(WindowGeometry::is_valid)
+    saved_window_geometry_for_mode(state, state.ui.player_only_mode)
+        .or_else(|| saved_window_geometry_for_mode(state, !state.ui.player_only_mode))
         .map(|geometry| egui::pos2(geometry.x, geometry.y))
 }
 
@@ -133,6 +159,7 @@ struct AudioOrbitApp {
     crossfade_started_for_path: Option<PathBuf>,
     pending_track_switch: Option<PendingTrackSwitch>,
     pending_profile_apply_at: Option<Instant>,
+    suppress_window_geometry_save_until: Option<Instant>,
     show_folder_import_modal: bool,
     show_settings_modal: bool,
     show_release_modal: bool,
@@ -191,6 +218,7 @@ impl AudioOrbitApp {
                     crossfade_started_for_path: None,
                     pending_track_switch: None,
                     pending_profile_apply_at: None,
+                    suppress_window_geometry_save_until: None,
                     show_folder_import_modal: false,
                     show_settings_modal: false,
                     show_release_modal: false,
@@ -237,6 +265,7 @@ impl AudioOrbitApp {
                 crossfade_started_for_path: None,
                 pending_track_switch: None,
                 pending_profile_apply_at: None,
+                suppress_window_geometry_save_until: None,
                 show_folder_import_modal: false,
                 show_settings_modal: false,
                 show_release_modal: false,
@@ -282,6 +311,14 @@ impl AudioOrbitApp {
     }
 
     fn remember_window_geometry(&mut self, context: &egui::Context) {
+        if self
+            .suppress_window_geometry_save_until
+            .map(|blocked_until| blocked_until > Instant::now())
+            .unwrap_or(false)
+        {
+            return;
+        }
+
         let (inner_rect, outer_rect) = context.input(|input| {
             let viewport = input.viewport();
             (viewport.inner_rect, viewport.outer_rect)
@@ -291,18 +328,52 @@ impl AudioOrbitApp {
             return;
         };
 
-        if inner_rect.width() < 640.0 || inner_rect.height() < 420.0 {
+        if inner_rect.width() < 320.0 || inner_rect.height() < 180.0 {
             return;
         }
 
         let position = outer_rect.map(|rect| rect.min).unwrap_or(inner_rect.min);
-
-        self.state.ui.window_geometry = Some(WindowGeometry {
+        let geometry = WindowGeometry {
             x: position.x,
             y: position.y,
             width: inner_rect.width(),
             height: inner_rect.height(),
-        });
+        };
+
+        if self.player_only_mode {
+            self.state.ui.player_only_window_geometry = Some(geometry);
+        } else {
+            self.state.ui.full_layout_window_geometry = Some(geometry);
+        }
+        self.state.ui.window_geometry = Some(geometry);
+    }
+
+    fn saved_window_size_for_mode(&self, player_only_mode: bool) -> egui::Vec2 {
+        let min_size = min_window_size_for_mode(player_only_mode);
+        let geometry = if player_only_mode {
+            self.state.ui.player_only_window_geometry
+        } else {
+            self.state.ui.full_layout_window_geometry
+        };
+
+        geometry
+            .filter(WindowGeometry::is_valid)
+            .map(|geometry| egui::vec2(geometry.width.max(min_size.x), geometry.height.max(min_size.y)))
+            .unwrap_or_else(|| default_window_size_for_mode(player_only_mode))
+    }
+
+    fn apply_window_mode_size(&self, context: &egui::Context, player_only_mode: bool) {
+        context.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min_window_size_for_mode(player_only_mode)));
+        context.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.saved_window_size_for_mode(player_only_mode)));
+    }
+
+    fn toggle_player_only_mode(&mut self, context: &egui::Context) {
+        self.remember_window_geometry(context);
+        self.player_only_mode = !self.player_only_mode;
+        self.state.ui.player_only_mode = self.player_only_mode;
+        self.apply_window_mode_size(context, self.player_only_mode);
+        self.suppress_window_geometry_save_until = Some(Instant::now() + Duration::from_millis(450));
+        self.save_state_silently();
     }
 
     fn current_playlist(&self) -> Option<&Playlist> {
@@ -1150,9 +1221,7 @@ impl AudioOrbitApp {
         }
 
         if player_only {
-            self.player_only_mode = !self.player_only_mode;
-            self.state.ui.player_only_mode = self.player_only_mode;
-            self.save_state_silently();
+            self.toggle_player_only_mode(context);
         }
 
         if library && !self.player_only_mode {
@@ -1412,12 +1481,12 @@ impl AudioOrbitApp {
         self.set_volume_percent(next);
     }
 
-    fn handle_title_volume_wheel(&mut self, response: &egui::Response, ui: &egui::Ui) {
+    fn handle_top_panel_volume_wheel(&mut self, response: &egui::Response, context: &egui::Context) {
         if !response.hovered() {
             return;
         }
 
-        let scroll_y = ui.input(|input| input.raw_scroll_delta.y + input.smooth_scroll_delta.y);
+        let scroll_y = context.input(|input| input.raw_scroll_delta.y + input.smooth_scroll_delta.y);
         if scroll_y.abs() < 0.5 {
             return;
         }
@@ -1713,9 +1782,10 @@ impl eframe::App for AudioOrbitApp {
         self.poll_output_device_change();
         self.sync_status_lifetime();
 
-        egui::TopBottomPanel::top("now_playing_panel").show(context, |ui| {
+        let now_playing_response = egui::TopBottomPanel::top("now_playing_panel").show(context, |ui| {
             self.render_now_playing_panel(ui);
         });
+        self.handle_top_panel_volume_wheel(&now_playing_response.response, context);
 
         if !self.player_only_mode && self.show_library_panel {
             egui::SidePanel::left("library_panel")
@@ -1780,8 +1850,7 @@ impl AudioOrbitApp {
             ui.vertical(|ui| {
                 if has_now_playing {
                     let title_response = ui.heading(self.active_track_title());
-                    self.handle_title_volume_wheel(&title_response, ui);
-                    title_response.on_hover_text("Mouse wheel over the title adjusts volume.");
+                    title_response.on_hover_text("Mouse wheel over the top player bar adjusts volume.");
 
                     if let Some(playback) = &self.last_playback {
                         ui.small(format!(
@@ -1810,9 +1879,7 @@ impl AudioOrbitApp {
                     self.control_label(Icon::Music, "Player only")
                 };
                 if ui.button(player_only_label).clicked() {
-                    self.player_only_mode = !self.player_only_mode;
-                    self.state.ui.player_only_mode = self.player_only_mode;
-                    self.save_state_silently();
+                    self.toggle_player_only_mode(ui.ctx());
                 }
 
                 if !self.player_only_mode {
@@ -1928,7 +1995,7 @@ impl AudioOrbitApp {
                     egui::vec2(slider_width, 18.0),
                     egui::Slider::new(&mut volume, 0u8..=100u8).show_value(!self.player_only_mode),
                 )
-                .on_hover_text("Volume. You can also use the mouse wheel over the track title.")
+                .on_hover_text("Volume. You can also use the mouse wheel over the top player bar.")
                 .changed()
             {
                 self.set_volume_percent(volume);
@@ -2582,7 +2649,7 @@ impl AudioOrbitApp {
             self.schedule_current_profile_apply();
         }
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button(ui_icons::label(Icon::Plus, "New profile")).clicked() {
                 self.add_profile();
             }
@@ -2675,7 +2742,7 @@ impl AudioOrbitApp {
 
         ui.add_space(12.0);
         ui.separator();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.small_button(ui_icons::icon(Icon::RefreshCw)).on_hover_text("Refresh output device").clicked() {
                 self.refresh_output_device();
             }
@@ -2733,8 +2800,10 @@ impl AudioOrbitApp {
 
     fn responsive_modal_size(&self, context: &egui::Context, max_width: f32, max_height: f32) -> egui::Vec2 {
         let screen_rect = context.screen_rect();
-        let available_width = (screen_rect.width() - 32.0).max(280.0);
-        let available_height = (screen_rect.height() - 48.0).max(220.0);
+        let horizontal_margin = if screen_rect.width() < 520.0 { 12.0 } else { 32.0 };
+        let vertical_margin = if screen_rect.height() < 420.0 { 12.0 } else { 48.0 };
+        let available_width = (screen_rect.width() - horizontal_margin).max(260.0);
+        let available_height = (screen_rect.height() - vertical_margin).max(190.0);
 
         egui::vec2(available_width.min(max_width), available_height.min(max_height))
     }
@@ -2778,6 +2847,7 @@ impl AudioOrbitApp {
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
                                 self.render_update_settings_section(ui, false);
                             });
                         });
@@ -2828,26 +2898,31 @@ impl AudioOrbitApp {
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
                                 self.render_playback_settings_section(ui);
                             });
                             ui.add_space(12.0);
 
                             egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
                                 self.render_profile_panel(ui);
                             });
                             ui.add_space(12.0);
 
                             egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
                                 self.render_backup_settings_section(ui);
                             });
                             ui.add_space(12.0);
 
                             egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
                                 self.render_update_settings_section(ui, true);
                             });
                             ui.add_space(12.0);
 
                             egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
                                 self.render_about_section(ui);
                             });
                         });
@@ -2975,7 +3050,7 @@ impl AudioOrbitApp {
         ui.heading("Backup and data");
         ui.small("The ZIP backup stores the full app state: music folders, playlists, Favorites, sound profiles, playback settings, and update settings.");
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button(ui_icons::label(Icon::Download, "Export full backup ZIP")).clicked() {
                 self.export_app_backup();
             }
@@ -3007,7 +3082,7 @@ impl AudioOrbitApp {
             "Mode: latest stable release only."
         });
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let check_status = if self.update_check_receiver.is_some() {
                 format!("Checks used: {}/{} · checking...", self.update_check_count, MAX_UPDATE_CHECKS_PER_SESSION)
             } else {
@@ -3076,12 +3151,12 @@ impl AudioOrbitApp {
 
     fn render_about_section(&mut self, ui: &mut egui::Ui) {
         ui.heading("About Audio Orbit");
-        ui.small("Audio Orbit is a lightweight Windows music player focused on local libraries, folder-based playlists, smooth crossfade playback, silence skipping, and headphone-friendly orbit-style stereo movement.");
+        ui.add(egui::Label::new("Audio Orbit is a lightweight Windows music player focused on local libraries, folder-based playlists, smooth crossfade playback, silence skipping, and headphone-friendly orbit-style stereo movement.").wrap());
         ui.add_space(8.0);
-        ui.label(format!("Version: v{}", env!("CARGO_PKG_VERSION")));
-        ui.label("Creator: Zoltán Rózsa");
-        ui.label("License: GNU Affero General Public License v3.0 (AGPL-3.0)");
-        ui.small("This app stores its portable state next to the executable in .audio-orbit-data.");
+        ui.add(egui::Label::new(format!("Version: v{}", env!("CARGO_PKG_VERSION"))).wrap());
+        ui.add(egui::Label::new("Creator: Zoltán Rózsa").wrap());
+        ui.add(egui::Label::new("License: GNU Affero General Public License v3.0 (AGPL-3.0)").wrap());
+        ui.add(egui::Label::new("This app stores its portable state next to the executable in .audio-orbit-data.").wrap());
 
         ui.add_space(10.0);
         ui.heading("Keyboard shortcuts");

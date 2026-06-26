@@ -53,7 +53,7 @@ Audio Orbit supports common desktop-player behavior:
 - skip long silence with configurable threshold seconds
 - repeat the current track or a selected set of tracks
 - adjust volume from the top player bar, including player-only mode
-- adjust volume with the mouse wheel over the current track title
+- adjust volume with the mouse wheel over the top player bar when the pointer is over the title, waveform, or controls
 - remember the last played local track between app launches
 - play saved internet radio streams from the Radio tab
 - remember the window size and position between app launches
@@ -179,7 +179,9 @@ If an update is available, Audio Orbit can replace its current executable and re
 
 ## Window behavior
 
-Audio Orbit remembers the window size and position when the app closes and restores the same layout on the next launch. Player-only and full-layout sizes are kept separately.
+Audio Orbit remembers the window size and position when the app closes and restores the same layout on the next launch. Player-only and full-layout sizes are kept separately, and switching modes restores that mode's own saved width and height.
+
+Settings, release watcher, update, folder import, and About content use responsive modal layouts with internal scrolling on small windows.
 
 Only one Audio Orbit instance can run at a time. If the app is already open, starting the executable again exits immediately instead of opening a second player window.
 
