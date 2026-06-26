@@ -310,8 +310,9 @@ impl AudioOrbitApp {
             },
         };
 
+        let initial_volume_percent = app.effective_volume_percent();
         if let Some(player) = &mut app.player {
-            player.set_volume_percent(app.effective_volume_percent());
+            player.set_volume_percent(initial_volume_percent);
         }
 
         let media_keys = media_keys::start_listener();
