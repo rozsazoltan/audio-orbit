@@ -77,6 +77,7 @@ pub struct RenderInfo {
     pub input_channels: u16,
     pub sample_rate: u32,
     pub waveform: Vec<f32>,
+    pub silence_ranges: Vec<(f32, f32)>,
 }
 
 const BASE_ORBIT_RATE_HZ: f32 = 0.20;
@@ -101,7 +102,7 @@ pub fn render_orbit_to_stereo(
     let silence_floor = silence_floor_from_percent(settings.silence_level_threshold_percent);
 
     if !settings.orbit_enabled {
-        let (output, rendered_duration_seconds) = render_plain_stereo(
+        let (output, rendered_duration_seconds, silence_ranges) = render_plain_stereo(
             input_samples,
             channels,
             &mono,
@@ -127,6 +128,7 @@ pub fn render_orbit_to_stereo(
                 input_channels,
                 sample_rate,
                 waveform,
+                silence_ranges,
             },
         );
     }
@@ -142,6 +144,8 @@ pub fn render_orbit_to_stereo(
 
     let silence_limit = settings.silence_threshold_seconds.max(1) as usize * sample_rate.max(1) as usize;
     let mut consecutive_silent_frames = 0usize;
+    let mut silence_ranges = Vec::new();
+    let mut skipped_silence_start: Option<usize> = None;
 
     let mut smoothed_pan = 0.0_f32;
     let mut smoothed_frontness = 1.0_f32;
@@ -160,7 +164,16 @@ pub fn render_orbit_to_stereo(
         }
 
         if settings.skip_silence_enabled && consecutive_silent_frames > silence_limit {
+            if skipped_silence_start.is_none() {
+                skipped_silence_start = Some(frame_index.saturating_sub(silence_limit));
+            }
             continue;
+        }
+        if let Some(start) = skipped_silence_start.take() {
+            silence_ranges.push((
+                start as f32 / sample_rate.max(1) as f32,
+                frame_index as f32 / sample_rate.max(1) as f32,
+            ));
         }
 
         let time = frame_index as f32 / sample_rate.max(1) as f32;
@@ -210,11 +223,19 @@ pub fn render_orbit_to_stereo(
         output.push(right);
     }
 
+    if let Some(start) = skipped_silence_start.take() {
+        silence_ranges.push((
+            start as f32 / sample_rate.max(1) as f32,
+            frame_count as f32 / sample_rate.max(1) as f32,
+        ));
+    }
+
     let original_duration_seconds = if sample_rate == 0 {
         0.0
     } else {
         frame_count as f32 / sample_rate as f32
     };
+
     let rendered_duration_seconds = if sample_rate == 0 {
         0.0
     } else {
@@ -229,6 +250,7 @@ pub fn render_orbit_to_stereo(
             input_channels,
             sample_rate,
             waveform,
+            silence_ranges,
         },
     )
 }
@@ -247,10 +269,12 @@ fn render_plain_stereo(
     skip_silence_enabled: bool,
     silence_threshold_seconds: u8,
     silence_floor: f32,
-) -> (Vec<f32>, f32) {
+) -> (Vec<f32>, f32, Vec<(f32, f32)>) {
     let frame_count = mono.len();
     let silence_limit = silence_threshold_seconds.max(1) as usize * sample_rate.max(1) as usize;
     let mut consecutive_silent_frames = 0usize;
+    let mut silence_ranges = Vec::new();
+    let mut skipped_silence_start: Option<usize> = None;
     let mut output = Vec::with_capacity((frame_count.saturating_sub(start_frame)) * 2);
 
     for frame_index in start_frame..frame_count {
@@ -263,7 +287,16 @@ fn render_plain_stereo(
         }
 
         if skip_silence_enabled && consecutive_silent_frames > silence_limit {
+            if skipped_silence_start.is_none() {
+                skipped_silence_start = Some(frame_index.saturating_sub(silence_limit));
+            }
             continue;
+        }
+        if let Some(start) = skipped_silence_start.take() {
+            silence_ranges.push((
+                start as f32 / sample_rate.max(1) as f32,
+                frame_index as f32 / sample_rate.max(1) as f32,
+            ));
         }
 
         let offset = frame_index * channels;
@@ -281,13 +314,20 @@ fn render_plain_stereo(
         output.push(right * output_level);
     }
 
+    if let Some(start) = skipped_silence_start.take() {
+        silence_ranges.push((
+            start as f32 / sample_rate.max(1) as f32,
+            frame_count as f32 / sample_rate.max(1) as f32,
+        ));
+    }
+
     let rendered_duration_seconds = if sample_rate == 0 {
         0.0
     } else {
         (output.len() / 2) as f32 / sample_rate as f32
     };
 
-    (output, rendered_duration_seconds)
+    (output, rendered_duration_seconds, silence_ranges)
 }
 
 #[derive(Clone, Copy)]

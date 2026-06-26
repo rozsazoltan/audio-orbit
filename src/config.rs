@@ -440,6 +440,8 @@ pub struct UiSettings {
     pub full_layout_window_geometry: Option<WindowGeometry>,
     #[serde(default)]
     pub player_only_window_geometry: Option<WindowGeometry>,
+    #[serde(default)]
+    pub playlist_scroll_offset_y: f32,
 }
 
 impl Default for UiSettings {
@@ -452,6 +454,7 @@ impl Default for UiSettings {
             window_geometry: None,
             full_layout_window_geometry: None,
             player_only_window_geometry: None,
+            playlist_scroll_offset_y: 0.0,
         }
     }
 }

@@ -139,11 +139,11 @@ Folder groups can be collapsed or expanded in the track list. When a folder play
 
 Use the center track list to browse tracks. Double-click a track to start it immediately.
 
-The top player bar truncates long titles so track names never overlap the technical details or controls. Local track metadata stays separated from the title, and the track list uses compact metadata so the duration, sample rate, bitrate, channels, and size remain readable.
+The top player bar keeps the current title left-aligned and truncates long titles so track names never overlap the technical details or controls. Local track metadata stays separated from the title, and player-only mode shows a reduced metadata set with just duration and size.
 
 ### Play internet radio
 
-Open the Internet radio tab, paste a stream URL, optionally enter a readable station name, then double-click or press Play on the saved station. If the name is empty, Audio Orbit tries to read it from the stream. The Radio tab hides local-only playback options such as shuffle, repeat, auto-play next, crossfade, playback transitions, and silence skipping. Favorite radio stations can be filtered from the Radio tab or the left Library panel.
+Open the Internet radio tab, paste a stream URL, optionally enter a readable station name, then double-click or use the station three-dot menu to play it. If the name is empty, Audio Orbit tries to read it from the stream. Radio rows use the same left-aligned list layout, search behavior, scrollbar gutter, favorite marking, and Details modal style as local tracks. The Radio tab hides local-only playback options such as shuffle, repeat, auto-play next, crossfade, playback transitions, and silence skipping, but the active sound profile's orbit processing can still be applied to the live stream.
 
 ### Use repeat modes
 
@@ -159,7 +159,11 @@ When repeat selection is active, checkboxes appear in the track list so you can 
 
 ### Search tracks
 
-Use the search button in the track list header to reveal search. Search filters by track title, folder group, and file path. Use **Next result** to jump between matches.
+Use the search button in the track list header to reveal search. Search filters by track title, folder group, and file path. Use **Next result** to jump between matches. Folder playlist context remains visible above the list, the folder dropdown grows with available entries, and **Now playing** scrolls the list back to the active track.
+
+### Waveform and silence skip
+
+Local track waveforms mark long quiet sections that silence skipping will bypass. Internet radio uses a live audio visualizer that fills from left to right with decoded stream levels and clips older levels as new audio arrives.
 
 ### Manage Favorites
 
@@ -183,7 +187,7 @@ If an update is available, Audio Orbit can replace its current executable and re
 
 Audio Orbit remembers the window size and position when the app closes and restores the same layout on the next launch. Player-only and full-layout sizes are kept separately, and switching modes restores that mode's own saved width and height.
 
-Settings, release watcher, update, folder import, and About content use responsive modal layouts with internal scrolling on small windows.
+Settings, release watcher, update, folder import, About content, and Details dialogs use responsive modal layouts with internal scrolling on small windows.
 
 Only one Audio Orbit instance can run at a time. If the app is already open, starting the executable again exits immediately instead of opening a second player window.
 

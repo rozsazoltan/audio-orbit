@@ -3,11 +3,13 @@ use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait};
 use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 use std::{
+    collections::VecDeque,
+    f32::consts::PI,
     fs,
     fs::File,
     io::{self, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -21,6 +23,7 @@ pub struct PlaybackInfo {
     pub sample_rate: u32,
     pub size_bytes: Option<u64>,
     pub waveform: Vec<f32>,
+    pub silence_ranges: Vec<(f32, f32)>,
 }
 
 struct RadioStream<R> {
@@ -62,6 +65,165 @@ impl<R> Seek for RadioStream<R> {
     }
 }
 
+#[derive(Default)]
+struct RadioVisualizerState {
+    peaks: VecDeque<f32>,
+    current_peak: f32,
+    sample_counter: usize,
+}
+
+type RadioVisualizerHandle = Arc<Mutex<RadioVisualizerState>>;
+
+struct LiveRadioSource<S> {
+    inner: S,
+    settings: DspSettings,
+    input_channels: u16,
+    sample_rate: u32,
+    frame_index: u64,
+    output_frame: [f32; 2],
+    output_channel: usize,
+    visualizer: RadioVisualizerHandle,
+}
+
+impl<S: Source<Item = f32>> LiveRadioSource<S> {
+    fn new(inner: S, settings: DspSettings, visualizer: RadioVisualizerHandle) -> Self {
+        let input_channels = inner.channels().max(1);
+        let sample_rate = inner.sample_rate().max(1);
+        Self {
+            inner,
+            settings,
+            input_channels,
+            sample_rate,
+            frame_index: 0,
+            output_frame: [0.0, 0.0],
+            output_channel: 2,
+            visualizer,
+        }
+    }
+
+    fn read_input_frame(&mut self) -> Option<([f32; 2], f32)> {
+        let channels = self.input_channels.max(1) as usize;
+        let mut sum = 0.0_f32;
+        let mut count = 0usize;
+        let mut left = 0.0_f32;
+        let mut right = 0.0_f32;
+
+        for channel in 0..channels {
+            match self.inner.next() {
+                Some(sample) => {
+                    if channel == 0 {
+                        left = sample;
+                    } else if channel == 1 {
+                        right = sample;
+                    }
+                    sum += sample;
+                    count += 1;
+                }
+                None if count == 0 => return None,
+                None => break,
+            }
+        }
+
+        if count == 0 {
+            None
+        } else {
+            if count == 1 {
+                right = left;
+            }
+            Some(([left, right], sum / count as f32))
+        }
+    }
+
+    fn process_frame(&mut self, stereo: [f32; 2], mono: f32) -> [f32; 2] {
+        record_radio_peak(&self.visualizer, stereo[0].abs().max(stereo[1].abs()).max(mono.abs()));
+        let output_level = self.settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
+        if !self.settings.orbit_enabled {
+            return [
+                soft_limit_radio(stereo[0] * output_level),
+                soft_limit_radio(stereo[1] * output_level),
+            ];
+        }
+
+        let width = self.settings.stereo_width_percent.min(100) as f32 / 100.0;
+        let speed = self.settings.orbit_speed_percent.clamp(10, 200) as f32 / 100.0;
+        let time = self.frame_index as f32 / self.sample_rate as f32;
+        let pan = (2.0 * PI * 0.20 * speed * time).sin() * width;
+        let angle = (pan.clamp(-1.0, 1.0) + 1.0) * PI / 4.0;
+        let mut left_gain = angle.cos();
+        let mut right_gain = angle.sin();
+
+        if matches!(self.settings.mode, crate::dsp::OrbitMode::VirtualEightDirectionOrbit) {
+            let depth = (2.0 * PI * 0.20 * speed * time).cos();
+            let rear = (-depth).max(0.0) * (self.settings.depth_cue_percent.min(100) as f32 / 100.0);
+            let shade = 1.0 - rear * 0.22;
+            left_gain *= shade;
+            right_gain *= shade;
+        }
+
+        [
+            soft_limit_radio(mono * left_gain * output_level),
+            soft_limit_radio(mono * right_gain * output_level),
+        ]
+    }
+}
+
+impl<S: Source<Item = f32>> Iterator for LiveRadioSource<S> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.output_channel < 2 {
+            let sample = self.output_frame[self.output_channel];
+            self.output_channel += 1;
+            return Some(sample);
+        }
+
+        let (stereo, mono) = self.read_input_frame()?;
+        self.output_frame = self.process_frame(stereo, mono);
+        self.output_channel = 1;
+        self.frame_index = self.frame_index.saturating_add(1);
+        Some(self.output_frame[0])
+    }
+}
+
+impl<S: Source<Item = f32>> Source for LiveRadioSource<S> {
+    fn current_frame_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> u16 {
+        2
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+}
+
+fn record_radio_peak(visualizer: &RadioVisualizerHandle, peak: f32) {
+    let Ok(mut state) = visualizer.lock() else {
+        return;
+    };
+    state.current_peak = state.current_peak.max(peak.min(1.0));
+    state.sample_counter += 1;
+    if state.sample_counter >= 768 {
+        let peak = state.current_peak;
+        state.peaks.push_back(peak);
+        while state.peaks.len() > 4096 {
+            state.peaks.pop_front();
+        }
+        state.current_peak = 0.0;
+        state.sample_counter = 0;
+    }
+}
+
+fn soft_limit_radio(value: f32) -> f32 {
+    (value / (1.0 + value.abs() * 0.12)).clamp(-1.0, 1.0)
+}
+
 pub struct AudioPlayer {
     _stream: OutputStream,
     stream_handle: OutputStreamHandle,
@@ -75,6 +237,7 @@ pub struct AudioPlayer {
     current_path: Option<PathBuf>,
     current_settings: Option<DspSettings>,
     volume_percent: u8,
+    radio_visualizer: RadioVisualizerHandle,
 }
 
 impl AudioPlayer {
@@ -96,6 +259,7 @@ impl AudioPlayer {
             current_path: None,
             current_settings: None,
             volume_percent: 100,
+            radio_visualizer: Arc::new(Mutex::new(RadioVisualizerState::default())),
         })
     }
 
@@ -114,7 +278,7 @@ impl AudioPlayer {
         self.volume_percent as f32 / 100.0
     }
 
-    pub fn play_radio_stream(&mut self, url: &str) -> Result<()> {
+    pub fn play_radio_stream(&mut self, url: &str, settings: DspSettings) -> Result<()> {
         let response = reqwest::blocking::Client::builder()
             .user_agent("Audio-Orbit-Radio")
             .build()?
@@ -129,10 +293,13 @@ impl AudioPlayer {
             .with_context(|| format!("failed to decode internet radio stream: {url}"))?;
 
         self.stop();
+        self.radio_visualizer = Arc::new(Mutex::new(RadioVisualizerState::default()));
+        let visualizer = Arc::clone(&self.radio_visualizer);
+        let radio_source = LiveRadioSource::new(decoder.convert_samples::<f32>(), settings, visualizer);
         let sink = Sink::try_new(&self.stream_handle)
             .context("failed to create audio playback sink")?;
         sink.set_volume(self.volume_gain());
-        sink.append(decoder.convert_samples::<f32>());
+        sink.append(radio_source);
         sink.play();
 
         self.sink = Some(sink);
@@ -145,6 +312,17 @@ impl AudioPlayer {
         self.current_settings = None;
 
         Ok(())
+    }
+
+    pub fn radio_visualizer_peaks(&self, requested_points: usize) -> Vec<f32> {
+        let Ok(state) = self.radio_visualizer.lock() else {
+            return Vec::new();
+        };
+        if requested_points == 0 || state.peaks.is_empty() {
+            return Vec::new();
+        }
+        let take = requested_points.min(state.peaks.len());
+        state.peaks.iter().skip(state.peaks.len() - take).copied().collect()
     }
 
     pub fn play_file_with_orbit_from(
@@ -393,5 +571,6 @@ fn playback_info(path: &Path, render_info: RenderInfo) -> PlaybackInfo {
         sample_rate: render_info.sample_rate,
         size_bytes: fs::metadata(path).ok().map(|metadata| metadata.len()),
         waveform: render_info.waveform,
+        silence_ranges: render_info.silence_ranges,
     }
 }
