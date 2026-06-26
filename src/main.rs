@@ -2565,6 +2565,15 @@ impl AudioOrbitApp {
         }
     }
 
+
+    fn responsive_modal_size(&self, context: &egui::Context, max_width: f32, max_height: f32) -> egui::Vec2 {
+        let screen_rect = context.screen_rect();
+        let available_width = (screen_rect.width() - 32.0).max(280.0);
+        let available_height = (screen_rect.height() - 48.0).max(220.0);
+
+        egui::vec2(available_width.min(max_width), available_height.min(max_height))
+    }
+
     fn render_modal_backdrop(&self, context: &egui::Context, id: &'static str) {
         let screen_rect = context.screen_rect();
         let painter = context.layer_painter(egui::LayerId::new(
@@ -2577,14 +2586,17 @@ impl AudioOrbitApp {
     fn render_release_modal(&mut self, context: &egui::Context) {
         self.render_modal_backdrop(context, "release_modal_backdrop");
         let mut is_open = self.show_release_modal;
+        let modal_size = self.responsive_modal_size(context, 680.0, 560.0);
+        let scroll_height = (modal_size.y - 118.0).max(160.0);
 
         egui::Area::new(egui::Id::new("release_modal"))
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(context, |ui| {
                 egui::Frame::window(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(560.0);
-                    ui.set_max_width(620.0);
+                    ui.set_min_size(modal_size);
+                    ui.set_max_width(modal_size.x);
+
                     ui.horizontal(|ui| {
                         ui.heading("Release watcher");
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2593,10 +2605,23 @@ impl AudioOrbitApp {
                             }
                         });
                     });
-                    ui.small("Checks GitHub releases with a strict per-session limit to avoid API rate limiting.");
+                    ui.add(egui::Label::new("Checks GitHub releases with a strict per-session limit to avoid API rate limiting.").wrap());
                     ui.add_space(10.0);
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        self.render_update_settings_section(ui, false);
+
+                    egui::ScrollArea::vertical()
+                        .max_height(scroll_height)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                self.render_update_settings_section(ui, false);
+                            });
+                        });
+
+                    ui.separator();
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(ui_icons::label(Icon::X, "Close")).clicked() {
+                            is_open = false;
+                        }
                     });
                 });
             });
@@ -2611,14 +2636,16 @@ impl AudioOrbitApp {
     fn render_settings_modal(&mut self, context: &egui::Context) {
         self.render_modal_backdrop(context, "settings_modal_backdrop");
         let mut is_open = self.show_settings_modal;
+        let modal_size = self.responsive_modal_size(context, 900.0, 760.0);
+        let scroll_height = (modal_size.y - 124.0).max(180.0);
 
         egui::Area::new(egui::Id::new("settings_modal"))
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(context, |ui| {
                 egui::Frame::window(ui.style()).show(ui, |ui| {
-                    ui.set_min_size(egui::vec2(760.0, 620.0));
-                    ui.set_max_width(840.0);
+                    ui.set_min_size(modal_size);
+                    ui.set_max_width(modal_size.x);
 
                     ui.horizontal(|ui| {
                         ui.heading("Settings");
@@ -2628,11 +2655,12 @@ impl AudioOrbitApp {
                             }
                         });
                     });
-                    ui.small("Playback, sound profiles, backups, updates, and portable data.");
+                    ui.add(egui::Label::new("Playback, sound profiles, backups, updates, and portable data.").wrap());
                     ui.separator();
 
                     egui::ScrollArea::vertical()
-                        .max_height(560.0)
+                        .max_height(scroll_height)
+                        .auto_shrink([false, false])
                         .show(ui, |ui| {
                             egui::Frame::group(ui.style()).show(ui, |ui| {
                                 self.render_playback_settings_section(ui);
@@ -2658,6 +2686,13 @@ impl AudioOrbitApp {
                                 self.render_about_section(ui);
                             });
                         });
+
+                    ui.separator();
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(ui_icons::label(Icon::X, "Close")).clicked() {
+                            is_open = false;
+                        }
+                    });
                 });
             });
 
@@ -2896,52 +2931,74 @@ impl AudioOrbitApp {
     }
 
     fn render_folder_import_window(&mut self, context: &egui::Context) {
+        self.render_modal_backdrop(context, "folder_import_modal_backdrop");
         let mut is_open = self.show_folder_import_modal;
         let mut close_after_import = false;
+        let modal_size = self.responsive_modal_size(context, 640.0, 520.0);
+        let scroll_height = (modal_size.y - 112.0).max(160.0);
 
-        egui::Window::new("Add music folder")
-            .open(&mut is_open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(560.0)
+        egui::Area::new(egui::Id::new("folder_import_modal"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(context, |ui| {
-                ui.label("Create a scanner-owned playlist from a folder and group tracks by the first N subfolder levels.");
-                ui.add_space(8.0);
+                egui::Frame::window(ui.style()).show(ui, |ui| {
+                    ui.set_min_size(modal_size);
+                    ui.set_max_width(modal_size.x);
 
-                ui.horizontal(|ui| {
-                    ui.label("Folder:");
-                    let folder_label = self
-                        .pending_folder_path
-                        .as_ref()
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_else(|| "No folder selected".to_owned());
-                    ui.monospace(folder_label);
-                });
+                    ui.horizontal(|ui| {
+                        ui.heading("Add music folder");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button(ui_icons::icon(Icon::X)).on_hover_text("Close").clicked() {
+                                close_after_import = true;
+                            }
+                        });
+                    });
 
-                if ui.button(ui_icons::label(Icon::FolderOpen, "Choose folder...")).clicked() {
-                    self.pick_music_folder();
-                }
+                    egui::ScrollArea::vertical()
+                        .max_height(scroll_height)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.add(egui::Label::new("Create a scanner-owned playlist from a folder and group tracks by the first N subfolder levels.").wrap());
+                            ui.add_space(8.0);
 
-                ui.add_space(8.0);
-                ui.label("Playlist name");
-                ui.text_edit_singleline(&mut self.pending_playlist_name);
+                            ui.label("Folder");
+                            let folder_label = self
+                                .pending_folder_path
+                                .as_ref()
+                                .map(|path| path.display().to_string())
+                                .unwrap_or_else(|| "No folder selected".to_owned());
+                            ui.add(egui::Label::new(folder_label).wrap());
 
-                ui.add(
-                    egui::Slider::new(&mut self.pending_folder_depth, 0usize..=5usize)
-                        .text("Group by folder levels"),
-                );
-                ui.small("Example: depth 2 groups D:\\mp3\\Artist\\Album\\song.mp3 as Artist / Album.");
+                            if ui.button(ui_icons::label(Icon::FolderOpen, "Choose folder...")).clicked() {
+                                self.pick_music_folder();
+                            }
 
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    if ui.button(ui_icons::label(Icon::FolderInput, "Import folder")).clicked() {
-                        close_after_import = self.import_folder_playlist();
-                    }
-                    if ui.button(ui_icons::label(Icon::X, "Cancel")).clicked() {
-                        close_after_import = true;
-                    }
+                            ui.add_space(8.0);
+                            ui.label("Playlist name");
+                            ui.text_edit_singleline(&mut self.pending_playlist_name);
+
+                            ui.add(
+                                egui::Slider::new(&mut self.pending_folder_depth, 0usize..=5usize)
+                                    .text("Group by folder levels"),
+                            );
+                            ui.add(egui::Label::new("Example: depth 2 groups D:\\mp3\\Artist\\Album\\song.mp3 as Artist / Album.").wrap());
+                        });
+
+                    ui.separator();
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(ui_icons::label(Icon::X, "Cancel")).clicked() {
+                            close_after_import = true;
+                        }
+                        if ui.button(ui_icons::label(Icon::FolderInput, "Import folder")).clicked() {
+                            close_after_import = self.import_folder_playlist();
+                        }
+                    });
                 });
             });
+
+        if context.input(|input| input.key_pressed(egui::Key::Escape)) {
+            close_after_import = true;
+        }
 
         if close_after_import {
             is_open = false;
@@ -2950,6 +3007,7 @@ impl AudioOrbitApp {
 
         self.show_folder_import_modal = is_open;
     }
+
 }
 
 
