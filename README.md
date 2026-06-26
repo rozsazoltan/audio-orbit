@@ -38,7 +38,7 @@ Folder playlists are scanner-owned. You do not manually add individual tracks to
 
 ### Internet radio
 
-Audio Orbit includes an Internet radio tab. You can save stream URLs with custom names, play them through the same output device, and display station metadata when the stream exposes ICY headers such as station name or description.
+Audio Orbit includes an Internet radio tab. You can save stream URLs with optional custom names; when the name is empty, Audio Orbit tries to read the station name from stream headers. Radio playback uses a clean direct stream path and does not apply shuffle, repeat, auto-play next, crossfade, or silence skipping.
 
 ### Playback
 
@@ -137,11 +137,11 @@ Folder groups can be collapsed or expanded in the track list. When a folder play
 
 Use the center track list to browse tracks. Double-click a track to start it immediately.
 
-The top player bar shows the current track, playback metadata, waveform progress, volume, shuffle/repeat options, and playback controls.
+The top player bar truncates long titles and metadata so track names never overlap the technical details or controls. For local music it shows waveform progress, volume, shuffle/repeat options, and playback controls.
 
 ### Play internet radio
 
-Open the Internet radio tab, add a readable station name and a stream URL, then double-click or press Play on the saved station. If the stream exposes metadata, Audio Orbit shows the available station title or description while playing.
+Open the Internet radio tab, paste a stream URL, optionally enter a readable station name, then double-click or press Play on the saved station. If the name is empty, Audio Orbit tries to read it from the stream. The Radio tab hides local-only playback options such as shuffle, repeat, auto-play next, crossfade, and silence skipping.
 
 ### Use repeat modes
 

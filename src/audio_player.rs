@@ -119,7 +119,6 @@ impl AudioPlayer {
             .user_agent("Audio-Orbit-Radio")
             .build()?
             .get(url)
-            .header("Icy-MetaData", "1")
             .send()
             .with_context(|| format!("failed to open internet radio stream: {url}"))?
             .error_for_status()
