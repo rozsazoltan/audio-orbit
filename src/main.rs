@@ -13,7 +13,7 @@ use crate::{
     audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo},
     config::{
         app_data_dir, collect_audio_files_from_folder, display_file_name, export_state_zip,
-        import_state_zip, load_state, same_path, save_state, Playlist, PlaylistKind, RepeatMode, SavedState,
+        import_state_zip, load_state, same_path, save_state, LastPlayedTrack, Playlist, PlaylistKind, RadioStation, RepeatMode, SavedState,
         Track, WindowGeometry, FAVORITES_PLAYLIST_NAME,
     },
     dsp::{DspSettings, OrbitMode},
@@ -49,7 +49,7 @@ fn main() -> eframe::Result<()> {
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size(initial_window_size(&state))
-        .with_min_inner_size(min_window_size_for_mode(true))
+        .with_min_inner_size([980.0, 640.0])
         .with_resizable(true);
 
     if let Some(position) = initial_window_position(&state) {
@@ -70,50 +70,35 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |creation_context| {
             ui_icons::install(&creation_context.egui_ctx);
+            configure_app_style(&creation_context.egui_ctx);
             Ok(Box::new(AudioOrbitApp::new(state)))
         }),
     )
 }
 
+fn configure_app_style(context: &egui::Context) {
+    let mut style = (*context.style()).clone();
+    style
+        .text_styles
+        .insert(egui::TextStyle::Small, egui::FontId::proportional(12.0));
+    context.set_style(style);
+}
+
 fn initial_window_size(state: &SavedState) -> egui::Vec2 {
-    current_window_geometry(state)
-        .map(|geometry| clamp_window_size_for_mode(egui::vec2(geometry.width, geometry.height), state.ui.player_only_mode))
-        .unwrap_or_else(|| default_window_size_for_mode(state.ui.player_only_mode))
+    state
+        .ui
+        .window_geometry
+        .filter(WindowGeometry::is_valid)
+        .map(|geometry| egui::vec2(geometry.width.max(980.0), geometry.height.max(640.0)))
+        .unwrap_or_else(|| egui::vec2(1240.0, 780.0))
 }
 
 fn initial_window_position(state: &SavedState) -> Option<egui::Pos2> {
-    current_window_geometry(state).map(|geometry| egui::pos2(geometry.x, geometry.y))
-}
-
-fn current_window_geometry(state: &SavedState) -> Option<WindowGeometry> {
-    let geometry = if state.ui.player_only_mode {
-        state.ui.player_only_window_geometry
-    } else {
-        state.ui.full_layout_window_geometry.or(state.ui.window_geometry)
-    };
-
-    geometry.filter(WindowGeometry::is_valid)
-}
-
-fn min_window_size_for_mode(player_only: bool) -> egui::Vec2 {
-    if player_only {
-        egui::vec2(520.0, 220.0)
-    } else {
-        egui::vec2(980.0, 640.0)
-    }
-}
-
-fn default_window_size_for_mode(player_only: bool) -> egui::Vec2 {
-    if player_only {
-        egui::vec2(760.0, 320.0)
-    } else {
-        egui::vec2(1240.0, 780.0)
-    }
-}
-
-fn clamp_window_size_for_mode(size: egui::Vec2, player_only: bool) -> egui::Vec2 {
-    let minimum = min_window_size_for_mode(player_only);
-    egui::vec2(size.x.max(minimum.x), size.y.max(minimum.y))
+    state
+        .ui
+        .window_geometry
+        .filter(WindowGeometry::is_valid)
+        .map(|geometry| egui::pos2(geometry.x, geometry.y))
 }
 
 
@@ -125,6 +110,12 @@ struct PendingTrackSwitch {
     previous_duration: f32,
     index: Option<usize>,
     info: PlaybackInfo,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MainContentTab {
+    Music,
+    Radio,
 }
 
 struct AudioOrbitApp {
@@ -143,13 +134,18 @@ struct AudioOrbitApp {
     show_folder_import_modal: bool,
     show_settings_modal: bool,
     show_release_modal: bool,
-    show_update_success_modal: bool,
     show_library_panel: bool,
     show_profile_panel: bool,
     player_only_mode: bool,
     show_track_search: bool,
+    active_tab: MainContentTab,
     track_search_query: String,
     search_cursor: usize,
+    pending_radio_name: String,
+    pending_radio_url: String,
+    active_radio_index: Option<usize>,
+    active_radio_title: Option<String>,
+    radio_title_receiver: Option<mpsc::Receiver<(usize, Option<String>)>>,
     collapsed_groups: BTreeSet<String>,
     pending_folder_path: Option<PathBuf>,
     pending_playlist_name: String,
@@ -174,7 +170,6 @@ impl AudioOrbitApp {
         let show_profile_panel = state.ui.show_profile_panel;
         let player_only_mode = state.ui.player_only_mode;
         let show_track_search = state.ui.show_track_search;
-        let show_update_success_modal = take_update_success_marker();
 
         let mut app = match AudioPlayer::new() {
             Ok(player) => {
@@ -195,13 +190,18 @@ impl AudioOrbitApp {
                     show_folder_import_modal: false,
                     show_settings_modal: false,
                     show_release_modal: false,
-                    show_update_success_modal,
                     show_library_panel,
                     show_profile_panel,
                     player_only_mode,
                     show_track_search,
+                    active_tab: MainContentTab::Music,
                     track_search_query: String::new(),
                     search_cursor: 0,
+                    pending_radio_name: String::new(),
+                    pending_radio_url: String::new(),
+                    active_radio_index: None,
+                    active_radio_title: None,
+                    radio_title_receiver: None,
                     collapsed_groups: BTreeSet::new(),
                     pending_folder_path: None,
                     pending_playlist_name,
@@ -234,13 +234,18 @@ impl AudioOrbitApp {
                 show_folder_import_modal: false,
                 show_settings_modal: false,
                 show_release_modal: false,
-                show_update_success_modal,
                 show_library_panel,
                 show_profile_panel,
                 player_only_mode,
                 show_track_search,
+                active_tab: MainContentTab::Music,
                 track_search_query: String::new(),
                 search_cursor: 0,
+                pending_radio_name: String::new(),
+                pending_radio_url: String::new(),
+                active_radio_index: None,
+                active_radio_title: None,
+                radio_title_receiver: None,
                 collapsed_groups: BTreeSet::new(),
                 pending_folder_path: None,
                 pending_playlist_name,
@@ -261,6 +266,7 @@ impl AudioOrbitApp {
         let media_keys = media_keys::start_listener();
         app.media_key_receiver = media_keys.receiver;
         app.media_key_status = media_keys.status_message;
+        app.restore_last_played_track_selection();
         app.start_automatic_update_check_if_due();
         app
     }
@@ -275,25 +281,18 @@ impl AudioOrbitApp {
             return;
         };
 
-        let minimum = min_window_size_for_mode(self.player_only_mode);
-        if inner_rect.width() < minimum.x || inner_rect.height() < minimum.y {
+        if inner_rect.width() < 640.0 || inner_rect.height() < 420.0 {
             return;
         }
 
         let position = outer_rect.map(|rect| rect.min).unwrap_or(inner_rect.min);
-        let geometry = WindowGeometry {
+
+        self.state.ui.window_geometry = Some(WindowGeometry {
             x: position.x,
             y: position.y,
             width: inner_rect.width(),
             height: inner_rect.height(),
-        };
-
-        self.state.ui.window_geometry = Some(geometry);
-        if self.player_only_mode {
-            self.state.ui.player_only_window_geometry = Some(geometry);
-        } else {
-            self.state.ui.full_layout_window_geometry = Some(geometry);
-        }
+        });
     }
 
     fn current_playlist(&self) -> Option<&Playlist> {
@@ -314,30 +313,6 @@ impl AudioOrbitApp {
         self.selected_track_index = self.eligible_track_indexes().first().copied();
         self.collapsed_groups.clear();
         self.search_cursor = 0;
-        self.save_state_silently();
-    }
-
-    fn toggle_player_only_mode(&mut self, context: &egui::Context) {
-        self.player_only_mode = !self.player_only_mode;
-        self.state.ui.player_only_mode = self.player_only_mode;
-        let target_size = if self.player_only_mode {
-            self.state
-                .ui
-                .player_only_window_geometry
-                .filter(WindowGeometry::is_valid)
-                .map(|geometry| egui::vec2(geometry.width, geometry.height))
-                .unwrap_or_else(|| default_window_size_for_mode(true))
-        } else {
-            self.state
-                .ui
-                .full_layout_window_geometry
-                .or(self.state.ui.window_geometry)
-                .filter(WindowGeometry::is_valid)
-                .map(|geometry| egui::vec2(geometry.width, geometry.height))
-                .unwrap_or_else(|| default_window_size_for_mode(false))
-        };
-
-        context.send_viewport_cmd(egui::ViewportCommand::InnerSize(clamp_window_size_for_mode(target_size, self.player_only_mode)));
         self.save_state_silently();
     }
 
@@ -397,11 +372,159 @@ impl AudioOrbitApp {
         playlist.tracks.get(index).map(|track| track.path.clone())
     }
 
+    fn remember_last_played_track(&mut self, index: Option<usize>, path: &Path) {
+        let Some(track_index) = index else {
+            return;
+        };
+        self.state.last_played_track = Some(LastPlayedTrack {
+            playlist_index: self.state.selected_playlist_index,
+            track_path: path.to_path_buf(),
+        });
+        self.selected_track_index = Some(track_index);
+        self.save_state_silently();
+    }
+
+    fn restore_last_played_track_selection(&mut self) {
+        let Some(last_played) = self.state.last_played_track.clone() else {
+            return;
+        };
+        let Some(playlist) = self.state.playlists.get(last_played.playlist_index) else {
+            return;
+        };
+        let Some(track_index) = playlist
+            .tracks
+            .iter()
+            .position(|track| same_path(&track.path, &last_played.track_path))
+        else {
+            return;
+        };
+        self.state.selected_playlist_index = last_played.playlist_index;
+        self.selected_track_index = Some(track_index);
+    }
+
     fn active_track_title(&self) -> String {
+        if let Some(radio_index) = self.active_radio_index {
+            if let Some(station) = self.state.radio_stations.get(radio_index) {
+                return self
+                    .active_radio_title
+                    .clone()
+                    .or_else(|| station.last_stream_title.clone())
+                    .map(|title| format!("{} — {}", station.name, title))
+                    .unwrap_or_else(|| format!("{} — Internet radio", station.name));
+            }
+        }
+
         self.active_track_path
             .as_ref()
             .map(|path| display_file_name(path))
             .unwrap_or_else(|| "No track playing".to_owned())
+    }
+
+    fn add_radio_station(&mut self) {
+        let name = self.pending_radio_name.trim();
+        let url = self.pending_radio_url.trim();
+        if name.is_empty() || url.is_empty() {
+            self.error_message = Some("Radio station name and stream URL are required.".to_owned());
+            return;
+        }
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            self.error_message = Some("Internet radio stream URL must start with http:// or https://.".to_owned());
+            return;
+        }
+
+        self.state.radio_stations.push(RadioStation::new(name, url));
+        self.state.selected_radio_index = Some(self.state.radio_stations.len() - 1);
+        self.pending_radio_name.clear();
+        self.pending_radio_url.clear();
+        self.status_message = "Added internet radio station.".to_owned();
+        self.error_message = None;
+        self.save_state_silently();
+    }
+
+    fn remove_selected_radio_station(&mut self) {
+        let Some(index) = self.state.selected_radio_index else {
+            return;
+        };
+        if index >= self.state.radio_stations.len() {
+            return;
+        }
+        if self.active_radio_index == Some(index) {
+            self.stop();
+        }
+        self.state.radio_stations.remove(index);
+        self.state.selected_radio_index = if self.state.radio_stations.is_empty() {
+            None
+        } else {
+            Some(index.min(self.state.radio_stations.len() - 1))
+        };
+        self.save_state_silently();
+    }
+
+    fn play_selected_radio_station(&mut self) {
+        let Some(index) = self.state.selected_radio_index else {
+            self.error_message = Some("Select an internet radio station first.".to_owned());
+            return;
+        };
+        self.play_radio_station(index);
+    }
+
+    fn play_radio_station(&mut self, index: usize) {
+        let Some(station) = self.state.radio_stations.get(index).cloned() else {
+            return;
+        };
+        let Some(player) = &mut self.player else {
+            self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+            return;
+        };
+
+        self.status_message = format!("Opening internet radio: {}...", station.name);
+        self.error_message = None;
+        match player.play_radio_stream(&station.url) {
+            Ok(()) => {
+                self.active_tab = MainContentTab::Radio;
+                self.active_radio_index = Some(index);
+                self.active_radio_title = station.last_stream_title.clone();
+                self.active_track_index = None;
+                self.active_track_path = None;
+                self.last_playback = None;
+                self.pending_track_switch = None;
+                self.state.selected_radio_index = Some(index);
+                self.status_message = format!("Playing internet radio: {}.", station.name);
+                self.save_state_silently();
+                self.start_radio_title_lookup(index, station.url);
+            }
+            Err(error) => {
+                self.error_message = Some(error.to_string());
+                self.status_message = "Internet radio playback failed.".to_owned();
+            }
+        }
+    }
+
+    fn start_radio_title_lookup(&mut self, index: usize, url: String) {
+        let (sender, receiver) = mpsc::channel();
+        self.radio_title_receiver = Some(receiver);
+        thread::spawn(move || {
+            let title = fetch_radio_stream_title(&url);
+            let _ = sender.send((index, title));
+        });
+    }
+
+    fn process_radio_title_events(&mut self) {
+        let Some(receiver) = &self.radio_title_receiver else {
+            return;
+        };
+        let events = receiver.try_iter().collect::<Vec<_>>();
+        for (index, title) in events {
+            if let Some(title) = title {
+                if self.active_radio_index == Some(index) {
+                    self.active_radio_title = Some(title.clone());
+                }
+                if let Some(station) = self.state.radio_stations.get_mut(index) {
+                    station.last_stream_title = Some(title);
+                }
+                self.save_state_silently();
+            }
+        }
     }
 
     fn add_audio_files(&mut self) {
@@ -755,6 +878,7 @@ impl AudioOrbitApp {
                     self.pending_track_switch = None;
                     self.crossfade_started_for_path = None;
                     self.store_playback_metadata(&info);
+                    self.remember_last_played_track(index, &info.path);
                     self.last_playback = Some(info);
                 }
             }
@@ -844,7 +968,8 @@ impl AudioOrbitApp {
         };
 
         self.selected_track_index = Some(previous_index);
-        self.play_path(path, Some(previous_index), 0.0);
+        let crossfade_seconds = self.configured_manual_crossfade_seconds();
+        self.play_path_with_crossfade(path, Some(previous_index), 0.0, crossfade_seconds);
     }
 
     fn seek_current(&mut self, seconds: f32) {
@@ -922,6 +1047,7 @@ impl AudioOrbitApp {
         self.active_track_path = Some(pending.info.path.clone());
         self.selected_track_index = pending.index;
         self.crossfade_started_for_path = None;
+        self.remember_last_played_track(pending.index, &pending.info.path);
         self.store_playback_metadata(&pending.info);
         self.last_playback = Some(pending.info);
     }
@@ -1010,7 +1136,9 @@ impl AudioOrbitApp {
         }
 
         if player_only {
-            self.toggle_player_only_mode(context);
+            self.player_only_mode = !self.player_only_mode;
+            self.state.ui.player_only_mode = self.player_only_mode;
+            self.save_state_silently();
         }
 
         if library && !self.player_only_mode {
@@ -1072,6 +1200,9 @@ impl AudioOrbitApp {
 
         self.active_track_index = None;
         self.active_track_path = None;
+        self.active_radio_index = None;
+        self.active_radio_title = None;
+        self.radio_title_receiver = None;
         self.pending_track_switch = None;
         self.crossfade_started_for_path = None;
         self.last_playback = None;
@@ -1466,19 +1597,21 @@ impl eframe::App for AudioOrbitApp {
         self.process_media_key_events();
         self.process_update_check_events();
         self.process_keyboard_shortcuts(context);
+        self.process_radio_title_events();
         self.process_pending_track_switch();
         self.process_pending_profile_apply();
         self.update_playback_status();
         self.poll_output_device_change();
 
         egui::TopBottomPanel::top("now_playing_panel").show(context, |ui| {
-            self.render_now_playing_panel(context, ui);
+            self.render_now_playing_panel(ui);
         });
 
         if !self.player_only_mode && self.show_library_panel {
             egui::SidePanel::left("library_panel")
                 .resizable(true)
-                .default_width(300.0)
+                .default_width(340.0)
+                .width_range(260.0..=520.0)
                 .show(context, |ui| {
                     self.render_library_panel(ui);
                 });
@@ -1487,14 +1620,15 @@ impl eframe::App for AudioOrbitApp {
         if !self.player_only_mode && self.show_profile_panel {
             egui::SidePanel::right("profile_panel")
                 .resizable(true)
-                .default_width(320.0)
+                .default_width(340.0)
+                .width_range(280.0..=520.0)
                 .show(context, |ui| {
                     self.render_profile_panel(ui);
                 });
         }
 
         egui::CentralPanel::default().show(context, |ui| {
-            self.render_track_panel(ui);
+            self.render_main_content_panel(ui);
         });
 
         egui::TopBottomPanel::bottom("status_panel").show(context, |ui| {
@@ -1512,17 +1646,23 @@ impl eframe::App for AudioOrbitApp {
         if self.show_release_modal {
             self.render_release_modal(context);
         }
-
-        if self.show_update_success_modal {
-            self.render_update_success_modal(context);
-        }
     }
 }
 
 impl AudioOrbitApp {
-    fn render_now_playing_panel(&mut self, context: &egui::Context, ui: &mut egui::Ui) {
+    fn control_label(&self, icon: Icon, text: &str) -> String {
+        if self.player_only_mode {
+            ui_icons::icon(icon)
+        } else {
+            ui_icons::label(icon, text)
+        }
+    }
+
+    fn render_now_playing_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(8.0);
-        let has_now_playing = self.active_track_path.is_some() || self.pending_track_switch.is_some();
+        let has_now_playing = self.active_track_path.is_some()
+            || self.pending_track_switch.is_some()
+            || self.active_radio_index.is_some();
 
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
@@ -1540,23 +1680,25 @@ impl AudioOrbitApp {
                         ));
                     }
                 } else {
-                    ui.heading(egui::RichText::new("No track playing").weak());
-                    ui.small(egui::RichText::new(" ").weak());
+                    ui.add_space(24.0);
                 }
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(ui_icons::label(Icon::Settings2, "Settings")).clicked() {
+                let settings_label = self.control_label(Icon::Settings2, "Settings");
+                if ui.button(settings_label).on_hover_text("Settings").clicked() {
                     self.show_settings_modal = true;
                 }
 
                 let player_only_label = if self.player_only_mode {
-                    ui_icons::label(Icon::ListMusic, "Full layout")
+                    self.control_label(Icon::ListMusic, "Full layout")
                 } else {
-                    ui_icons::label(Icon::Play, "Player only")
+                    self.control_label(Icon::Music, "Player only")
                 };
                 if ui.button(player_only_label).clicked() {
-                    self.toggle_player_only_mode(context);
+                    self.player_only_mode = !self.player_only_mode;
+                    self.state.ui.player_only_mode = self.player_only_mode;
+                    self.save_state_silently();
                 }
 
                 if !self.player_only_mode {
@@ -1583,54 +1725,50 @@ impl AudioOrbitApp {
                     }
                 }
 
-                if ui.button(ui_icons::label(Icon::RefreshCw, "Refresh output")).clicked() {
-                    self.refresh_output_device();
-                }
-                ui.small(self.last_known_output_name.as_str());
             });
         });
 
-        let position = if has_now_playing { self.displayed_playback_position_seconds() } else { 0.0 };
-        let duration = if has_now_playing { self.displayed_playback_duration_seconds() } else { 0.0 };
-        let progress = if duration > 0.0 {
-            (position / duration).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        if self.active_radio_index.is_some() {
+            let response = draw_waveform_seek(ui, &[], 0.0, "Live stream".to_owned());
+            response.on_hover_text("Internet radio streams do not expose a seekable timeline.");
+        } else if has_now_playing {
+            let position = self.displayed_playback_position_seconds();
+            let duration = self.displayed_playback_duration_seconds();
+            let progress = if duration > 0.0 {
+                (position / duration).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
 
-        let waveform = if has_now_playing {
-            self.last_playback
+            let waveform = self
+                .last_playback
                 .as_ref()
                 .map(|playback| playback.waveform.as_slice())
-                .unwrap_or(&[])
-        } else {
-            &[]
-        };
-        let label = if has_now_playing {
-            format!("{} / {}", format_duration(position), format_duration(duration))
-        } else {
-            " ".to_owned()
-        };
-        let response = draw_waveform_seek(ui, waveform, progress, label);
-        if has_now_playing && (response.clicked() || response.drag_stopped()) && duration > 0.0 {
-            if let Some(pointer) = response.interact_pointer_pos() {
-                let next_position = ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration;
-                self.seek_current(next_position);
+                .unwrap_or(&[]);
+            let response = draw_waveform_seek(ui, waveform, progress, format!("{} / {}", format_duration(position), format_duration(duration)));
+            if (response.clicked() || response.drag_stopped()) && duration > 0.0 {
+                if let Some(pointer) = response.interact_pointer_pos() {
+                    let next_position = ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration;
+                    self.seek_current(next_position);
+                }
             }
+        } else {
+            let response = draw_waveform_seek(ui, &[], 0.0, "".to_owned());
+            response.on_hover_text("No track is currently playing.");
         }
 
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(self.player.is_some(), egui::Button::new(ui_icons::label(Icon::SkipBack, "Previous")))
+                .add_enabled(self.player.is_some(), egui::Button::new(self.control_label(Icon::SkipBack, "Previous")))
                 .clicked()
             {
                 self.play_previous_track();
             }
 
             let play_label = match self.player.as_ref() {
-                Some(player) if player.is_playing() => ui_icons::label(Icon::Pause, "Pause"),
-                Some(player) if player.is_paused() => ui_icons::label(Icon::Play, "Resume"),
-                _ => ui_icons::label(Icon::Play, "Play"),
+                Some(player) if player.is_playing() => self.control_label(Icon::Pause, "Pause"),
+                Some(player) if player.is_paused() => self.control_label(Icon::Play, "Resume"),
+                _ => self.control_label(Icon::Play, "Play"),
             };
 
             if ui
@@ -1651,14 +1789,14 @@ impl AudioOrbitApp {
             }
 
             if ui
-                .add_enabled(self.player.is_some(), egui::Button::new(ui_icons::label(Icon::Square, "Stop")))
+                .add_enabled(self.player.is_some(), egui::Button::new(self.control_label(Icon::Square, "Stop")))
                 .clicked()
             {
                 self.stop();
             }
 
             if ui
-                .add_enabled(self.player.is_some(), egui::Button::new(ui_icons::label(Icon::SkipForward, "Next")))
+                .add_enabled(self.player.is_some(), egui::Button::new(self.control_label(Icon::SkipForward, "Next")))
                 .clicked()
             {
                 self.play_next_track();
@@ -1707,9 +1845,11 @@ impl AudioOrbitApp {
         ui.small("Folder scanners, manual playlists, and Favorites.");
         ui.separator();
 
+        let playlist_list_width = (ui.available_width() - 8.0).max(220.0);
         egui::ScrollArea::vertical()
             .max_height(260.0)
             .show(ui, |ui| {
+                ui.set_width(playlist_list_width);
                 for index in 0..self.state.playlists.len() {
                     let selected = self.state.selected_playlist_index == index;
                     let playlist = self.state.playlists[index].clone();
@@ -1865,6 +2005,118 @@ impl AudioOrbitApp {
         }
     }
 
+    fn render_main_content_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.selectable_label(self.active_tab == MainContentTab::Music, ui_icons::label(Icon::Music, "Music")).clicked() {
+                self.active_tab = MainContentTab::Music;
+            }
+            if ui.selectable_label(self.active_tab == MainContentTab::Radio, ui_icons::label(Icon::Radio, "Internet radio")).clicked() {
+                self.active_tab = MainContentTab::Radio;
+            }
+        });
+        ui.separator();
+
+        match self.active_tab {
+            MainContentTab::Music => self.render_track_panel(ui),
+            MainContentTab::Radio => self.render_radio_panel(ui),
+        }
+    }
+
+    fn render_radio_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading(ui_icons::label(Icon::Radio, "Internet radio"));
+            ui.label(format!("{} station(s)", self.state.radio_stations.len()));
+        });
+        ui.label("Save stream URLs with readable names and play them from the same audio output device.");
+        ui.add_space(8.0);
+
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.label("Add station");
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                ui.add_sized(
+                    egui::vec2(180.0, 22.0),
+                    egui::TextEdit::singleline(&mut self.pending_radio_name).hint_text("Station name"),
+                );
+                ui.label("Stream URL");
+                ui.add_sized(
+                    egui::vec2((ui.available_width() - 120.0).max(220.0), 22.0),
+                    egui::TextEdit::singleline(&mut self.pending_radio_url).hint_text("https://..."),
+                );
+                if ui.button(ui_icons::label(Icon::Plus, "Add")).clicked() {
+                    self.add_radio_station();
+                }
+            });
+        });
+
+        ui.add_space(10.0);
+        if self.state.radio_stations.is_empty() {
+            ui.centered_and_justified(|ui| {
+                ui.label("No internet radio stations yet. Add a stream URL above.");
+            });
+            return;
+        }
+
+        let row_width = (ui.available_width() - 28.0).max(320.0);
+        let mut remove_radio_index: Option<usize> = None;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.set_width(row_width);
+            for index in 0..self.state.radio_stations.len() {
+                let station = self.state.radio_stations[index].clone();
+                let selected = self.state.selected_radio_index == Some(index);
+                let active = self.active_radio_index == Some(index);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(row_width, 38.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        let title = if active {
+                            format!("{} {}", ui_icons::icon(Icon::Play), station.name)
+                        } else {
+                            station.name.clone()
+                        };
+                        let title_width = (ui.available_width() - 190.0).max(120.0);
+                        let response = ui.add_sized(
+                            egui::vec2(title_width, 24.0),
+                            egui::SelectableLabel::new(selected, title),
+                        );
+                        if response.clicked() {
+                            self.state.selected_radio_index = Some(index);
+                            self.save_state_silently();
+                        }
+                        if response.double_clicked() {
+                            self.state.selected_radio_index = Some(index);
+                            self.play_radio_station(index);
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button(ui_icons::icon(Icon::Trash2)).on_hover_text("Remove station").clicked() {
+                                remove_radio_index = Some(index);
+                            }
+                            if ui.button(self.control_label(Icon::Play, "Play")).clicked() {
+                                self.state.selected_radio_index = Some(index);
+                                self.play_radio_station(index);
+                            }
+                            let stream_title = station
+                                .last_stream_title
+                                .as_deref()
+                                .unwrap_or("Stream metadata not available yet");
+                            ui.add_sized(
+                                egui::vec2(280.0, 20.0),
+                                egui::Label::new(stream_title),
+                            );
+                        });
+                    },
+                );
+                ui.separator();
+            }
+        });
+
+        if let Some(index) = remove_radio_index {
+            self.state.selected_radio_index = Some(index);
+            self.remove_selected_radio_station();
+        }
+    }
+
     fn render_track_panel(&mut self, ui: &mut egui::Ui) {
         let Some(playlist) = self.current_playlist() else {
             ui.heading("No playlist");
@@ -1911,9 +2163,9 @@ impl AudioOrbitApp {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let search_label = if self.show_track_search {
-                    ui_icons::label(Icon::X, "Close search")
+                    self.control_label(Icon::X, "Close search")
                 } else {
-                    ui_icons::label(Icon::Search, "Search")
+                    self.control_label(Icon::Search, "Search")
                 };
                 if ui.button(search_label).clicked() {
                     self.show_track_search = !self.show_track_search;
@@ -1991,12 +2243,13 @@ impl AudioOrbitApp {
             .collect();
 
         let mut last_group = String::new();
-        let track_list_width = (ui.available_width() - 36.0).max(320.0);
+        let track_list_width = (ui.available_width() - 32.0).max(320.0);
         ui.allocate_ui_with_layout(
             egui::vec2(track_list_width, ui.available_height()),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.set_width(track_list_width);
             for (index, track) in visible_tracks {
                 if show_group_headers && track.group != last_group {
                     ui.add_space(6.0);
@@ -2037,83 +2290,92 @@ impl AudioOrbitApp {
                 let path = track.path.clone();
                 let repeat_selection_mode = self.state.playback.repeat_mode == RepeatMode::Selection;
 
-                ui.horizontal(|ui| {
-                    if repeat_selection_mode {
-                        let mut checked = self.selected_track_indexes.contains(&index);
-                        if ui.checkbox(&mut checked, "").on_hover_text("Include in repeat selection").changed() {
-                            if checked {
-                                self.selected_track_indexes.insert(index);
-                            } else {
-                                self.selected_track_indexes.remove(&index);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(track_list_width, 30.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        if repeat_selection_mode {
+                            let mut checked = self.selected_track_indexes.contains(&index);
+                            if ui.checkbox(&mut checked, "").on_hover_text("Include in repeat selection").changed() {
+                                if checked {
+                                    self.selected_track_indexes.insert(index);
+                                } else {
+                                    self.selected_track_indexes.remove(&index);
+                                }
                             }
                         }
-                    }
 
-                    let heart = if favorite {
-                        egui::RichText::new("♥").color(egui::Color32::from_rgb(230, 70, 95))
-                    } else {
-                        egui::RichText::new("♡")
-                    };
-                    if ui
-                        .add_sized(egui::vec2(28.0, 24.0), egui::Button::new(heart))
-                        .on_hover_text("Toggle favorite")
-                        .clicked()
-                    {
-                        self.toggle_favorite(path.clone());
-                    }
+                        let heart = if favorite {
+                            egui::RichText::new("♥").color(egui::Color32::from_rgb(230, 70, 95)).size(15.0)
+                        } else {
+                            egui::RichText::new("♡").size(15.0)
+                        };
+                        if ui
+                            .add_sized(egui::vec2(28.0, 24.0), egui::Button::new(heart))
+                            .on_hover_text("Toggle favorite")
+                            .clicked()
+                        {
+                            self.toggle_favorite(path.clone());
+                        }
 
-                    let response = ui.selectable_label(is_selected, title);
-                    if response.clicked() {
-                        self.selected_track_index = Some(index);
-                    }
-                    if response.double_clicked() {
-                        self.selected_track_index = Some(index);
-                        self.play_path(path.clone(), Some(index), 0.0);
-                    }
+                        let reserved_right_width = 260.0;
+                        let title_width = (ui.available_width() - reserved_right_width).max(120.0);
+                        let response = ui.add_sized(
+                            egui::vec2(title_width, 24.0),
+                            egui::SelectableLabel::new(is_selected, title),
+                        );
+                        if response.clicked() {
+                            self.selected_track_index = Some(index);
+                        }
+                        if response.double_clicked() {
+                            self.selected_track_index = Some(index);
+                            self.play_path(path.clone(), Some(index), 0.0);
+                        }
 
-                    ui.add_space(8.0);
-                    ui.small(metadata);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.menu_button(ui_icons::icon(Icon::Ellipsis), |ui| {
+                                if ui.button(ui_icons::label(Icon::Play, "Play now")).clicked() {
+                                    self.selected_track_index = Some(index);
+                                    self.play_path(path.clone(), Some(index), 0.0);
+                                    ui.close_menu();
+                                }
+                                if ui.button(ui_icons::label(Icon::ExternalLink, "Show in File Explorer")).clicked() {
+                                    self.reveal_track_in_file_manager(path.clone());
+                                    ui.close_menu();
+                                }
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(24.0);
-                        ui.menu_button(ui_icons::icon(Icon::Ellipsis), |ui| {
-                            if ui.button(ui_icons::label(Icon::Play, "Play now")).clicked() {
-                                self.selected_track_index = Some(index);
-                                self.play_path(path.clone(), Some(index), 0.0);
-                                ui.close_menu();
-                            }
-                            if ui.button(ui_icons::label(Icon::ExternalLink, "Show in File Explorer")).clicked() {
-                                self.reveal_track_in_file_manager(path.clone());
-                                ui.close_menu();
-                            }
-
-                            ui.menu_button(ui_icons::label(Icon::ListPlus, "Add to playlist"), |ui| {
-                                for (target_index, target_name, kind) in add_targets.clone() {
-                                    if kind.accepts_manual_tracks() {
-                                        let label = format!("{} {}", kind.icon(), target_name);
-                                        if ui.button(label).clicked() {
-                                            self.add_track_to_playlist(path.clone(), target_index);
-                                            ui.close_menu();
+                                ui.menu_button(ui_icons::label(Icon::ListPlus, "Add to playlist"), |ui| {
+                                    for (target_index, target_name, kind) in add_targets.clone() {
+                                        if kind.accepts_manual_tracks() {
+                                            let label = format!("{} {}", kind.icon(), target_name);
+                                            if ui.button(label).clicked() {
+                                                self.add_track_to_playlist(path.clone(), target_index);
+                                                ui.close_menu();
+                                            }
                                         }
                                     }
+                                });
+
+                                let can_remove_from_playlist = self
+                                    .current_playlist()
+                                    .map(|playlist| playlist.kind != PlaylistKind::Folder)
+                                    .unwrap_or(false);
+                                if ui.add_enabled(can_remove_from_playlist, egui::Button::new(ui_icons::label(Icon::ListMinus, "Remove from playlist"))).clicked() {
+                                    self.remove_track_from_current_playlist(index);
+                                    ui.close_menu();
+                                }
+                                if ui.button(ui_icons::label(Icon::Trash2, "Delete from disk")).clicked() {
+                                    self.delete_track_from_disk(path.clone());
+                                    ui.close_menu();
                                 }
                             });
-
-                            let can_remove_from_playlist = self
-                                .current_playlist()
-                                .map(|playlist| playlist.kind != PlaylistKind::Folder)
-                                .unwrap_or(false);
-                            if ui.add_enabled(can_remove_from_playlist, egui::Button::new(ui_icons::label(Icon::ListMinus, "Remove from playlist"))).clicked() {
-                                self.remove_track_from_current_playlist(index);
-                                ui.close_menu();
-                            }
-                            if ui.button(ui_icons::label(Icon::Trash2, "Delete from disk")).clicked() {
-                                self.delete_track_from_disk(path.clone());
-                                ui.close_menu();
-                            }
+                            ui.add_sized(
+                                egui::vec2(210.0, 20.0),
+                                egui::Label::new(metadata),
+                            );
                         });
-                    });
-                });
+                    },
+                );
                 ui.separator();
             }
                 });
@@ -2245,6 +2507,15 @@ impl AudioOrbitApp {
 
         ui.add_space(12.0);
         self.render_profile_transition_section(ui);
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.small_button(ui_icons::icon(Icon::RefreshCw)).on_hover_text("Refresh output device").clicked() {
+                self.refresh_output_device();
+            }
+            ui.label(self.last_known_output_name.as_str());
+        });
     }
 
     fn render_profile_transition_section(&mut self, ui: &mut egui::Ui) {
@@ -2301,49 +2572,6 @@ impl AudioOrbitApp {
             egui::Id::new(id),
         ));
         painter.rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(215));
-    }
-
-    fn render_update_success_modal(&mut self, context: &egui::Context) {
-        self.render_modal_backdrop(context, "update_success_modal_backdrop");
-        let mut is_open = self.show_update_success_modal;
-
-        egui::Area::new(egui::Id::new("update_success_modal"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(context, |ui| {
-                egui::Frame::window(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(520.0);
-                    ui.set_max_width(600.0);
-                    ui.horizontal(|ui| {
-                        ui.heading("Update installed");
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button(ui_icons::icon(Icon::X)).on_hover_text("Close").clicked() {
-                                is_open = false;
-                            }
-                        });
-                    });
-                    ui.add_space(8.0);
-                    ui.label(format!("Audio Orbit has been updated to v{}.", env!("CARGO_PKG_VERSION")));
-                    ui.small("You can review the release notes, changes, and downloaded executable on the GitHub Releases page.");
-                    ui.add_space(12.0);
-                    ui.horizontal(|ui| {
-                        if ui.button(ui_icons::label(Icon::ExternalLink, "View release notes")).clicked() {
-                            if let Err(error) = updater::open_releases_page() {
-                                self.error_message = Some(error.to_string());
-                            }
-                        }
-                        if ui.button(ui_icons::label(Icon::Check, "OK")).clicked() {
-                            is_open = false;
-                        }
-                    });
-                });
-            });
-
-        if context.input(|input| input.key_pressed(egui::Key::Escape)) {
-            is_open = false;
-        }
-
-        self.show_update_success_modal = is_open;
     }
 
     fn render_release_modal(&mut self, context: &egui::Context) {
@@ -2732,19 +2960,6 @@ fn current_unix_seconds() -> u64 {
         .unwrap_or(0)
 }
 
-fn take_update_success_marker() -> bool {
-    let Some(path) = app_data_dir().map(|dir| dir.join("update-success")) else {
-        return false;
-    };
-
-    if path.exists() {
-        let _ = fs::remove_file(path);
-        true
-    } else {
-        false
-    }
-}
-
 fn media_key_status_message(
     registered: &[media_keys::MediaKeyCommand],
     failed: &[media_keys::MediaKeyCommand],
@@ -2764,6 +2979,32 @@ fn media_key_status_message(
         .join(", ");
 
     format!("Media keys: partially enabled; unavailable: {failed_labels}")
+}
+
+fn fetch_radio_stream_title(url: &str) -> Option<String> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("Audio-Orbit-Radio-Metadata")
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()?;
+
+    let response = client
+        .get(url)
+        .header("Icy-MetaData", "1")
+        .send()
+        .ok()?;
+
+    let headers = response.headers();
+    let title = headers
+        .get("icy-name")
+        .or_else(|| headers.get("icy-description"))
+        .or_else(|| headers.get("x-audiocast-name"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+
+    title
 }
 
 fn ensure_state_is_valid(state: &mut SavedState) {
@@ -2795,6 +3036,12 @@ fn ensure_state_is_valid(state: &mut SavedState) {
     if state.selected_profile_index >= state.profiles.len() {
         state.selected_profile_index = 0;
     }
+
+    if let Some(index) = state.selected_radio_index {
+        if index >= state.radio_stations.len() {
+            state.selected_radio_index = None;
+        }
+    }
 }
 
 fn next_valid_track_index(previous_index: usize, remaining_len: usize) -> Option<usize> {
@@ -2822,20 +3069,30 @@ fn draw_waveform_seek(ui: &mut egui::Ui, waveform: &[f32], progress: f32, label:
 
     let progress = progress.clamp(0.0, 1.0);
     let progress_x = rect.left() + rect.width() * progress;
-    let target_points = (rect.width() / 2.2).round().clamp(96.0, 1400.0) as usize;
+    let target_points = (rect.width() / 1.65).round().clamp(140.0, 2200.0) as usize;
     let step = (waveform.len() as f32 / target_points.max(1) as f32).ceil().max(1.0) as usize;
     let rendered_points = (waveform.len() + step - 1) / step;
-    let gap = 1.25;
+    let gap = 0.85;
     let bar_width = ((rect.width() - gap * rendered_points.saturating_sub(1) as f32) / rendered_points.max(1) as f32)
-        .clamp(1.1, 2.8);
+        .clamp(0.75, 2.2);
+    let peak = waveform
+        .iter()
+        .copied()
+        .fold(0.0_f32, f32::max)
+        .max(0.08);
+    let mut sorted = waveform.to_vec();
+    sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let floor_index = ((sorted.len().saturating_sub(1)) as f32 * 0.18) as usize;
+    let noise_floor = sorted.get(floor_index).copied().unwrap_or(0.0).min(peak * 0.65);
+    let dynamic_range = (peak - noise_floor).max(0.04);
 
     for (bar_index, chunk) in waveform.chunks(step).enumerate() {
         let value = chunk
             .iter()
             .copied()
-            .fold(0.0_f32, f32::max)
-            .clamp(0.02, 1.0);
-        let eased = value.sqrt();
+            .fold(0.0_f32, f32::max);
+        let normalized = ((value - noise_floor) / dynamic_range).clamp(0.025, 1.0);
+        let eased = normalized.powf(0.72);
         let x1 = rect.left() + bar_index as f32 * (bar_width + gap);
         let x2 = (x1 + bar_width).min(rect.right());
         if x1 >= rect.right() {

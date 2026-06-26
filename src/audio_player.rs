@@ -5,8 +5,9 @@ use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, OutputStreamHandle, Si
 use std::{
     fs,
     fs::File,
-    io::BufReader,
+    io::{self, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    sync::Mutex,
     thread,
     time::{Duration, Instant},
 };
@@ -20,6 +21,45 @@ pub struct PlaybackInfo {
     pub sample_rate: u32,
     pub size_bytes: Option<u64>,
     pub waveform: Vec<f32>,
+}
+
+struct RadioStream<R> {
+    inner: Mutex<R>,
+    position: u64,
+}
+
+impl<R> RadioStream<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner: Mutex::new(inner),
+            position: 0,
+        }
+    }
+}
+
+impl<R: Read + Send> Read for RadioStream<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "radio stream lock poisoned"))?;
+        let read = inner.read(buffer)?;
+        self.position += read as u64;
+        Ok(read)
+    }
+}
+
+impl<R> Seek for RadioStream<R> {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        match position {
+            SeekFrom::Current(0) => Ok(self.position),
+            SeekFrom::Start(current) if current == self.position => Ok(self.position),
+            _ => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "internet radio streams are not seekable",
+            )),
+        }
+    }
 }
 
 pub struct AudioPlayer {
@@ -59,6 +99,39 @@ impl AudioPlayer {
 
     pub fn output_device_name(&self) -> &str {
         &self.output_device_name
+    }
+
+    pub fn play_radio_stream(&mut self, url: &str) -> Result<()> {
+        let response = reqwest::blocking::Client::builder()
+            .user_agent("Audio-Orbit-Radio")
+            .build()?
+            .get(url)
+            .header("Icy-MetaData", "1")
+            .send()
+            .with_context(|| format!("failed to open internet radio stream: {url}"))?
+            .error_for_status()
+            .with_context(|| format!("internet radio stream returned an error: {url}"))?;
+
+        let stream = RadioStream::new(response);
+        let decoder = Decoder::new(BufReader::new(stream))
+            .with_context(|| format!("failed to decode internet radio stream: {url}"))?;
+
+        self.stop();
+        let sink = Sink::try_new(&self.stream_handle)
+            .context("failed to create audio playback sink")?;
+        sink.append(decoder.convert_samples());
+        sink.play();
+
+        self.sink = Some(sink);
+        self.started_at = Some(Instant::now());
+        self.paused_at = None;
+        self.accumulated_pause = Duration::ZERO;
+        self.current_duration = None;
+        self.current_start_offset_seconds = 0.0;
+        self.current_path = None;
+        self.current_settings = None;
+
+        Ok(())
     }
 
     pub fn play_file_with_orbit_from(

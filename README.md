@@ -1,11 +1,12 @@
 # audio-orbit
 
-`audio-orbit` is a lightweight Windows music player for local audio libraries, folder-based playlists, smooth crossfade playback, silence skipping, and headphone-friendly orbit-style stereo movement.
+`audio-orbit` is a lightweight Windows music player for local audio libraries, internet radio streams, folder-based playlists, smooth crossfade playback, silence skipping, and headphone-friendly orbit-style stereo movement.
 
 It is designed for people who keep music in local folders and want an AIMP-like desktop player with portable app data, playlist backups, global media keys, release updates, and simple spatial stereo controls. The orbit effect can be turned off per sound profile, so the app can also be used as a normal stereo music player.
 
 - [What it does](#what-it-does)
   - [Local music libraries](#local-music-libraries)
+  - [Internet radio](#internet-radio)
   - [Playback](#playback)
   - [Sound profiles](#sound-profiles)
   - [Backups](#backups)
@@ -14,6 +15,7 @@ It is designed for people who keep music in local folders and want an AIMP-like 
 - [Usage](#usage)
   - [Create a folder playlist](#create-a-folder-playlist)
   - [Play music](#play-music)
+  - [Play internet radio](#play-internet-radio)
   - [Use repeat modes](#use-repeat-modes)
   - [Search tracks](#search-tracks)
   - [Manage Favorites](#manage-favorites)
@@ -34,6 +36,10 @@ Folder playlists are created from a selected directory. You choose how many fold
 
 Folder playlists are scanner-owned. You do not manually add individual tracks to them; instead, you add files to the folder and rescan. Manual playlists and Favorites can receive individual tracks.
 
+### Internet radio
+
+Audio Orbit includes an Internet radio tab. You can save stream URLs with custom names, play them through the same output device, and display station metadata when the stream exposes ICY headers such as station name or description.
+
 ### Playback
 
 Audio Orbit supports common desktop-player behavior:
@@ -45,6 +51,8 @@ Audio Orbit supports common desktop-player behavior:
 - crossfade tracks with configurable overlap seconds
 - skip long silence with configurable threshold seconds
 - repeat the current track or a selected set of tracks
+- remember the last played local track between app launches
+- play saved internet radio streams from the Radio tab
 - remember the window size and position between app launches
 - prevent multiple app instances from running at the same time
 
@@ -68,6 +76,7 @@ Backups are ZIP files containing the full app state:
 - repeat settings
 - crossfade settings
 - silence skip settings
+- internet radio station list
 - update settings
 - UI layout settings
 
@@ -77,7 +86,7 @@ Audio files themselves are not embedded in the backup. The backup stores library
 
 Audio Orbit can check GitHub releases for new Windows executable builds. Stable releases are checked by default. Prerelease watching can be enabled in the release watcher.
 
-On startup, Audio Orbit performs a background update check at most once per hour. If a newer release is available, the release watcher modal opens automatically. To avoid GitHub rate limiting, manual update checks are also limited per app session. After a self-update finishes and the app restarts, Audio Orbit shows an update success modal with a shortcut to the GitHub Releases page where release notes and changes can be reviewed.
+On startup, Audio Orbit performs a background update check at most once per hour. If a newer release is available, the release watcher modal opens automatically. To avoid GitHub rate limiting, manual update checks are also limited per app session.
 
 ## Get started
 
@@ -127,6 +136,10 @@ Use the center track list to browse tracks. Double-click a track to start it imm
 
 The top player bar shows the current track, playback metadata, waveform progress, and playback controls.
 
+### Play internet radio
+
+Open the Internet radio tab, add a readable station name and a stream URL, then double-click or press Play on the saved station. If the stream exposes metadata, Audio Orbit shows the available station title or description while playing.
+
 ### Use repeat modes
 
 Audio Orbit supports three repeat modes:
@@ -163,7 +176,7 @@ If an update is available, Audio Orbit can replace its current executable and re
 
 ## Window behavior
 
-Audio Orbit remembers the window size and position when the app closes and restores the same layout on the next launch. Full layout and Player-only layout keep separate window sizes, so compact player mode can stay small while the full library layout opens larger.
+Audio Orbit remembers the window size and position when the app closes and restores the same layout on the next launch.
 
 Only one Audio Orbit instance can run at a time. If the app is already open, starting the executable again exits immediately instead of opening a second player window.
 

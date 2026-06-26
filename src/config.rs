@@ -118,6 +118,30 @@ impl Track {
     }
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RadioStation {
+    pub name: String,
+    pub url: String,
+    #[serde(default)]
+    pub last_stream_title: Option<String>,
+}
+
+impl RadioStation {
+    pub fn new(name: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            url: url.into(),
+            last_stream_title: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LastPlayedTrack {
+    pub playlist_index: usize,
+    pub track_path: PathBuf,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Playlist {
     pub name: String,
@@ -375,8 +399,8 @@ pub struct WindowGeometry {
 
 impl WindowGeometry {
     pub fn is_valid(&self) -> bool {
-        self.width >= 320.0
-            && self.height >= 160.0
+        self.width >= 640.0
+            && self.height >= 420.0
             && self.width.is_finite()
             && self.height.is_finite()
             && self.x.is_finite()
@@ -396,10 +420,6 @@ pub struct UiSettings {
     pub show_track_search: bool,
     #[serde(default)]
     pub window_geometry: Option<WindowGeometry>,
-    #[serde(default)]
-    pub full_layout_window_geometry: Option<WindowGeometry>,
-    #[serde(default)]
-    pub player_only_window_geometry: Option<WindowGeometry>,
 }
 
 impl Default for UiSettings {
@@ -410,8 +430,6 @@ impl Default for UiSettings {
             player_only_mode: false,
             show_track_search: false,
             window_geometry: None,
-            full_layout_window_geometry: None,
-            player_only_window_geometry: None,
         }
     }
 }
@@ -426,6 +444,12 @@ pub struct SavedState {
     pub profiles: Vec<DspProfile>,
     pub selected_playlist_index: usize,
     pub selected_profile_index: usize,
+    #[serde(default)]
+    pub radio_stations: Vec<RadioStation>,
+    #[serde(default)]
+    pub selected_radio_index: Option<usize>,
+    #[serde(default)]
+    pub last_played_track: Option<LastPlayedTrack>,
     #[serde(default)]
     pub update_settings: UpdateSettings,
     #[serde(default)]
@@ -451,6 +475,9 @@ impl Default for SavedState {
             ],
             selected_playlist_index: 1,
             selected_profile_index: 0,
+            radio_stations: Vec::new(),
+            selected_radio_index: None,
+            last_played_track: None,
             update_settings: UpdateSettings::default(),
             playback: PlaybackSettings::default(),
             ui: UiSettings::default(),
