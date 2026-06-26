@@ -119,7 +119,7 @@ impl AudioPlayer {
         self.stop();
         let sink = Sink::try_new(&self.stream_handle)
             .context("failed to create audio playback sink")?;
-        sink.append(decoder.convert_samples());
+        sink.append(decoder.convert_samples::<f32>());
         sink.play();
 
         self.sink = Some(sink);
@@ -194,7 +194,7 @@ impl AudioPlayer {
             anyhow::bail!("the selected audio file reported an invalid sample rate");
         }
 
-        let input_samples: Vec<f32> = decoder.convert_samples().collect();
+        let input_samples: Vec<f32> = decoder.convert_samples::<f32>().collect();
         if input_samples.is_empty() {
             anyhow::bail!("the selected audio file did not contain any decoded samples");
         }

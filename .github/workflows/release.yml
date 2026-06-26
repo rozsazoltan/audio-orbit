@@ -68,10 +68,36 @@ jobs:
             exit 1
           }
 
-          $CacheInput = ($DependencySections | ForEach-Object { $_.Value.Trim() }) -join "`n`n"
-          $CacheInput = $CacheInput + "`nrust-toolchain=stable"
-          $CacheInput = $CacheInput + "`nrust-target=$env:RUST_TARGET"
+          # Keep the cache stable across Audio Orbit release version changes.
+          # Only dependency declarations and dependency lock metadata are used.
+          $CacheParts = New-Object System.Collections.Generic.List[string]
+          $CacheParts.Add("cargo-dependency-sections")
+          foreach ($Section in $DependencySections) {
+            $CacheParts.Add($Section.Value.Trim())
+          }
 
+          if (Test-Path "Cargo.lock") {
+            $CargoLock = Get-Content "Cargo.lock" -Raw
+            $PackageBlocks = [regex]::Matches($CargoLock, '(?ms)^\[\[package\]\]\s*.*?(?=^\[\[package\]\]|\z)')
+            $DependencyLockBlocks = foreach ($Block in $PackageBlocks) {
+              $Value = $Block.Value.Trim()
+              if ($Value -notmatch '(?m)^name\s*=\s*"audio-orbit"\s*$') {
+                $Value
+              }
+            }
+
+            if ($DependencyLockBlocks) {
+              $CacheParts.Add("cargo-lock-dependency-packages")
+              foreach ($Block in $DependencyLockBlocks) {
+                $CacheParts.Add($Block)
+              }
+            }
+          }
+
+          $CacheParts.Add("rust-toolchain=stable")
+          $CacheParts.Add("rust-target=$env:RUST_TARGET")
+
+          $CacheInput = $CacheParts -join "`n`n"
           $CacheInputPath = Join-Path $env:RUNNER_TEMP "cargo-deps-cache-input.txt"
           Set-Content -Path $CacheInputPath -Value $CacheInput -NoNewline
 
@@ -79,6 +105,7 @@ jobs:
           "CARGO_DEPS_CACHE_HASH=$CacheHash" >> $env:GITHUB_ENV
 
           Write-Host "Cargo dependency cache hash: $CacheHash"
+          Write-Host "Cache ignores the Audio Orbit package version and invalidates only when dependency declarations or locked dependency packages change."
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v5
