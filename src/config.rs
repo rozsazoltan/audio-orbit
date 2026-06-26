@@ -124,6 +124,8 @@ pub struct RadioStation {
     pub url: String,
     #[serde(default)]
     pub last_stream_title: Option<String>,
+    #[serde(default)]
+    pub favorite: bool,
 }
 
 impl RadioStation {
@@ -132,6 +134,7 @@ impl RadioStation {
             name: name.into(),
             url: url.into(),
             last_stream_title: None,
+            favorite: false,
         }
     }
 }
@@ -370,6 +373,8 @@ pub struct PlaybackSettings {
     pub shuffle_enabled: bool,
     #[serde(default = "default_volume_percent")]
     pub volume_percent: u8,
+    #[serde(default)]
+    pub muted: bool,
 }
 
 impl Default for PlaybackSettings {
@@ -381,6 +386,7 @@ impl Default for PlaybackSettings {
             repeat_mode: RepeatMode::default(),
             shuffle_enabled: false,
             volume_percent: default_volume_percent(),
+            muted: false,
         }
     }
 }

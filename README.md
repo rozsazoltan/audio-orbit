@@ -38,7 +38,7 @@ Folder playlists are scanner-owned. You do not manually add individual tracks to
 
 ### Internet radio
 
-Audio Orbit includes an Internet radio tab. You can save stream URLs with optional custom names; when the name is empty, Audio Orbit tries to read the station name from stream headers. Radio playback uses a clean direct stream path and does not apply shuffle, repeat, auto-play next, crossfade, or silence skipping.
+Audio Orbit includes an Internet radio tab. You can save stream URLs with optional custom names; when the name is empty, Audio Orbit tries to read the station name from stream headers. Radio stations use the same list behavior as local tracks: search, left-aligned names, right-aligned actions, a dedicated scrollbar gutter, and no overflowing text. Radio playback uses a clean direct stream path and does not apply shuffle, repeat, auto-play next, crossfade, playback transitions, or silence skipping.
 
 ### Playback
 
@@ -56,6 +56,8 @@ Audio Orbit supports common desktop-player behavior:
 - adjust volume with the mouse wheel over the top player bar when the pointer is over the title, waveform, or controls
 - remember the last played local track between app launches
 - play saved internet radio streams from the Radio tab
+- favorite radio stations and filter the Radio list to favorites
+- show a live radio visualizer with elapsed listening time
 - remember the window size and position between app launches
 - prevent multiple app instances from running at the same time
 
@@ -137,11 +139,11 @@ Folder groups can be collapsed or expanded in the track list. When a folder play
 
 Use the center track list to browse tracks. Double-click a track to start it immediately.
 
-The top player bar truncates long titles and metadata so track names never overlap the technical details or controls. For local music it shows waveform progress, volume, shuffle/repeat options, and playback controls.
+The top player bar truncates long titles so track names never overlap the technical details or controls. Local track metadata stays separated from the title, and the track list uses compact metadata so the duration, sample rate, bitrate, channels, and size remain readable.
 
 ### Play internet radio
 
-Open the Internet radio tab, paste a stream URL, optionally enter a readable station name, then double-click or press Play on the saved station. If the name is empty, Audio Orbit tries to read it from the stream. The Radio tab hides local-only playback options such as shuffle, repeat, auto-play next, crossfade, and silence skipping.
+Open the Internet radio tab, paste a stream URL, optionally enter a readable station name, then double-click or press Play on the saved station. If the name is empty, Audio Orbit tries to read it from the stream. The Radio tab hides local-only playback options such as shuffle, repeat, auto-play next, crossfade, playback transitions, and silence skipping. Favorite radio stations can be filtered from the Radio tab or the left Library panel.
 
 ### Use repeat modes
 
