@@ -14,6 +14,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 180;
+const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 5;
+const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
+
 #[derive(Clone, Debug)]
 pub struct PlaybackInfo {
     pub path: PathBuf,
@@ -135,7 +139,7 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
     }
 
     fn process_frame(&mut self, stereo: [f32; 2], mono: f32) -> [f32; 2] {
-        record_radio_peak(&self.visualizer, stereo[0].abs().max(stereo[1].abs()).max(mono.abs()));
+        record_radio_peak(&self.visualizer, self.sample_rate, stereo[0].abs().max(stereo[1].abs()).max(mono.abs()));
         let output_level = self.settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
         if !self.settings.orbit_enabled {
             return [
@@ -203,16 +207,18 @@ impl<S: Source<Item = f32>> Source for LiveRadioSource<S> {
     }
 }
 
-fn record_radio_peak(visualizer: &RadioVisualizerHandle, peak: f32) {
+fn record_radio_peak(visualizer: &RadioVisualizerHandle, sample_rate: u32, peak: f32) {
     let Ok(mut state) = visualizer.lock() else {
         return;
     };
     state.current_peak = state.current_peak.max(peak.min(1.0));
     state.sample_counter += 1;
-    if state.sample_counter >= 768 {
+
+    let samples_per_bucket = (sample_rate.max(1) as usize / RADIO_VISUALIZER_BUCKETS_PER_SECOND).max(1);
+    if state.sample_counter >= samples_per_bucket {
         let peak = state.current_peak;
         state.peaks.push_back(peak);
-        while state.peaks.len() > 4096 {
+        while state.peaks.len() > RADIO_VISUALIZER_MAX_BUCKETS {
             state.peaks.pop_front();
         }
         state.current_peak = 0.0;
@@ -321,8 +327,26 @@ impl AudioPlayer {
         if requested_points == 0 || state.peaks.is_empty() {
             return Vec::new();
         }
-        let take = requested_points.min(state.peaks.len());
-        state.peaks.iter().skip(state.peaks.len() - take).copied().collect()
+
+        let peaks: Vec<f32> = state.peaks.iter().copied().collect();
+        if peaks.len() <= requested_points {
+            return peaks;
+        }
+
+        let mut rendered = Vec::with_capacity(requested_points);
+        let bucket_width = peaks.len() as f32 / requested_points as f32;
+        for index in 0..requested_points {
+            let start = ((index as f32 * bucket_width).floor() as usize).min(peaks.len() - 1);
+            let end = (((index + 1) as f32 * bucket_width).ceil() as usize)
+                .max(start + 1)
+                .min(peaks.len());
+            let peak = peaks[start..end]
+                .iter()
+                .copied()
+                .fold(0.0_f32, f32::max);
+            rendered.push(peak);
+        }
+        rendered
     }
 
     pub fn play_file_with_orbit_from(
