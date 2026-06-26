@@ -375,8 +375,8 @@ pub struct WindowGeometry {
 
 impl WindowGeometry {
     pub fn is_valid(&self) -> bool {
-        self.width >= 640.0
-            && self.height >= 420.0
+        self.width >= 320.0
+            && self.height >= 160.0
             && self.width.is_finite()
             && self.height.is_finite()
             && self.x.is_finite()
@@ -396,6 +396,10 @@ pub struct UiSettings {
     pub show_track_search: bool,
     #[serde(default)]
     pub window_geometry: Option<WindowGeometry>,
+    #[serde(default)]
+    pub full_layout_window_geometry: Option<WindowGeometry>,
+    #[serde(default)]
+    pub player_only_window_geometry: Option<WindowGeometry>,
 }
 
 impl Default for UiSettings {
@@ -406,6 +410,8 @@ impl Default for UiSettings {
             player_only_mode: false,
             show_track_search: false,
             window_geometry: None,
+            full_layout_window_geometry: None,
+            player_only_window_geometry: None,
         }
     }
 }

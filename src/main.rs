@@ -49,7 +49,7 @@ fn main() -> eframe::Result<()> {
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size(initial_window_size(&state))
-        .with_min_inner_size([980.0, 640.0])
+        .with_min_inner_size(min_window_size_for_mode(true))
         .with_resizable(true);
 
     if let Some(position) = initial_window_position(&state) {
@@ -76,20 +76,44 @@ fn main() -> eframe::Result<()> {
 }
 
 fn initial_window_size(state: &SavedState) -> egui::Vec2 {
-    state
-        .ui
-        .window_geometry
-        .filter(WindowGeometry::is_valid)
-        .map(|geometry| egui::vec2(geometry.width.max(980.0), geometry.height.max(640.0)))
-        .unwrap_or_else(|| egui::vec2(1240.0, 780.0))
+    current_window_geometry(state)
+        .map(|geometry| clamp_window_size_for_mode(egui::vec2(geometry.width, geometry.height), state.ui.player_only_mode))
+        .unwrap_or_else(|| default_window_size_for_mode(state.ui.player_only_mode))
 }
 
 fn initial_window_position(state: &SavedState) -> Option<egui::Pos2> {
-    state
-        .ui
-        .window_geometry
-        .filter(WindowGeometry::is_valid)
-        .map(|geometry| egui::pos2(geometry.x, geometry.y))
+    current_window_geometry(state).map(|geometry| egui::pos2(geometry.x, geometry.y))
+}
+
+fn current_window_geometry(state: &SavedState) -> Option<WindowGeometry> {
+    let geometry = if state.ui.player_only_mode {
+        state.ui.player_only_window_geometry
+    } else {
+        state.ui.full_layout_window_geometry.or(state.ui.window_geometry)
+    };
+
+    geometry.filter(WindowGeometry::is_valid)
+}
+
+fn min_window_size_for_mode(player_only: bool) -> egui::Vec2 {
+    if player_only {
+        egui::vec2(520.0, 220.0)
+    } else {
+        egui::vec2(980.0, 640.0)
+    }
+}
+
+fn default_window_size_for_mode(player_only: bool) -> egui::Vec2 {
+    if player_only {
+        egui::vec2(760.0, 320.0)
+    } else {
+        egui::vec2(1240.0, 780.0)
+    }
+}
+
+fn clamp_window_size_for_mode(size: egui::Vec2, player_only: bool) -> egui::Vec2 {
+    let minimum = min_window_size_for_mode(player_only);
+    egui::vec2(size.x.max(minimum.x), size.y.max(minimum.y))
 }
 
 
@@ -119,6 +143,7 @@ struct AudioOrbitApp {
     show_folder_import_modal: bool,
     show_settings_modal: bool,
     show_release_modal: bool,
+    show_update_success_modal: bool,
     show_library_panel: bool,
     show_profile_panel: bool,
     player_only_mode: bool,
@@ -149,6 +174,7 @@ impl AudioOrbitApp {
         let show_profile_panel = state.ui.show_profile_panel;
         let player_only_mode = state.ui.player_only_mode;
         let show_track_search = state.ui.show_track_search;
+        let show_update_success_modal = take_update_success_marker();
 
         let mut app = match AudioPlayer::new() {
             Ok(player) => {
@@ -169,6 +195,7 @@ impl AudioOrbitApp {
                     show_folder_import_modal: false,
                     show_settings_modal: false,
                     show_release_modal: false,
+                    show_update_success_modal,
                     show_library_panel,
                     show_profile_panel,
                     player_only_mode,
@@ -207,6 +234,7 @@ impl AudioOrbitApp {
                 show_folder_import_modal: false,
                 show_settings_modal: false,
                 show_release_modal: false,
+                show_update_success_modal,
                 show_library_panel,
                 show_profile_panel,
                 player_only_mode,
@@ -247,18 +275,25 @@ impl AudioOrbitApp {
             return;
         };
 
-        if inner_rect.width() < 640.0 || inner_rect.height() < 420.0 {
+        let minimum = min_window_size_for_mode(self.player_only_mode);
+        if inner_rect.width() < minimum.x || inner_rect.height() < minimum.y {
             return;
         }
 
         let position = outer_rect.map(|rect| rect.min).unwrap_or(inner_rect.min);
-
-        self.state.ui.window_geometry = Some(WindowGeometry {
+        let geometry = WindowGeometry {
             x: position.x,
             y: position.y,
             width: inner_rect.width(),
             height: inner_rect.height(),
-        });
+        };
+
+        self.state.ui.window_geometry = Some(geometry);
+        if self.player_only_mode {
+            self.state.ui.player_only_window_geometry = Some(geometry);
+        } else {
+            self.state.ui.full_layout_window_geometry = Some(geometry);
+        }
     }
 
     fn current_playlist(&self) -> Option<&Playlist> {
@@ -279,6 +314,30 @@ impl AudioOrbitApp {
         self.selected_track_index = self.eligible_track_indexes().first().copied();
         self.collapsed_groups.clear();
         self.search_cursor = 0;
+        self.save_state_silently();
+    }
+
+    fn toggle_player_only_mode(&mut self, context: &egui::Context) {
+        self.player_only_mode = !self.player_only_mode;
+        self.state.ui.player_only_mode = self.player_only_mode;
+        let target_size = if self.player_only_mode {
+            self.state
+                .ui
+                .player_only_window_geometry
+                .filter(WindowGeometry::is_valid)
+                .map(|geometry| egui::vec2(geometry.width, geometry.height))
+                .unwrap_or_else(|| default_window_size_for_mode(true))
+        } else {
+            self.state
+                .ui
+                .full_layout_window_geometry
+                .or(self.state.ui.window_geometry)
+                .filter(WindowGeometry::is_valid)
+                .map(|geometry| egui::vec2(geometry.width, geometry.height))
+                .unwrap_or_else(|| default_window_size_for_mode(false))
+        };
+
+        context.send_viewport_cmd(egui::ViewportCommand::InnerSize(clamp_window_size_for_mode(target_size, self.player_only_mode)));
         self.save_state_silently();
     }
 
@@ -951,9 +1010,7 @@ impl AudioOrbitApp {
         }
 
         if player_only {
-            self.player_only_mode = !self.player_only_mode;
-            self.state.ui.player_only_mode = self.player_only_mode;
-            self.save_state_silently();
+            self.toggle_player_only_mode(context);
         }
 
         if library && !self.player_only_mode {
@@ -1415,7 +1472,7 @@ impl eframe::App for AudioOrbitApp {
         self.poll_output_device_change();
 
         egui::TopBottomPanel::top("now_playing_panel").show(context, |ui| {
-            self.render_now_playing_panel(ui);
+            self.render_now_playing_panel(context, ui);
         });
 
         if !self.player_only_mode && self.show_library_panel {
@@ -1455,11 +1512,15 @@ impl eframe::App for AudioOrbitApp {
         if self.show_release_modal {
             self.render_release_modal(context);
         }
+
+        if self.show_update_success_modal {
+            self.render_update_success_modal(context);
+        }
     }
 }
 
 impl AudioOrbitApp {
-    fn render_now_playing_panel(&mut self, ui: &mut egui::Ui) {
+    fn render_now_playing_panel(&mut self, context: &egui::Context, ui: &mut egui::Ui) {
         ui.add_space(8.0);
         let has_now_playing = self.active_track_path.is_some() || self.pending_track_switch.is_some();
 
@@ -1479,7 +1540,8 @@ impl AudioOrbitApp {
                         ));
                     }
                 } else {
-                    ui.add_space(24.0);
+                    ui.heading(egui::RichText::new("No track playing").weak());
+                    ui.small(egui::RichText::new(" ").weak());
                 }
             });
 
@@ -1494,9 +1556,7 @@ impl AudioOrbitApp {
                     ui_icons::label(Icon::Play, "Player only")
                 };
                 if ui.button(player_only_label).clicked() {
-                    self.player_only_mode = !self.player_only_mode;
-                    self.state.ui.player_only_mode = self.player_only_mode;
-                    self.save_state_silently();
+                    self.toggle_player_only_mode(context);
                 }
 
                 if !self.player_only_mode {
@@ -1530,26 +1590,32 @@ impl AudioOrbitApp {
             });
         });
 
-        if has_now_playing {
-            let position = self.displayed_playback_position_seconds();
-            let duration = self.displayed_playback_duration_seconds();
-            let progress = if duration > 0.0 {
-                (position / duration).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
+        let position = if has_now_playing { self.displayed_playback_position_seconds() } else { 0.0 };
+        let duration = if has_now_playing { self.displayed_playback_duration_seconds() } else { 0.0 };
+        let progress = if duration > 0.0 {
+            (position / duration).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
 
-            let waveform = self
-                .last_playback
+        let waveform = if has_now_playing {
+            self.last_playback
                 .as_ref()
                 .map(|playback| playback.waveform.as_slice())
-                .unwrap_or(&[]);
-            let response = draw_waveform_seek(ui, waveform, progress, format!("{} / {}", format_duration(position), format_duration(duration)));
-            if (response.clicked() || response.drag_stopped()) && duration > 0.0 {
-                if let Some(pointer) = response.interact_pointer_pos() {
-                    let next_position = ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration;
-                    self.seek_current(next_position);
-                }
+                .unwrap_or(&[])
+        } else {
+            &[]
+        };
+        let label = if has_now_playing {
+            format!("{} / {}", format_duration(position), format_duration(duration))
+        } else {
+            " ".to_owned()
+        };
+        let response = draw_waveform_seek(ui, waveform, progress, label);
+        if has_now_playing && (response.clicked() || response.drag_stopped()) && duration > 0.0 {
+            if let Some(pointer) = response.interact_pointer_pos() {
+                let next_position = ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration;
+                self.seek_current(next_position);
             }
         }
 
@@ -1925,7 +1991,7 @@ impl AudioOrbitApp {
             .collect();
 
         let mut last_group = String::new();
-        let track_list_width = (ui.available_width() - 14.0).max(320.0);
+        let track_list_width = (ui.available_width() - 36.0).max(320.0);
         ui.allocate_ui_with_layout(
             egui::vec2(track_list_width, ui.available_height()),
             egui::Layout::top_down(egui::Align::Min),
@@ -2009,6 +2075,7 @@ impl AudioOrbitApp {
                     ui.small(metadata);
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(24.0);
                         ui.menu_button(ui_icons::icon(Icon::Ellipsis), |ui| {
                             if ui.button(ui_icons::label(Icon::Play, "Play now")).clicked() {
                                 self.selected_track_index = Some(index);
@@ -2234,6 +2301,49 @@ impl AudioOrbitApp {
             egui::Id::new(id),
         ));
         painter.rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(215));
+    }
+
+    fn render_update_success_modal(&mut self, context: &egui::Context) {
+        self.render_modal_backdrop(context, "update_success_modal_backdrop");
+        let mut is_open = self.show_update_success_modal;
+
+        egui::Area::new(egui::Id::new("update_success_modal"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(context, |ui| {
+                egui::Frame::window(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(520.0);
+                    ui.set_max_width(600.0);
+                    ui.horizontal(|ui| {
+                        ui.heading("Update installed");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button(ui_icons::icon(Icon::X)).on_hover_text("Close").clicked() {
+                                is_open = false;
+                            }
+                        });
+                    });
+                    ui.add_space(8.0);
+                    ui.label(format!("Audio Orbit has been updated to v{}.", env!("CARGO_PKG_VERSION")));
+                    ui.small("You can review the release notes, changes, and downloaded executable on the GitHub Releases page.");
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(ui_icons::label(Icon::ExternalLink, "View release notes")).clicked() {
+                            if let Err(error) = updater::open_releases_page() {
+                                self.error_message = Some(error.to_string());
+                            }
+                        }
+                        if ui.button(ui_icons::label(Icon::Check, "OK")).clicked() {
+                            is_open = false;
+                        }
+                    });
+                });
+            });
+
+        if context.input(|input| input.key_pressed(egui::Key::Escape)) {
+            is_open = false;
+        }
+
+        self.show_update_success_modal = is_open;
     }
 
     fn render_release_modal(&mut self, context: &egui::Context) {
@@ -2620,6 +2730,19 @@ fn current_unix_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+fn take_update_success_marker() -> bool {
+    let Some(path) = app_data_dir().map(|dir| dir.join("update-success")) else {
+        return false;
+    };
+
+    if path.exists() {
+        let _ = fs::remove_file(path);
+        true
+    } else {
+        false
+    }
 }
 
 fn media_key_status_message(

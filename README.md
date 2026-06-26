@@ -77,7 +77,7 @@ Audio files themselves are not embedded in the backup. The backup stores library
 
 Audio Orbit can check GitHub releases for new Windows executable builds. Stable releases are checked by default. Prerelease watching can be enabled in the release watcher.
 
-On startup, Audio Orbit performs a background update check at most once per hour. If a newer release is available, the release watcher modal opens automatically. To avoid GitHub rate limiting, manual update checks are also limited per app session.
+On startup, Audio Orbit performs a background update check at most once per hour. If a newer release is available, the release watcher modal opens automatically. To avoid GitHub rate limiting, manual update checks are also limited per app session. After a self-update finishes and the app restarts, Audio Orbit shows an update success modal with a shortcut to the GitHub Releases page where release notes and changes can be reviewed.
 
 ## Get started
 
@@ -163,7 +163,7 @@ If an update is available, Audio Orbit can replace its current executable and re
 
 ## Window behavior
 
-Audio Orbit remembers the window size and position when the app closes and restores the same layout on the next launch.
+Audio Orbit remembers the window size and position when the app closes and restores the same layout on the next launch. Full layout and Player-only layout keep separate window sizes, so compact player mode can stay small while the full library layout opens larger.
 
 Only one Audio Orbit instance can run at a time. If the app is already open, starting the executable again exits immediately instead of opening a second player window.
 

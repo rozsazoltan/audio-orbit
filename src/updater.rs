@@ -147,24 +147,33 @@ fn launch_windows_replacer(current_exe: &PathBuf, new_exe: &PathBuf) -> Result<(
         .map(PathBuf::from)
         .unwrap_or_else(env::temp_dir);
     let script = update_dir.join("audio-orbit-update.ps1");
+    let success_marker = current_exe
+        .parent()
+        .map(|parent| parent.join(".audio-orbit-data").join("update-success"))
+        .unwrap_or_else(|| update_dir.join("update-success"));
     let script_contents = format!(
-        "$ErrorActionPreference = 'SilentlyContinue'\r\n\
-$newExe = '{new_exe}'\r\n\
-$currentExe = '{current_exe}'\r\n\
-for ($i = 0; $i -lt 40; $i++) {{\r\n\
-  try {{\r\n\
-    Copy-Item -LiteralPath $newExe -Destination $currentExe -Force -ErrorAction Stop\r\n\
-    Start-Process -FilePath $currentExe\r\n\
-    Remove-Item -LiteralPath $newExe -Force -ErrorAction SilentlyContinue\r\n\
-    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\r\n\
-    exit 0\r\n\
-  }} catch {{\r\n\
-    Start-Sleep -Milliseconds 500\r\n\
-  }}\r\n\
-}}\r\n\
-exit 1\r\n",
+        "$ErrorActionPreference = 'SilentlyContinue'
+$newExe = '{new_exe}'
+$currentExe = '{current_exe}'
+$successMarker = '{success_marker}'
+for ($i = 0; $i -lt 40; $i++) {{
+  try {{
+    Copy-Item -LiteralPath $newExe -Destination $currentExe -Force -ErrorAction Stop
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $successMarker) | Out-Null
+    Set-Content -LiteralPath $successMarker -Value 'updated' -Encoding UTF8
+    Start-Process -FilePath $currentExe
+    Remove-Item -LiteralPath $newExe -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+    exit 0
+  }} catch {{
+    Start-Sleep -Milliseconds 500
+  }}
+}}
+exit 1
+",
         new_exe = powershell_single_quoted_path(new_exe),
         current_exe = powershell_single_quoted_path(current_exe),
+        success_marker = powershell_single_quoted_path(&success_marker),
     );
     fs::write(&script, script_contents)
         .with_context(|| format!("failed to write updater script: {}", script.display()))?;
