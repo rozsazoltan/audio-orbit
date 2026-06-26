@@ -470,14 +470,6 @@ impl AudioOrbitApp {
         self.save_state_silently();
     }
 
-    fn play_selected_radio_station(&mut self) {
-        let Some(index) = self.state.selected_radio_index else {
-            self.error_message = Some("Select an internet radio station first.".to_owned());
-            return;
-        };
-        self.play_radio_station(index);
-    }
-
     fn play_radio_station(&mut self, index: usize) {
         let Some(station) = self.state.radio_stations.get(index).cloned() else {
             return;
