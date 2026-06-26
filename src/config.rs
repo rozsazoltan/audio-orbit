@@ -366,6 +366,10 @@ pub struct PlaybackSettings {
     pub crossfade_seconds: u8,
     #[serde(default)]
     pub repeat_mode: RepeatMode,
+    #[serde(default)]
+    pub shuffle_enabled: bool,
+    #[serde(default = "default_volume_percent")]
+    pub volume_percent: u8,
 }
 
 impl Default for PlaybackSettings {
@@ -375,6 +379,8 @@ impl Default for PlaybackSettings {
             crossfade_enabled: false,
             crossfade_seconds: default_crossfade_seconds(),
             repeat_mode: RepeatMode::default(),
+            shuffle_enabled: false,
+            volume_percent: default_volume_percent(),
         }
     }
 }
@@ -385,6 +391,10 @@ fn default_auto_advance() -> bool {
 
 fn default_crossfade_seconds() -> u8 {
     5
+}
+
+fn default_volume_percent() -> u8 {
+    100
 }
 
 

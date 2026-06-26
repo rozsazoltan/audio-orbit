@@ -45,12 +45,15 @@ Audio Orbit includes an Internet radio tab. You can save stream URLs with custom
 Audio Orbit supports common desktop-player behavior:
 
 - double-click a track to play it
-- seek by clicking the waveform progress bar
+- seek by clicking the waveform progress bar or with Left/Right for 10-second jumps
 - use keyboard media keys for play/pause, stop, previous, and next
 - automatically continue to the next track
+- shuffle playback across the playlist or the active repeat selection
 - crossfade tracks with configurable overlap seconds
 - skip long silence with configurable threshold seconds
 - repeat the current track or a selected set of tracks
+- adjust volume from the top player bar, including player-only mode
+- adjust volume with the mouse wheel over the current track title
 - remember the last played local track between app launches
 - play saved internet radio streams from the Radio tab
 - remember the window size and position between app launches
@@ -128,13 +131,13 @@ Artist A / Album B
 Artist B / Album A
 ```
 
-Folder groups can be collapsed or expanded in the track list.
+Folder groups can be collapsed or expanded in the track list. When a folder playlist only has one group, Audio Orbit hides the redundant folder group headers.
 
 ### Play music
 
 Use the center track list to browse tracks. Double-click a track to start it immediately.
 
-The top player bar shows the current track, playback metadata, waveform progress, and playback controls.
+The top player bar shows the current track, playback metadata, waveform progress, volume, shuffle/repeat options, and playback controls.
 
 ### Play internet radio
 
@@ -148,9 +151,9 @@ Audio Orbit supports three repeat modes:
 |---|---|
 | Repeat off | Normal playback order. |
 | Repeat track | Repeats the current track. |
-| Repeat selection | Repeats only the checked tracks in playlist order. |
+| Repeat selection | Repeats only the checked tracks; Shuffle can randomize this selected set. |
 
-When repeat selection is active, checkboxes appear in the track list so you can choose the tracks that should loop.
+When repeat selection is active, checkboxes appear in the track list so you can choose the tracks that should loop. Enable Shuffle to pick randomly from that selected set.
 
 ### Search tracks
 
@@ -176,7 +179,7 @@ If an update is available, Audio Orbit can replace its current executable and re
 
 ## Window behavior
 
-Audio Orbit remembers the window size and position when the app closes and restores the same layout on the next launch.
+Audio Orbit remembers the window size and position when the app closes and restores the same layout on the next launch. Player-only and full-layout sizes are kept separately.
 
 Only one Audio Orbit instance can run at a time. If the app is already open, starting the executable again exits immediately instead of opening a second player window.
 

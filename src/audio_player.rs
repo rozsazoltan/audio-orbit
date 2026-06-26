@@ -74,6 +74,7 @@ pub struct AudioPlayer {
     current_start_offset_seconds: f32,
     current_path: Option<PathBuf>,
     current_settings: Option<DspSettings>,
+    volume_percent: u8,
 }
 
 impl AudioPlayer {
@@ -94,11 +95,23 @@ impl AudioPlayer {
             current_start_offset_seconds: 0.0,
             current_path: None,
             current_settings: None,
+            volume_percent: 100,
         })
     }
 
     pub fn output_device_name(&self) -> &str {
         &self.output_device_name
+    }
+
+    pub fn set_volume_percent(&mut self, volume_percent: u8) {
+        self.volume_percent = volume_percent.clamp(0, 100);
+        if let Some(sink) = &self.sink {
+            sink.set_volume(self.volume_gain());
+        }
+    }
+
+    fn volume_gain(&self) -> f32 {
+        self.volume_percent as f32 / 100.0
     }
 
     pub fn play_radio_stream(&mut self, url: &str) -> Result<()> {
@@ -119,6 +132,7 @@ impl AudioPlayer {
         self.stop();
         let sink = Sink::try_new(&self.stream_handle)
             .context("failed to create audio playback sink")?;
+        sink.set_volume(self.volume_gain());
         sink.append(decoder.convert_samples::<f32>());
         sink.play();
 
@@ -165,7 +179,7 @@ impl AudioPlayer {
 
         if fade_seconds > 0.05 {
             if let Some(old_sink) = self.sink.take() {
-                fade_out_and_stop(old_sink, fade_seconds);
+                fade_out_and_stop(old_sink, fade_seconds, self.volume_gain());
             }
         } else {
             self.stop();
@@ -313,6 +327,7 @@ impl AudioPlayer {
             .context("failed to create audio playback sink")?;
         let source = SamplesBuffer::new(2, sample_rate, samples);
 
+        sink.set_volume(self.volume_gain());
         sink.append(source);
         sink.play();
         self.sink = Some(sink);
@@ -348,14 +363,14 @@ fn apply_fade_in(samples: &mut [f32], sample_rate: u32, fade_seconds: f32) {
     }
 }
 
-fn fade_out_and_stop(sink: Sink, fade_seconds: f32) {
+fn fade_out_and_stop(sink: Sink, fade_seconds: f32, base_volume: f32) {
     let steps = ((fade_seconds * 30.0) as usize).clamp(8, 180);
     let sleep_duration = Duration::from_secs_f32((fade_seconds / steps as f32).max(0.005));
 
     thread::spawn(move || {
         for step in 0..steps {
             let remaining = 1.0 - (step as f32 / steps as f32);
-            sink.set_volume(remaining.max(0.0));
+            sink.set_volume((base_volume * remaining).max(0.0));
             thread::sleep(sleep_duration);
         }
         sink.stop();
