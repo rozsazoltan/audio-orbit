@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::{
+    env,
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -26,8 +27,9 @@ impl RecognitionResult {
 
 #[derive(Clone, Debug)]
 struct CandidateCommand {
+    command: PathBuf,
     args: Vec<String>,
-    source: &'static str,
+    source: String,
 }
 
 pub fn temporary_sample_path() -> PathBuf {
@@ -39,26 +41,11 @@ pub fn temporary_sample_path() -> PathBuf {
 }
 
 pub fn recognize_with_songrec(command_path: Option<PathBuf>, sample_path: &Path) -> Result<RecognitionResult> {
-    let command_path = command_path.unwrap_or_else(|| PathBuf::from("songrec"));
-    let sample = sample_path.display().to_string();
-    let candidates = vec![
-        CandidateCommand {
-            args: vec!["recognize".to_owned(), "--json".to_owned(), sample.clone()],
-            source: "SongRec recognize --json",
-        },
-        CandidateCommand {
-            args: vec!["recognize".to_owned(), sample.clone(), "--json".to_owned()],
-            source: "SongRec recognize --json",
-        },
-        CandidateCommand {
-            args: vec!["audio-file-to-recognized-song".to_owned(), sample],
-            source: "SongRec legacy audio-file-to-recognized-song",
-        },
-    ];
-
+    let candidates = songrec_candidates(command_path, sample_path);
     let mut errors = Vec::new();
+
     for candidate in candidates {
-        let output = Command::new(&command_path)
+        let output = Command::new(&candidate.command)
             .args(&candidate.args)
             .stdin(Stdio::null())
             .output();
@@ -86,11 +73,17 @@ pub fn recognize_with_songrec(command_path: Option<PathBuf>, sample_path: &Path)
             continue;
         }
 
-        if let Some(result) = parse_songrec_output(&raw, candidate.source) {
+        if let Some(result) = parse_songrec_output(&raw, &candidate.source) {
             return Ok(result);
         }
 
         errors.push(format!("{}: could not parse response: {}", candidate.source, raw));
+    }
+
+    if errors.iter().all(|error| error.contains("No such file") || error.contains("not found") || error.contains("os error 2")) {
+        anyhow::bail!(
+            "SongRec was not found. Install SongRec, place songrec.exe or songrec-cli.exe next to Audio Orbit, or set the executable path in Settings → Recognition."
+        );
     }
 
     anyhow::bail!(
@@ -99,11 +92,51 @@ pub fn recognize_with_songrec(command_path: Option<PathBuf>, sample_path: &Path)
     )
 }
 
+fn songrec_candidates(command_path: Option<PathBuf>, sample_path: &Path) -> Vec<CandidateCommand> {
+    let mut commands = Vec::new();
+    if let Some(command_path) = command_path {
+        commands.push((command_path, "configured SongRec".to_owned()));
+    } else {
+        if let Ok(current_exe) = env::current_exe() {
+            if let Some(folder) = current_exe.parent() {
+                commands.push((folder.join("songrec.exe"), "bundled songrec.exe".to_owned()));
+                commands.push((folder.join("songrec-cli.exe"), "bundled songrec-cli.exe".to_owned()));
+                commands.push((folder.join("songrec"), "bundled songrec".to_owned()));
+            }
+        }
+        commands.push((PathBuf::from("songrec"), "PATH songrec".to_owned()));
+        commands.push((PathBuf::from("songrec.exe"), "PATH songrec.exe".to_owned()));
+        commands.push((PathBuf::from("songrec-cli"), "PATH songrec-cli".to_owned()));
+        commands.push((PathBuf::from("songrec-cli.exe"), "PATH songrec-cli.exe".to_owned()));
+    }
+
+    let sample = sample_path.display().to_string();
+    let argument_sets = vec![
+        vec!["recognize".to_owned(), "--json".to_owned(), sample.clone()],
+        vec!["recognize".to_owned(), sample.clone(), "--json".to_owned()],
+        vec!["recognize".to_owned(), sample.clone()],
+        vec!["audio-file-to-recognized-song".to_owned(), sample.clone()],
+        vec!["audio-file-to-recognized-song".to_owned(), sample.clone(), "--json".to_owned()],
+    ];
+
+    commands
+        .into_iter()
+        .flat_map(|(command, label)| {
+            let argument_sets = argument_sets.clone();
+            argument_sets.into_iter().map(move |args| CandidateCommand {
+                command: command.clone(),
+                source: format!("{label} {}", args.join(" ")),
+                args,
+            })
+        })
+        .collect()
+}
+
 pub fn cleanup_sample(path: &Path) {
     let _ = fs::remove_file(path);
 }
 
-fn parse_songrec_output(raw: &str, source: &'static str) -> Option<RecognitionResult> {
+fn parse_songrec_output(raw: &str, source: &str) -> Option<RecognitionResult> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;

@@ -1983,6 +1983,16 @@ impl AudioOrbitApp {
         }
     }
 
+    fn open_recording_folder(&mut self) {
+        let folder = self.state.recording.resolved_output_folder();
+        if let Err(error) = fs::create_dir_all(&folder).and_then(|_| reveal_in_file_manager(&folder).map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.to_string()))) {
+            self.error_message = Some(format!("Failed to open recording folder: {error}"));
+        } else {
+            self.status_message = format!("Opened radio recordings folder: {}.", folder.display());
+            self.error_message = None;
+        }
+    }
+
     fn recognize_current_audio(&mut self) {
         if self.recognition_receiver.is_some() {
             self.status_message = "Audio recognition is already running.".to_owned();
@@ -2540,12 +2550,6 @@ impl eframe::App for AudioOrbitApp {
                 });
         }
 
-        if !self.status_message.is_empty() || self.error_message.is_some() {
-            egui::TopBottomPanel::bottom("status_panel").show(context, |ui| {
-                self.render_status_panel(ui);
-            });
-        }
-
         egui::CentralPanel::default().show(context, |ui| {
             self.render_main_content_panel(ui);
         });
@@ -2569,6 +2573,8 @@ impl eframe::App for AudioOrbitApp {
         if self.details_modal.is_some() {
             self.render_details_modal(context);
         }
+
+        self.render_status_overlay(context);
     }
 }
 
@@ -2802,31 +2808,56 @@ impl AudioOrbitApp {
                     .duration_since(UNIX_EPOCH)
                     .map(|duration| (duration.as_millis() / 500) % 2 == 0)
                     .unwrap_or(true);
-                let record_text = if is_recording {
-                    egui::RichText::new("🎙").color(if blink_on { egui::Color32::RED } else { ui.visuals().widgets.inactive.fg_stroke.color })
+                let record_icon_color = if is_recording && blink_on {
+                    egui::Color32::from_rgb(255, 72, 72)
+                } else if is_recording {
+                    egui::Color32::from_rgb(180, 54, 54)
                 } else {
-                    egui::RichText::new("🎙")
+                    ui.visuals().widgets.inactive.fg_stroke.color
                 };
+                let record_text = egui::RichText::new(ui_icons::icon(Icon::Mic))
+                    .size(18.0)
+                    .strong()
+                    .color(record_icon_color);
                 let record_button = if is_recording {
-                    egui::Button::new(record_text).fill(egui::Color32::from_rgb(86, 24, 24))
+                    egui::Button::new(record_text).fill(egui::Color32::from_rgb(82, 24, 28))
                 } else {
                     egui::Button::new(record_text)
                 };
-                if ui
-                    .add_enabled(self.active_radio_index.is_some(), record_button)
-                    .on_hover_text(if is_recording { "Stop and save radio recording" } else { "Record original internet radio stream" })
-                    .clicked()
-                {
+                let record_response = ui
+                    .add(record_button)
+                    .on_hover_text(if is_recording {
+                        "Stop and save radio recording · Right-click to open the recordings folder"
+                    } else {
+                        "Record original internet radio stream · Right-click to open the recordings folder"
+                    });
+                if record_response.clicked() {
                     self.toggle_radio_recording();
+                }
+                if record_response.secondary_clicked() {
+                    self.open_recording_folder();
                 }
                 ui.separator();
             }
 
             let recognition_running = self.recognition_receiver.is_some();
             let can_recognize = has_now_playing && !recognition_running;
-            let recognition_label = if recognition_running { "…" } else { "Ⓢ" };
+            let recognition_icon = if recognition_running { Icon::RefreshCw } else { Icon::Search };
+            let recognition_color = if recognition_running {
+                ui.visuals().selection.bg_fill
+            } else {
+                ui.visuals().widgets.inactive.fg_stroke.color
+            };
             if ui
-                .add_enabled(can_recognize, egui::Button::new(egui::RichText::new(recognition_label).strong()))
+                .add_enabled(
+                    can_recognize,
+                    egui::Button::new(
+                        egui::RichText::new(ui_icons::icon(recognition_icon))
+                            .size(18.0)
+                            .strong()
+                            .color(recognition_color),
+                    ),
+                )
                 .on_hover_text("Identify the current song with free SongRec-compatible recognition")
                 .clicked()
             {
@@ -4499,7 +4530,7 @@ impl AudioOrbitApp {
             self.save_state_silently();
         }
 
-        ui.small("SongRec is free/open-source, but it is an unofficial Shazam-compatible recognizer. Audio Orbit sends a generated fingerprint through SongRec, not raw DSP/orbit output.");
+        ui.small("SongRec is free/open-source, but it is an unofficial Shazam-compatible recognizer. Audio Orbit sends a generated fingerprint through SongRec, not raw DSP/orbit output. You can set a path here, place songrec.exe/songrec-cli.exe next to Audio Orbit, or keep PATH lookup.");
     }
 
     fn render_recording_settings_section(&mut self, ui: &mut egui::Ui) {
@@ -4511,6 +4542,9 @@ impl AudioOrbitApp {
             ui.monospace(folder.display().to_string());
             if ui.button(ui_icons::label(Icon::FolderOpen, "Choose folder...")).clicked() {
                 self.choose_recording_folder();
+            }
+            if ui.button(ui_icons::label(Icon::ExternalLink, "Open current folder")).clicked() {
+                self.open_recording_folder();
             }
             if ui.button("Reset default").clicked() {
                 self.state.recording.output_folder = None;
@@ -4806,19 +4840,44 @@ impl AudioOrbitApp {
         ui.add_space(4.0);
     }
 
-    fn render_status_panel(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if !self.status_message.is_empty() {
-                ui.label(self.status_message.as_str());
-                ui.separator();
-            }
-            ui.small(self.media_key_status.as_str());
+    fn render_status_overlay(&mut self, context: &egui::Context) {
+        if self.status_message.is_empty() && self.error_message.is_none() && self.media_key_status.is_empty() {
+            return;
+        }
 
-            if let Some(error_message) = &self.error_message {
-                ui.separator();
-                ui.colored_label(egui::Color32::RED, error_message);
-            }
-        });
+        let screen_rect = context.screen_rect();
+        let width = (screen_rect.width() - 24.0).max(240.0);
+        egui::Area::new(egui::Id::new("status_overlay_footer"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::LEFT_BOTTOM, [12.0, -10.0])
+            .show(context, |ui| {
+                ui.set_width(width);
+                egui::Frame::new()
+                    .fill(egui::Color32::from_black_alpha(235))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(28)))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::symmetric(12, 7))
+                    .show(ui, |ui| {
+                        ui.set_width(width);
+                        ui.horizontal_wrapped(|ui| {
+                            if let Some(error_message) = &self.error_message {
+                                ui.colored_label(egui::Color32::from_rgb(255, 112, 112), error_message);
+                                if !self.status_message.is_empty() || !self.media_key_status.is_empty() {
+                                    ui.separator();
+                                }
+                            }
+                            if !self.status_message.is_empty() {
+                                ui.label(self.status_message.as_str());
+                                if !self.media_key_status.is_empty() {
+                                    ui.separator();
+                                }
+                            }
+                            if !self.media_key_status.is_empty() {
+                                ui.small(self.media_key_status.as_str());
+                            }
+                        });
+                    });
+            });
     }
 
     fn render_folder_import_window(&mut self, context: &egui::Context) {
@@ -5223,26 +5282,6 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
     let pitch = bar_width + gap;
     let scroll_offset = frame.scroll_fraction.clamp(0.0, 0.995) * pitch;
 
-    let mut active_values: Vec<f32> = visible_values
-        .iter()
-        .copied()
-        .filter(|value| *value > 0.0008)
-        .collect();
-    active_values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-
-    let percentile = |values: &[f32], pct: f32| -> f32 {
-        if values.is_empty() {
-            return 0.0;
-        }
-        let index = ((values.len().saturating_sub(1)) as f32 * pct.clamp(0.0, 1.0)).round() as usize;
-        values.get(index).copied().unwrap_or(0.0)
-    };
-
-    let noise_floor = percentile(&active_values, 0.08);
-    let body_peak = percentile(&active_values, 0.92).max(0.035);
-    let hard_peak = active_values.last().copied().unwrap_or(body_peak).max(body_peak);
-    let dynamic_range = (body_peak - noise_floor).max(0.025);
-
     for index in 0..bar_count {
         let x1 = rect.left() + index as f32 * pitch - scroll_offset;
         let x2 = (x1 + bar_width).min(rect.right());
@@ -5253,17 +5292,11 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
             continue;
         }
 
-        let value = visible_values.get(index).copied().unwrap_or(0.0);
-        let has_signal = value > 0.0008;
-        let normalized = if has_signal {
-            let main_body = ((value - noise_floor) / dynamic_range).clamp(0.0, 1.0);
-            let transient = (value / hard_peak.max(0.04)).clamp(0.0, 1.0);
-            (main_body * 0.78 + transient * 0.22).clamp(0.0, 1.0).powf(0.82)
-        } else {
-            0.0
-        };
+        let value = visible_values.get(index).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+        let has_signal = value > 0.006;
+        let normalized = if has_signal { value.powf(0.86) } else { 0.0 };
         let height = if has_signal {
-            (rect.height() * 0.86 * normalized).clamp(2.0, rect.height() * 0.90)
+            (rect.height() * 0.88 * normalized).clamp(2.0, rect.height() * 0.92)
         } else {
             0.0
         };

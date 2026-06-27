@@ -15,7 +15,7 @@ use std::{
 };
 
 const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 180;
-const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 6;
+const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 12;
 const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
 const RADIO_RECOGNITION_BUFFER_SECONDS: usize = 24;
 
@@ -174,10 +174,22 @@ pub struct RadioVisualizerFrame {
     pub scroll_fraction: f32,
 }
 
-#[derive(Default)]
 struct RadioVisualizerState {
     peaks: VecDeque<RadioVisualizerBucket>,
-    smoothed_peak: f32,
+    noise_floor: f32,
+    signal_ceiling: f32,
+    displayed_peak: f32,
+}
+
+impl Default for RadioVisualizerState {
+    fn default() -> Self {
+        Self {
+            peaks: VecDeque::new(),
+            noise_floor: 0.006,
+            signal_ceiling: 0.16,
+            displayed_peak: 0.0,
+        }
+    }
 }
 
 type RadioVisualizerHandle = Arc<Mutex<RadioVisualizerState>>;
@@ -319,17 +331,36 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
         } else {
             (self.visualizer_bucket_energy / self.visualizer_bucket_sample_count as f64).sqrt() as f32
         };
-        let envelope = (rms * 1.65 + self.visualizer_current_peak * 0.28).clamp(0.0, 1.0);
+        let raw_envelope = (rms * 1.18 + self.visualizer_current_peak * 0.18).clamp(0.0, 1.0);
         let now = Instant::now();
 
         if let Ok(mut state) = self.visualizer.lock() {
-            let previous = state.peaks.back().map(|bucket| bucket.peak).unwrap_or(state.smoothed_peak);
-            state.smoothed_peak = if envelope > previous {
-                previous * 0.30 + envelope * 0.70
+            let floor_target = raw_envelope.min(0.045);
+            state.noise_floor = if floor_target < state.noise_floor {
+                state.noise_floor * 0.88 + floor_target * 0.12
             } else {
-                previous * 0.82 + envelope * 0.18
+                state.noise_floor * 0.997 + floor_target * 0.003
+            }
+            .clamp(0.001, 0.055);
+
+            state.signal_ceiling = if raw_envelope > state.signal_ceiling {
+                state.signal_ceiling * 0.86 + raw_envelope * 0.14
+            } else {
+                state.signal_ceiling * 0.9992 + raw_envelope * 0.0008
+            }
+            .max(state.noise_floor + 0.055)
+            .clamp(0.08, 1.0);
+
+            let normalized = ((raw_envelope - state.noise_floor) / (state.signal_ceiling - state.noise_floor).max(0.055))
+                .clamp(0.0, 1.0)
+                .powf(0.78);
+            state.displayed_peak = if normalized > state.displayed_peak {
+                state.displayed_peak * 0.42 + normalized * 0.58
+            } else {
+                state.displayed_peak * 0.78 + normalized * 0.22
             };
-            let display_peak = state.smoothed_peak.clamp(0.0, 1.0);
+
+            let display_peak = state.displayed_peak.clamp(0.0, 1.0);
             state.peaks.push_back(RadioVisualizerBucket {
                 at: now,
                 peak: display_peak,
@@ -453,7 +484,6 @@ pub struct AudioPlayer {
     current_path: Option<PathBuf>,
     current_settings: Option<DspSettings>,
     current_radio_url: Option<String>,
-    current_radio_extension: String,
     volume_percent: u8,
     radio_visualizer: RadioVisualizerHandle,
     radio_recorder: RadioRecordingHandle,
@@ -479,7 +509,6 @@ impl AudioPlayer {
             current_path: None,
             current_settings: None,
             current_radio_url: None,
-            current_radio_extension: "mp3".to_owned(),
             volume_percent: 100,
             radio_visualizer: Arc::new(Mutex::new(RadioVisualizerState::default())),
             radio_recorder: Arc::new(Mutex::new(None)),
@@ -511,13 +540,6 @@ impl AudioPlayer {
             .with_context(|| format!("failed to open internet radio stream: {url}"))?
             .error_for_status()
             .with_context(|| format!("internet radio stream returned an error: {url}"))?;
-        let radio_extension = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(guess_recording_extension)
-            .unwrap_or_else(|| guess_recording_extension(url));
-
         let stream = RadioStream::new(response, Arc::clone(&self.radio_recorder));
         let decoder = Decoder::new(BufReader::new(stream))
             .with_context(|| format!("failed to decode internet radio stream: {url}"))?;
@@ -546,7 +568,6 @@ impl AudioPlayer {
         self.current_path = None;
         self.current_settings = None;
         self.current_radio_url = Some(url.to_owned());
-        self.current_radio_extension = radio_extension;
 
         Ok(())
     }
@@ -572,8 +593,8 @@ impl AudioPlayer {
     pub fn start_radio_recording(
         &mut self,
         output_folder: &Path,
-        station_name: &str,
-        stream_title: Option<&str>,
+        _station_name: &str,
+        _stream_title: Option<&str>,
     ) -> Result<PathBuf> {
         if self.current_radio_url.is_none() {
             anyhow::bail!("start an internet radio station before recording");
@@ -586,17 +607,7 @@ impl AudioPlayer {
 
         fs::create_dir_all(output_folder)
             .with_context(|| format!("failed to create recording folder: {}", output_folder.display()))?;
-        let timestamp = recording_timestamp();
-        let station = sanitize_filename(station_name).unwrap_or_else(|| "internet-radio".to_owned());
-        let title = stream_title.and_then(sanitize_filename);
-        let extension = self.current_radio_extension.trim().trim_start_matches('.');
-        let extension = if extension.is_empty() { "mp3" } else { extension };
-        let filename = if let Some(title) = title {
-            format!("{timestamp}-{station}-{title}.{extension}")
-        } else {
-            format!("{timestamp}-{station}.{extension}")
-        };
-        let path = output_folder.join(filename);
+        let path = unique_recording_path(output_folder, "audio-orbit-records-recording", "part");
         let file = File::create(&path)
             .with_context(|| format!("failed to create recording file: {}", path.display()))?;
 
@@ -622,8 +633,24 @@ impl AudioPlayer {
             return Ok(None);
         };
         recording.file.flush()?;
+        drop(recording.file);
+
+        let output_folder = recording
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let final_path = unique_recording_path(&output_folder, &recording_stop_stem(), "mp3");
+        fs::rename(&recording.path, &final_path).with_context(|| {
+            format!(
+                "failed to finalize recording from {} to {}",
+                recording.path.display(),
+                final_path.display()
+            )
+        })?;
+
         Ok(Some(RadioRecordingInfo {
-            path: recording.path,
+            path: final_path,
             started_at: recording.started_at,
             bytes_written: recording.bytes_written,
         }))
@@ -829,7 +856,6 @@ impl AudioPlayer {
         self.current_path = None;
         self.current_settings = None;
         self.current_radio_url = None;
-        self.current_radio_extension = "mp3".to_owned();
         self.radio_recognition = Arc::new(Mutex::new(RecognitionSampleBuffer::default()));
     }
 
@@ -919,56 +945,51 @@ impl AudioPlayer {
         self.current_path = Some(path.to_path_buf());
         self.current_settings = Some(settings);
         self.current_radio_url = None;
-        self.current_radio_extension = "mp3".to_owned();
 
         Ok(())
     }
 }
 
-fn recording_timestamp() -> String {
+fn recording_stop_stem() -> String {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    format!("{seconds}")
+    let (year, month, day, hour, minute, second) = utc_timestamp_parts(seconds);
+    format!("audio-orbit-records-{year:04}-{month:02}-{day:02}-{hour:02}-{minute:02}-{second:02}")
 }
 
-fn sanitize_filename(value: &str) -> Option<String> {
-    let sanitized = value
-        .chars()
-        .map(|character| match character {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => character,
-            ' ' | '.' => '-',
-            _ => '-',
-        })
-        .collect::<String>()
-        .split('-')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
-
-    if sanitized.is_empty() {
-        None
-    } else {
-        Some(sanitized.chars().take(80).collect())
+fn unique_recording_path(folder: &Path, stem: &str, extension: &str) -> PathBuf {
+    let mut path = folder.join(format!("{stem}.{extension}"));
+    let mut suffix = 2usize;
+    while path.exists() {
+        path = folder.join(format!("{stem}-{suffix}.{extension}"));
+        suffix = suffix.saturating_add(1);
     }
+    path
 }
 
-fn guess_recording_extension(value: &str) -> String {
-    let value = value.to_ascii_lowercase();
-    if value.contains("aac") || value.contains("audio/aac") || value.contains("audio/aacp") {
-        "aac".to_owned()
-    } else if value.contains("ogg") || value.contains("opus") {
-        "ogg".to_owned()
-    } else if value.contains("flac") {
-        "flac".to_owned()
-    } else if value.contains("wav") {
-        "wav".to_owned()
-    } else if value.contains("mp3") || value.contains("mpeg") || value.ends_with(".mp3") {
-        "mp3".to_owned()
-    } else {
-        "mp3".to_owned()
+fn utc_timestamp_parts(seconds: u64) -> (i32, u32, u32, u32, u32, u32) {
+    let days = (seconds / 86_400) as i64;
+    let seconds_of_day = seconds % 86_400;
+    let hour = (seconds_of_day / 3_600) as u32;
+    let minute = ((seconds_of_day % 3_600) / 60) as u32;
+    let second = (seconds_of_day % 60) as u32;
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe as i32 + era as i32 * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = (mp + if mp < 10 { 3 } else { -9 }) as u32;
+    if month <= 2 {
+        year += 1;
     }
+
+    (year, month, day, hour, minute, second)
 }
 
 fn apply_fade_in(samples: &mut [f32], sample_rate: u32, fade_seconds: f32) {

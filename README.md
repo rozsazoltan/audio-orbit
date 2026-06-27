@@ -94,9 +94,9 @@ Audio files themselves are not embedded in the backup. The backup stores library
 
 ### Radio recordings
 
-Internet radio recordings are captured from the original stream bytes before volume, orbit, or any playback processing is applied. The toolbar microphone button starts recording the active radio station; while recording, the icon turns red and blinks. Press it again to stop and save the file.
+Internet radio recordings are captured from the original stream bytes before volume, orbit, or any playback processing is applied. The toolbar microphone button starts recording the active radio station; while recording, the Lucide microphone icon turns red and blinks. Press it again to stop and save the file.
 
-By default, recordings are saved next to the executable in `.audio-orbit-records/`. The folder can be changed from **Settings → Recording**.
+Saved files use the stop-time based format `audio-orbit-records-yyyy-mm-dd-hh-mm-ss.mp3`. By default, recordings are saved next to the executable in `.audio-orbit-records/`. Right-click the microphone button to open the current recordings folder, or open/change it from **Settings → Recording**.
 
 ### Free song recognition
 
