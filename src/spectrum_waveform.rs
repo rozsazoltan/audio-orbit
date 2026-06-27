@@ -53,6 +53,8 @@ pub struct LiveSpectrumAnalyzer {
     analyzer: SpectrumAnalyzer,
     previous_level: f32,
     previous_brightness: f32,
+    adaptive_floor: f32,
+    adaptive_peak: f32,
 }
 
 impl LiveSpectrumAnalyzer {
@@ -70,6 +72,8 @@ impl LiveSpectrumAnalyzer {
             analyzer: SpectrumAnalyzer::new(sample_rate, fft_size),
             previous_level: 0.0,
             previous_brightness: 0.5,
+            adaptive_floor: 0.035,
+            adaptive_peak: 0.24,
         }
     }
 
@@ -88,20 +92,40 @@ impl LiveSpectrumAnalyzer {
         ordered.extend_from_slice(&self.ring[self.ring_pos..]);
         ordered.extend_from_slice(&self.ring[..self.ring_pos]);
         let target = self.analyzer.analyze_window(&ordered);
+        let adaptive_level = self.normalize_live_level(target.level);
 
-        // Smooth like a real player visualizer: quick enough to react, slow enough to avoid flicker.
-        let smoothed_level = if target.level > self.previous_level {
-            self.previous_level * 0.52 + target.level * 0.48
+        // Smooth like a desktop player visualizer: fast attack, slower release, and no constant 100% wall.
+        let smoothed_level = if adaptive_level > self.previous_level {
+            self.previous_level * 0.42 + adaptive_level * 0.58
         } else {
-            self.previous_level * 0.90 + target.level * 0.10
+            self.previous_level * 0.84 + adaptive_level * 0.16
         };
         self.previous_level = smoothed_level.clamp(0.0, 1.0);
-        self.previous_brightness = (self.previous_brightness * 0.82 + target.brightness * 0.18).clamp(0.0, 1.0);
+        self.previous_brightness = (self.previous_brightness * 0.62 + target.brightness * 0.38).clamp(0.0, 1.0);
 
         Some(SpectrumBucket {
             level: self.previous_level,
             brightness: self.previous_brightness,
         })
+    }
+
+    fn normalize_live_level(&mut self, level: f32) -> f32 {
+        let level = level.clamp(0.0, 1.0);
+        self.adaptive_floor = if level < self.adaptive_floor {
+            self.adaptive_floor * 0.94 + level * 0.06
+        } else {
+            self.adaptive_floor * 0.998 + level * 0.002
+        };
+        self.adaptive_peak = if level > self.adaptive_peak {
+            self.adaptive_peak * 0.74 + level * 0.26
+        } else {
+            self.adaptive_peak * 0.996 + level * 0.004
+        };
+
+        let floor = self.adaptive_floor.min(0.22);
+        let peak = self.adaptive_peak.max(floor + 0.10);
+        let normalized = ((level - floor) / (peak - floor)).clamp(0.0, 1.0);
+        normalized.powf(0.92) * 0.96
     }
 }
 
@@ -140,20 +164,36 @@ impl SpectrumAnalyzer {
         }
 
         let step = (self.fft_size / 2).max(1);
-        let mut best = SpectrumBucket::default();
+        let mut sum_level = 0.0_f32;
+        let mut sum_brightness = 0.0_f32;
+        let mut strongest = SpectrumBucket::default();
+        let mut count = 0usize;
         let mut offset = 0usize;
         while offset < chunk.len() {
             let end = (offset + self.fft_size).min(chunk.len());
             let bucket = self.analyze_window(&chunk[offset..end]);
-            if bucket.level > best.level {
-                best = bucket;
+            sum_level += bucket.level;
+            sum_brightness += bucket.brightness;
+            if bucket.level > strongest.level {
+                strongest = bucket;
             }
+            count += 1;
             if end == chunk.len() {
                 break;
             }
             offset += step;
         }
-        best
+
+        if count == 0 {
+            SpectrumBucket::default()
+        } else {
+            let average_level = sum_level / count as f32;
+            let average_brightness = sum_brightness / count as f32;
+            SpectrumBucket {
+                level: (average_level * 0.70 + strongest.level * 0.30).clamp(0.0, 1.0),
+                brightness: (average_brightness * 0.72 + strongest.brightness * 0.28).clamp(0.0, 1.0),
+            }
+        }
     }
 
     fn analyze_window(&mut self, samples: &[f32]) -> SpectrumBucket {
@@ -176,25 +216,21 @@ impl SpectrumAnalyzer {
         self.fft.process(&mut self.buffer);
 
         let rms = (time_energy / sample_count as f64).sqrt() as f32;
-        let loudness = db_to_unit(20.0 * rms.max(0.000_001).log10(), -62.0, -6.0, 1.24);
+        let loudness = db_to_unit(20.0 * rms.max(0.000_001).log10(), -64.0, -5.0, 1.35);
         let profile = self.perceptual_spectral_profile();
 
-        // The level intentionally combines spectral shape, spectral motion, and loudness.
-        // This avoids the old behavior where bars mostly represented only quiet/loud changes.
-        let spectral_motion = profile.flux;
+        // The visible value is deliberately spectral-first. Loudness still matters, but low/mid/high
+        // balance and motion must change the bars even when two moments have similar RMS.
         let contrast = (profile.strongest - profile.average).clamp(0.0, 1.0);
-        let bass_punch = profile.low.max(profile.mid * 0.72);
-        let bright_detail = (profile.high * 0.70 + profile.brightness * profile.average * 0.30).clamp(0.0, 1.0);
-        let mut level = profile.strongest * 0.30
-            + profile.average * 0.22
+        let band_presence = (profile.low * 0.30 + profile.mid * 0.28 + profile.high * 0.30 + profile.strongest * 0.12)
+            .clamp(0.0, 1.0);
+        let tilt_emphasis = ((profile.brightness - 0.5).abs() * 2.0).clamp(0.0, 1.0);
+        let level = profile.average * 0.25
+            + band_presence * 0.25
             + loudness * 0.18
-            + spectral_motion * 0.14
-            + contrast * 0.08
-            + bass_punch * 0.05
-            + bright_detail * 0.03;
-
-        // A small brightness lift makes cymbals, vocals and bright instruments visible at the same RMS.
-        level *= 0.90 + profile.brightness * 0.22;
+            + profile.flux * 0.14
+            + contrast * 0.10
+            + tilt_emphasis * profile.strongest * 0.08;
 
         SpectrumBucket {
             level: level.clamp(0.0, 1.0),
@@ -241,10 +277,14 @@ impl SpectrumAnalyzer {
 
         let average = if weight_sum > 0.0 { weighted_sum / weight_sum } else { 0.0 };
         let total = bands.iter().copied().sum::<f32>().max(0.000_001);
-        let brightness = (centroid_sum / total).clamp(0.0, 1.0);
+        let centroid_brightness = (centroid_sum / total).clamp(0.0, 1.0);
         let low = low / (ANALYSIS_BANDS as f32 * 0.30).max(1.0);
         let mid = mid / (ANALYSIS_BANDS as f32 * 0.40).max(1.0);
         let high = high / (ANALYSIS_BANDS as f32 * 0.30).max(1.0);
+        let low_mid_high_total = (low + mid + high).max(0.000_001);
+        let high_balance = ((high + mid * 0.42) / low_mid_high_total).clamp(0.0, 1.0);
+        let brightness = ((centroid_brightness * 0.58 + high_balance * 0.42 - 0.5) * 1.42 + 0.5)
+            .clamp(0.0, 1.0);
 
         let mut positive_flux = 0.0_f32;
         let mut flux_count = 0usize;
@@ -338,13 +378,13 @@ fn normalize_waveform_levels(levels: &mut [f32]) {
 
     let mut sorted = levels.to_vec();
     sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-    let floor = sorted[((sorted.len() - 1) as f32 * 0.08) as usize].min(0.28);
-    let ceiling = sorted[((sorted.len() - 1) as f32 * 0.965) as usize].max(floor + 0.08);
-    let range = (ceiling - floor).max(0.06);
+    let floor = sorted[((sorted.len() - 1) as f32 * 0.06) as usize].min(0.24);
+    let ceiling = sorted[((sorted.len() - 1) as f32 * 0.992) as usize].max(floor + 0.10);
+    let range = (ceiling - floor).max(0.08);
 
     for value in levels.iter_mut() {
-        let normalized = ((*value - floor) / range).clamp(0.015, 1.0);
-        *value = normalized.powf(0.82);
+        let normalized = ((*value - floor) / range).clamp(0.012, 0.985);
+        *value = normalized.powf(0.92);
     }
 }
 
@@ -355,7 +395,8 @@ fn smooth_brightness(values: &mut [f32]) {
 
     let mut previous = values[0].clamp(0.0, 1.0);
     for value in values.iter_mut() {
-        previous = previous * 0.62 + value.clamp(0.0, 1.0) * 0.38;
+        let expanded = ((*value).clamp(0.0, 1.0) - 0.5) * 1.28 + 0.5;
+        previous = previous * 0.48 + expanded.clamp(0.0, 1.0) * 0.52;
         *value = previous;
     }
 }

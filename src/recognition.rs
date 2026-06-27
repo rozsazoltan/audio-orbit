@@ -146,19 +146,25 @@ fn songrec_candidates(command_path: Option<PathBuf>, sample_path: &Path) -> Vec<
         let tools = external_tools_dir();
         commands.push((tools.join("songrec-cli.exe"), ".audio-orbit-dll songrec-cli.exe".to_owned()));
         commands.push((tools.join("songrec.exe"), ".audio-orbit-dll songrec.exe".to_owned()));
+        commands.push((tools.join("audio-file-to-recognized-song.exe"), ".audio-orbit-dll audio-file-to-recognized-song.exe".to_owned()));
         commands.push((tools.join("songrec-cli"), ".audio-orbit-dll songrec-cli".to_owned()));
         commands.push((tools.join("songrec"), ".audio-orbit-dll songrec".to_owned()));
+        commands.push((tools.join("audio-file-to-recognized-song"), ".audio-orbit-dll audio-file-to-recognized-song".to_owned()));
         if let Ok(current_exe) = env::current_exe() {
             if let Some(folder) = current_exe.parent() {
                 commands.push((folder.join("songrec.exe"), "app folder songrec.exe".to_owned()));
                 commands.push((folder.join("songrec-cli.exe"), "app folder songrec-cli.exe".to_owned()));
+                commands.push((folder.join("audio-file-to-recognized-song.exe"), "app folder audio-file-to-recognized-song.exe".to_owned()));
                 commands.push((folder.join("songrec"), "app folder songrec".to_owned()));
+                commands.push((folder.join("audio-file-to-recognized-song"), "app folder audio-file-to-recognized-song".to_owned()));
             }
         }
         commands.push((PathBuf::from("songrec"), "PATH songrec".to_owned()));
         commands.push((PathBuf::from("songrec.exe"), "PATH songrec.exe".to_owned()));
         commands.push((PathBuf::from("songrec-cli"), "PATH songrec-cli".to_owned()));
         commands.push((PathBuf::from("songrec-cli.exe"), "PATH songrec-cli.exe".to_owned()));
+        commands.push((PathBuf::from("audio-file-to-recognized-song"), "PATH audio-file-to-recognized-song".to_owned()));
+        commands.push((PathBuf::from("audio-file-to-recognized-song.exe"), "PATH audio-file-to-recognized-song.exe".to_owned()));
     }
 
     let sample = sample_path.display().to_string();
@@ -350,21 +356,34 @@ pub fn install_or_update_songrec(download_url: &str, version: Option<&str>, asse
     let bytes = client
         .get(download_url)
         .send()
-        .context("failed to download SongRec release asset")?
+        .context("failed to download SongRec release asset from GitHub")?
         .error_for_status()
-        .context("SongRec release asset download failed")?
+        .context("SongRec GitHub release asset download failed")?
         .bytes()
-        .context("failed to read SongRec release asset")?;
+        .context("failed to read SongRec GitHub release asset")?;
 
     let asset_name = asset_name.unwrap_or("songrec.exe");
-    let executable_path = if asset_name.to_ascii_lowercase().ends_with(".zip") {
+    let lower_asset_name = asset_name.to_ascii_lowercase();
+    let executable_path = if lower_asset_name.ends_with(".zip") {
         install_songrec_from_zip(&tools_dir, &bytes)?
-    } else {
+    } else if lower_asset_name.ends_with(".exe") {
         let target = tools_dir.join(preferred_songrec_exe_name(asset_name));
-        fs::write(&target, &bytes)
-            .with_context(|| format!("failed to write SongRec executable: {}", target.display()))?;
+        let temp = target.with_extension("download");
+        fs::write(&temp, &bytes)
+            .with_context(|| format!("failed to write temporary SongRec executable: {}", temp.display()))?;
+        fs::rename(&temp, &target)
+            .or_else(|_| {
+                fs::copy(&temp, &target)?;
+                let _ = fs::remove_file(&temp);
+                Ok::<(), io::Error>(())
+            })
+            .with_context(|| format!("failed to install SongRec executable: {}", target.display()))?;
         target
+    } else {
+        anyhow::bail!("unsupported SongRec GitHub asset type: {asset_name}. Audio Orbit can install .zip or .exe assets.");
     };
+
+    validate_installed_songrec(&executable_path)?;
 
     if let Some(version) = version.and_then(non_empty) {
         fs::write(tools_dir.join(SONGREC_VERSION_FILE), version.as_bytes())
@@ -377,13 +396,28 @@ pub fn install_or_update_songrec(download_url: &str, version: Option<&str>, asse
     })
 }
 
+fn validate_installed_songrec(path: &Path) -> Result<()> {
+    if !path.is_file() {
+        anyhow::bail!("SongRec was downloaded but the executable was not created: {}", path.display());
+    }
+    let len = fs::metadata(path)
+        .with_context(|| format!("failed to inspect installed SongRec executable: {}", path.display()))?
+        .len();
+    if len < 1024 {
+        anyhow::bail!("installed SongRec executable is unexpectedly small: {}", path.display());
+    }
+    Ok(())
+}
+
 fn managed_songrec_candidates() -> Vec<PathBuf> {
     let tools = external_tools_dir();
     vec![
         tools.join("songrec-cli.exe"),
         tools.join("songrec.exe"),
+        tools.join("audio-file-to-recognized-song.exe"),
         tools.join("songrec-cli"),
         tools.join("songrec"),
+        tools.join("audio-file-to-recognized-song"),
     ]
 }
 
@@ -419,8 +453,9 @@ fn select_songrec_release_with_windows_asset(
         if let Some(asset) = release
             .assets
             .iter()
-            .find(|asset| is_windows_songrec_asset(&asset.name))
-            .cloned()
+            .filter_map(|asset| songrec_windows_asset_rank(&asset.name).map(|rank| (rank, asset)))
+            .min_by_key(|(rank, _)| *rank)
+            .map(|(_, asset)| asset.clone())
         {
             return Some((release, asset));
         }
@@ -437,7 +472,7 @@ fn parse_version(value: &str) -> Version {
     Version::parse(value.trim().trim_start_matches('v')).unwrap_or_else(|_| Version::new(0, 0, 0))
 }
 
-fn is_windows_songrec_asset(name: &str) -> bool {
+fn songrec_windows_asset_rank(name: &str) -> Option<u8> {
     let lower = name.to_ascii_lowercase();
     let looks_windows = lower.contains("windows")
         || lower.contains("win64")
@@ -446,12 +481,32 @@ fn is_windows_songrec_asset(name: &str) -> bool {
         || lower.ends_with(".exe");
     let looks_downloadable = lower.ends_with(".zip") || lower.ends_with(".exe");
     let looks_cli_or_app = lower.contains("songrec") || lower.contains("audio-file-to-recognized-song");
-    looks_windows && looks_downloadable && looks_cli_or_app
+    if !(looks_windows && looks_downloadable && looks_cli_or_app) {
+        return None;
+    }
+
+    let mut rank = 100u8;
+    if lower.contains("cli") || lower.contains("audio-file-to-recognized-song") {
+        rank = rank.saturating_sub(30);
+    }
+    if lower.contains("portable") {
+        rank = rank.saturating_sub(16);
+    }
+    if lower.contains("x86_64") || lower.contains("win64") {
+        rank = rank.saturating_sub(12);
+    }
+    if lower.ends_with(".exe") {
+        rank = rank.saturating_sub(8);
+    }
+    if lower.ends_with(".zip") {
+        rank = rank.saturating_sub(4);
+    }
+    Some(rank)
 }
 
 fn preferred_songrec_exe_name(asset_name: &str) -> &'static str {
     let lower = asset_name.to_ascii_lowercase();
-    if lower.contains("cli") {
+    if lower.contains("cli") || lower.contains("audio-file-to-recognized-song") {
         "songrec-cli.exe"
     } else {
         "songrec.exe"
@@ -470,9 +525,9 @@ fn install_songrec_from_zip(tools_dir: &Path, bytes: &[u8]) -> Result<PathBuf> {
             continue;
         };
         let lower = name.to_string_lossy().to_ascii_lowercase();
-        if lower.ends_with(".exe") && lower.contains("songrec") {
+        if lower.ends_with(".exe") && (lower.contains("songrec") || lower.contains("audio-file-to-recognized-song")) {
             selected_index = Some(index);
-            selected_name = if lower.contains("cli") {
+            selected_name = if lower.contains("cli") || lower.contains("audio-file-to-recognized-song") {
                 "songrec-cli.exe".to_owned()
             } else {
                 "songrec.exe".to_owned()
@@ -482,7 +537,7 @@ fn install_songrec_from_zip(tools_dir: &Path, bytes: &[u8]) -> Result<PathBuf> {
     }
 
     let Some(index) = selected_index else {
-        anyhow::bail!("the SongRec ZIP asset did not contain songrec.exe or songrec-cli.exe");
+        anyhow::bail!("the SongRec ZIP asset did not contain songrec.exe, songrec-cli.exe, or audio-file-to-recognized-song.exe");
     };
 
     let mut file = archive.by_index(index)?;
