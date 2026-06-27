@@ -84,10 +84,16 @@ struct RadioVisualizerBucket {
     peak: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct RadioVisualizerPoint {
+    pub age_seconds: f32,
+    pub peak: f32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct RadioVisualizerFrame {
-    pub peaks: Vec<f32>,
-    pub scroll_fraction: f32,
+    pub points: Vec<RadioVisualizerPoint>,
+    pub bucket_seconds: f32,
 }
 
 #[derive(Default)]
@@ -394,45 +400,42 @@ impl AudioPlayer {
             return RadioVisualizerFrame::default();
         }
 
-        // Keep only the buckets that can affect the currently visible waveform, plus
-        // a tiny overscan margin. This avoids re-sampling old live-radio history into
-        // the visible strip and keeps movement time-based instead of stretched.
-        while state.peaks.len() > requested_points + 2 {
-            state.peaks.pop_front();
-        }
-
-        let mut rendered = vec![0.0_f32; requested_points];
         let now = Instant::now();
         let bucket_seconds = 1.0 / RADIO_VISUALIZER_BUCKETS_PER_SECOND as f32;
         let visible_seconds = requested_points as f32 * bucket_seconds;
-        let scroll_fraction = state
+        let overscan_seconds = bucket_seconds * 2.0;
+
+        while state
             .peaks
-            .back()
-            .map(|bucket| {
-                let newest_age = now.duration_since(bucket.at).as_secs_f32();
-                (newest_age / bucket_seconds).fract().clamp(0.0, 0.995)
-            })
-            .unwrap_or(0.0);
-
-        for bucket in state.peaks.iter() {
-            let age_seconds = now.duration_since(bucket.at).as_secs_f32();
-            if age_seconds > visible_seconds + bucket_seconds {
-                continue;
-            }
-
-            let offset_from_right = (age_seconds / bucket_seconds).floor() as usize;
-            if offset_from_right >= requested_points {
-                continue;
-            }
-            let index = requested_points - 1 - offset_from_right;
-            if let Some(slot) = rendered.get_mut(index) {
-                *slot = slot.max(bucket.peak);
-            }
+            .front()
+            .map(|bucket| now.duration_since(bucket.at).as_secs_f32() > visible_seconds + overscan_seconds)
+            .unwrap_or(false)
+        {
+            state.peaks.pop_front();
+        }
+        while state.peaks.len() > requested_points + 4 {
+            state.peaks.pop_front();
         }
 
+        let points = state
+            .peaks
+            .iter()
+            .filter_map(|bucket| {
+                let age_seconds = now.duration_since(bucket.at).as_secs_f32();
+                if age_seconds > visible_seconds + overscan_seconds {
+                    None
+                } else {
+                    Some(RadioVisualizerPoint {
+                        age_seconds,
+                        peak: bucket.peak,
+                    })
+                }
+            })
+            .collect();
+
         RadioVisualizerFrame {
-            peaks: rendered,
-            scroll_fraction,
+            points,
+            bucket_seconds,
         }
     }
 

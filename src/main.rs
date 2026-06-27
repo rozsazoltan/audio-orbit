@@ -4814,17 +4814,13 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
     let gap = 0.75;
     let bar_width = ((rect.width() - gap * bar_count.saturating_sub(1) as f32) / bar_count.max(1) as f32)
         .clamp(0.65, 2.2);
-    let visible_values = if frame.peaks.len() == bar_count {
-        frame.peaks.clone()
-    } else {
-        resample_time_series(&frame.peaks, bar_count)
-    };
     let pitch = bar_width + gap;
-    let scroll_offset = frame.scroll_fraction.clamp(0.0, 0.995) * pitch;
+    let bucket_seconds = frame.bucket_seconds.max(0.001);
 
-    let mut active_values: Vec<f32> = visible_values
+    let mut active_values: Vec<f32> = frame
+        .points
         .iter()
-        .copied()
+        .map(|point| point.peak)
         .filter(|value| *value > 0.0008)
         .collect();
     active_values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
@@ -4841,18 +4837,33 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
     let body_peak = percentile(&active_values, 0.92).max(0.035);
     let hard_peak = active_values.last().copied().unwrap_or(body_peak).max(body_peak);
     let dynamic_range = (body_peak - noise_floor).max(0.025);
+    let center_y = rect.center().y;
 
-    for index in 0..bar_count {
-        let x1 = rect.left() + index as f32 * pitch - scroll_offset;
-        let x2 = (x1 + bar_width).min(rect.right());
+    if frame.points.is_empty() {
+        let muted = visuals.widgets.inactive.fg_stroke.color.linear_multiply(0.16);
+        for index in 0..bar_count {
+            let x1 = rect.left() + index as f32 * pitch;
+            let x2 = (x1 + bar_width).min(rect.right());
+            painter.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(x1, center_y - 0.45), egui::pos2(x2, center_y + 0.45)),
+                bar_width / 2.0,
+                muted,
+            );
+        }
+        return response;
+    }
+
+    for point in &frame.points {
+        let x2 = rect.right() - (point.age_seconds / bucket_seconds) * pitch;
+        let x1 = x2 - bar_width;
         if x1 >= rect.right() {
-            break;
+            continue;
         }
         if x2 <= rect.left() {
             continue;
         }
 
-        let value = visible_values.get(index).copied().unwrap_or(0.0);
+        let value = point.peak;
         let has_signal = value > 0.0008;
         let normalized = if has_signal {
             let main_body = ((value - noise_floor) / dynamic_range).clamp(0.0, 1.0);
@@ -4866,8 +4877,6 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
         } else {
             0.0
         };
-        let y1 = rect.center().y - height / 2.0;
-        let y2 = rect.center().y + height / 2.0;
         let color = if has_signal {
             visuals.selection.bg_fill
         } else {
@@ -4875,15 +4884,19 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
         };
 
         if has_signal {
+            let y1 = center_y - height / 2.0;
+            let y2 = center_y + height / 2.0;
             painter.rect_filled(
-                egui::Rect::from_min_max(egui::pos2(x1, y1), egui::pos2(x2, y2)),
+                egui::Rect::from_min_max(egui::pos2(x1.max(rect.left()), y1), egui::pos2(x2.min(rect.right()), y2)),
                 bar_width / 2.0,
                 color,
             );
         } else {
-            let center_y = rect.center().y;
             painter.rect_filled(
-                egui::Rect::from_min_max(egui::pos2(x1, center_y - 0.45), egui::pos2(x2, center_y + 0.45)),
+                egui::Rect::from_min_max(
+                    egui::pos2(x1.max(rect.left()), center_y - 0.45),
+                    egui::pos2(x2.min(rect.right()), center_y + 0.45),
+                ),
                 bar_width / 2.0,
                 color,
             );
