@@ -3,7 +3,7 @@
   <assemblyIdentity
     type="win32"
     name="AudioOrbit"
-    version="0.8.16.0"
+    version="0.8.17.0"
     processorArchitecture="*"
   />
   <dependency>
