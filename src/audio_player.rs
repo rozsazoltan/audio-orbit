@@ -84,14 +84,16 @@ struct RadioVisualizerBucket {
     peak: f32,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct RadioVisualizerFrame {
+    pub peaks: Vec<f32>,
+    pub scroll_fraction: f32,
+}
+
 #[derive(Default)]
 struct RadioVisualizerState {
     peaks: VecDeque<RadioVisualizerBucket>,
-    current_peak: f32,
     smoothed_peak: f32,
-    bucket_energy: f64,
-    bucket_sample_count: usize,
-    sample_counter: usize,
 }
 
 type RadioVisualizerHandle = Arc<Mutex<RadioVisualizerState>>;
@@ -105,6 +107,10 @@ struct LiveRadioSource<S> {
     output_frame: [f32; 2],
     output_channel: usize,
     visualizer: RadioVisualizerHandle,
+    visualizer_current_peak: f32,
+    visualizer_bucket_energy: f64,
+    visualizer_bucket_sample_count: usize,
+    visualizer_sample_counter: usize,
 }
 
 impl<S: Source<Item = f32>> LiveRadioSource<S> {
@@ -120,6 +126,10 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
             output_frame: [0.0, 0.0],
             output_channel: 2,
             visualizer,
+            visualizer_current_peak: 0.0,
+            visualizer_bucket_energy: 0.0,
+            visualizer_bucket_sample_count: 0,
+            visualizer_sample_counter: 0,
         }
     }
 
@@ -156,8 +166,59 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
         }
     }
 
+    fn record_visualizer_peak(&mut self, peak: f32) {
+        let level = peak.abs().min(1.0);
+        self.visualizer_current_peak = self.visualizer_current_peak.max(level);
+        self.visualizer_bucket_energy += (level as f64) * (level as f64);
+        self.visualizer_bucket_sample_count += 1;
+        self.visualizer_sample_counter += 1;
+
+        let samples_per_bucket = (self.sample_rate.max(1) as usize / RADIO_VISUALIZER_BUCKETS_PER_SECOND).max(1);
+        if self.visualizer_sample_counter < samples_per_bucket {
+            return;
+        }
+
+        let rms = if self.visualizer_bucket_sample_count == 0 {
+            0.0
+        } else {
+            (self.visualizer_bucket_energy / self.visualizer_bucket_sample_count as f64).sqrt() as f32
+        };
+        let envelope = (rms * 1.65 + self.visualizer_current_peak * 0.28).clamp(0.0, 1.0);
+        let now = Instant::now();
+
+        if let Ok(mut state) = self.visualizer.lock() {
+            let previous = state.peaks.back().map(|bucket| bucket.peak).unwrap_or(state.smoothed_peak);
+            state.smoothed_peak = if envelope > previous {
+                previous * 0.30 + envelope * 0.70
+            } else {
+                previous * 0.82 + envelope * 0.18
+            };
+            let display_peak = state.smoothed_peak.clamp(0.0, 1.0);
+            state.peaks.push_back(RadioVisualizerBucket {
+                at: now,
+                peak: display_peak,
+            });
+
+            let history = Duration::from_secs(RADIO_VISUALIZER_HISTORY_SECONDS as u64);
+            while state.peaks.len() > RADIO_VISUALIZER_MAX_BUCKETS
+                || state
+                    .peaks
+                    .front()
+                    .map(|bucket| now.duration_since(bucket.at) > history)
+                    .unwrap_or(false)
+            {
+                state.peaks.pop_front();
+            }
+        }
+
+        self.visualizer_current_peak = 0.0;
+        self.visualizer_bucket_energy = 0.0;
+        self.visualizer_bucket_sample_count = 0;
+        self.visualizer_sample_counter = 0;
+    }
+
     fn process_frame(&mut self, stereo: [f32; 2], mono: f32) -> [f32; 2] {
-        record_radio_peak(&self.visualizer, self.sample_rate, stereo[0].abs().max(stereo[1].abs()).max(mono.abs()));
+        self.record_visualizer_peak(stereo[0].abs().max(stereo[1].abs()).max(mono.abs()));
         let output_level = self.settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
         if !self.settings.orbit_enabled {
             return [
@@ -222,56 +283,6 @@ impl<S: Source<Item = f32>> Source for LiveRadioSource<S> {
 
     fn total_duration(&self) -> Option<Duration> {
         None
-    }
-}
-
-fn record_radio_peak(visualizer: &RadioVisualizerHandle, sample_rate: u32, peak: f32) {
-    let Ok(mut state) = visualizer.lock() else {
-        return;
-    };
-
-    let level = peak.abs().min(1.0);
-    state.current_peak = state.current_peak.max(level);
-    state.bucket_energy += (level as f64) * (level as f64);
-    state.bucket_sample_count += 1;
-    state.sample_counter += 1;
-
-    let samples_per_bucket = (sample_rate.max(1) as usize / RADIO_VISUALIZER_BUCKETS_PER_SECOND).max(1);
-    if state.sample_counter >= samples_per_bucket {
-        let rms = if state.bucket_sample_count == 0 {
-            0.0
-        } else {
-            (state.bucket_energy / state.bucket_sample_count as f64).sqrt() as f32
-        };
-        let envelope = (rms * 1.65 + state.current_peak * 0.28).clamp(0.0, 1.0);
-        let previous = state.peaks.back().map(|bucket| bucket.peak).unwrap_or(state.smoothed_peak);
-        state.smoothed_peak = if envelope > previous {
-            previous * 0.30 + envelope * 0.70
-        } else {
-            previous * 0.82 + envelope * 0.18
-        };
-        let display_peak = state.smoothed_peak.clamp(0.0, 1.0);
-        let now = Instant::now();
-        state.peaks.push_back(RadioVisualizerBucket {
-            at: now,
-            peak: display_peak,
-        });
-
-        let history = Duration::from_secs(RADIO_VISUALIZER_HISTORY_SECONDS as u64);
-        while state.peaks.len() > RADIO_VISUALIZER_MAX_BUCKETS
-            || state
-                .peaks
-                .front()
-                .map(|bucket| now.duration_since(bucket.at) > history)
-                .unwrap_or(false)
-        {
-            state.peaks.pop_front();
-        }
-
-        state.current_peak = 0.0;
-        state.bucket_energy = 0.0;
-        state.bucket_sample_count = 0;
-        state.sample_counter = 0;
     }
 }
 
@@ -375,15 +386,18 @@ impl AudioPlayer {
         Ok(())
     }
 
-    pub fn radio_visualizer_peaks(&self, requested_points: usize) -> Vec<f32> {
+    pub fn radio_visualizer_frame(&self, requested_points: usize) -> RadioVisualizerFrame {
         let Ok(mut state) = self.radio_visualizer.lock() else {
-            return Vec::new();
+            return RadioVisualizerFrame::default();
         };
         if requested_points == 0 || state.peaks.is_empty() {
-            return Vec::new();
+            return RadioVisualizerFrame::default();
         }
 
-        while state.peaks.len() > requested_points {
+        // Keep only the buckets that can affect the currently visible waveform, plus
+        // a tiny overscan margin. This avoids re-sampling old live-radio history into
+        // the visible strip and keeps movement time-based instead of stretched.
+        while state.peaks.len() > requested_points + 2 {
             state.peaks.pop_front();
         }
 
@@ -391,10 +405,18 @@ impl AudioPlayer {
         let now = Instant::now();
         let bucket_seconds = 1.0 / RADIO_VISUALIZER_BUCKETS_PER_SECOND as f32;
         let visible_seconds = requested_points as f32 * bucket_seconds;
+        let scroll_fraction = state
+            .peaks
+            .back()
+            .map(|bucket| {
+                let newest_age = now.duration_since(bucket.at).as_secs_f32();
+                (newest_age / bucket_seconds).fract().clamp(0.0, 0.995)
+            })
+            .unwrap_or(0.0);
 
         for bucket in state.peaks.iter() {
             let age_seconds = now.duration_since(bucket.at).as_secs_f32();
-            if age_seconds > visible_seconds {
+            if age_seconds > visible_seconds + bucket_seconds {
                 continue;
             }
 
@@ -408,7 +430,10 @@ impl AudioPlayer {
             }
         }
 
-        rendered
+        RadioVisualizerFrame {
+            peaks: rendered,
+            scroll_fraction,
+        }
     }
 
     pub fn prepare_file(path: PathBuf, settings: DspSettings, start_seconds: f32) -> Result<PreparedPlayback> {

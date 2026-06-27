@@ -10,7 +10,7 @@ mod ui_icons;
 mod updater;
 
 use crate::{
-    audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo, PreparedPlayback},
+    audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo, PreparedPlayback, RadioVisualizerFrame},
     config::{
         app_data_dir, collect_audio_files_from_folder, display_file_name, export_state_zip,
         import_state_zip, load_state, same_path, save_state, LastPlayedTrack, Playlist, PlaylistKind, RadioStation, RepeatMode, SavedState,
@@ -2253,7 +2253,12 @@ impl Drop for AudioOrbitApp {
 impl eframe::App for AudioOrbitApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         context.set_visuals(egui::Visuals::dark());
-        context.request_repaint_after(Duration::from_millis(33));
+        let repaint_interval = if self.active_radio_index.is_some() {
+            Duration::from_millis(16)
+        } else {
+            Duration::from_millis(33)
+        };
+        context.request_repaint_after(repaint_interval);
         self.remember_window_geometry(context);
 
         self.process_media_key_events();
@@ -2440,12 +2445,12 @@ impl AudioOrbitApp {
 
         if self.active_radio_index.is_some() {
             let requested_points = (ui.available_width() / 2.8).round().clamp(80.0, 900.0) as usize;
-            let peaks = self
+            let frame = self
                 .player
                 .as_ref()
-                .map(|player| player.radio_visualizer_peaks(requested_points))
+                .map(|player| player.radio_visualizer_frame(requested_points))
                 .unwrap_or_default();
-            let response = draw_radio_visualizer(ui, &peaks);
+            let response = draw_radio_visualizer(ui, &frame);
             response.on_hover_text("Internet radio streams are live: new decoded audio enters on the right, older audio moves left, and connection gaps stay empty.");
         } else if has_now_playing {
             let position = self.displayed_playback_position_seconds();
@@ -4838,7 +4843,7 @@ fn paint_sticky_folder_header(
     );
 }
 
-fn draw_radio_visualizer(ui: &mut egui::Ui, peaks: &[f32]) -> egui::Response {
+fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egui::Response {
     let desired_size = egui::vec2(ui.available_width(), 46.0);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
     let visuals = ui.visuals();
@@ -4850,11 +4855,13 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, peaks: &[f32]) -> egui::Response {
     let gap = 0.75;
     let bar_width = ((rect.width() - gap * bar_count.saturating_sub(1) as f32) / bar_count.max(1) as f32)
         .clamp(0.65, 2.2);
-    let visible_values = if peaks.len() == bar_count {
-        peaks.to_vec()
+    let visible_values = if frame.peaks.len() == bar_count {
+        frame.peaks.clone()
     } else {
-        resample_time_series(peaks, bar_count)
+        resample_time_series(&frame.peaks, bar_count)
     };
+    let pitch = bar_width + gap;
+    let scroll_offset = frame.scroll_fraction.clamp(0.0, 0.995) * pitch;
 
     let mut active_values: Vec<f32> = visible_values
         .iter()
@@ -4877,10 +4884,13 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, peaks: &[f32]) -> egui::Response {
     let dynamic_range = (body_peak - noise_floor).max(0.025);
 
     for index in 0..bar_count {
-        let x1 = rect.left() + index as f32 * (bar_width + gap);
+        let x1 = rect.left() + index as f32 * pitch - scroll_offset;
         let x2 = (x1 + bar_width).min(rect.right());
         if x1 >= rect.right() {
             break;
+        }
+        if x2 <= rect.left() {
+            continue;
         }
 
         let value = visible_values.get(index).copied().unwrap_or(0.0);
