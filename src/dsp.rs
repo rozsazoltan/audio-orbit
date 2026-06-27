@@ -95,23 +95,50 @@ pub fn render_orbit_to_stereo(
     let channels = input_channels.max(1) as usize;
     let frame_count = input_samples.len() / channels;
     let mono = downmix_to_mono(input_samples, channels, frame_count);
-    let start_frame = ((start_seconds.max(0.0) * sample_rate as f32) as usize).min(frame_count);
+    let mut start_frame = ((start_seconds.max(0.0) * sample_rate as f32) as usize).min(frame_count);
     let waveform = waveform_peaks(&mono, WAVEFORM_POINTS);
 
     let output_level = settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
-    let silence_floor = silence_floor_from_percent(settings.silence_level_threshold_percent);
+    let silence_floor = silence_floor_from_percent(settings.silence_level_threshold_percent, &mono);
+    let skip_ranges = if settings.skip_silence_enabled {
+        detect_silence_ranges(
+            &mono,
+            sample_rate,
+            settings.silence_threshold_seconds,
+            silence_floor,
+        )
+    } else {
+        Vec::new()
+    };
+
+    if let Some((_, end)) = skip_ranges
+        .iter()
+        .find(|(start, end)| start_frame >= *start && start_frame < *end)
+        .copied()
+    {
+        start_frame = end.min(frame_count);
+    }
+
+    let silence_ranges = skip_ranges
+        .iter()
+        .filter(|(_, end)| *end > start_frame)
+        .map(|(start, end)| {
+            (
+                (*start).max(start_frame) as f32 / sample_rate.max(1) as f32,
+                *end as f32 / sample_rate.max(1) as f32,
+            )
+        })
+        .collect::<Vec<_>>();
 
     if !settings.orbit_enabled {
-        let (output, rendered_duration_seconds, silence_ranges) = render_plain_stereo(
+        let (output, rendered_duration_seconds) = render_plain_stereo(
             input_samples,
             channels,
             &mono,
             start_frame,
             sample_rate,
             output_level,
-            settings.skip_silence_enabled,
-            settings.silence_threshold_seconds,
-            silence_floor,
+            &skip_ranges,
         );
 
         let original_duration_seconds = if sample_rate == 0 {
@@ -142,49 +169,36 @@ pub fn render_orbit_to_stereo(
     let smoothing_time_seconds = 0.08 + smoothness * 0.70;
     let smoothing_coeff = (-1.0 / (sample_rate.max(1) as f32 * smoothing_time_seconds)).exp();
 
-    let sample_rate_usize = sample_rate.max(1) as usize;
-    let silence_limit = settings.silence_threshold_seconds.max(1) as usize * sample_rate_usize;
-    let silence_bridge_limit = (sample_rate_usize / 20).max(1);
-    let mut consecutive_silent_frames = 0usize;
-    let mut non_silent_bridge_frames = 0usize;
-    let mut silence_ranges = Vec::new();
-    let mut skipped_silence_start: Option<usize> = None;
-
     let mut smoothed_pan = 0.0_f32;
     let mut smoothed_frontness = 1.0_f32;
     let mut smoothed_backness = 0.0_f32;
     let mut rear_low_pass_state = 0.0_f32;
     let mut front_presence_state = 0.0_f32;
     let mut output = Vec::with_capacity((frame_count.saturating_sub(start_frame)) * 2);
+    let mut skip_index = skip_ranges
+        .iter()
+        .position(|(_, end)| *end > start_frame)
+        .unwrap_or(skip_ranges.len());
+    let mut frame_index = start_frame;
 
-    for frame_index in start_frame..frame_count {
-        let source_sample = mono[frame_index];
-        let is_below_silence_floor = source_sample.abs() <= silence_floor;
-        if is_below_silence_floor {
-            consecutive_silent_frames += 1;
-            non_silent_bridge_frames = 0;
-        } else if consecutive_silent_frames > 0 && non_silent_bridge_frames < silence_bridge_limit {
-            // AIMP-style silence skipping should not be broken by tiny decoder clicks or noise-floor spikes.
-            non_silent_bridge_frames += 1;
-            consecutive_silent_frames += 1;
-        } else {
-            consecutive_silent_frames = 0;
-            non_silent_bridge_frames = 0;
-        }
-
-        if settings.skip_silence_enabled && consecutive_silent_frames > silence_limit {
-            if skipped_silence_start.is_none() {
-                skipped_silence_start = Some(frame_index.saturating_sub(silence_limit));
+    while frame_index < frame_count {
+        while let Some((_, end)) = skip_ranges.get(skip_index) {
+            if frame_index < *end {
+                break;
             }
-            continue;
-        }
-        if let Some(start) = skipped_silence_start.take() {
-            silence_ranges.push((
-                start as f32 / sample_rate.max(1) as f32,
-                frame_index as f32 / sample_rate.max(1) as f32,
-            ));
+            skip_index += 1;
         }
 
+        if let Some((skip_start, skip_end)) = skip_ranges.get(skip_index).copied() {
+            if frame_index >= skip_start && frame_index < skip_end {
+                // The waveform marks the exact region we remove from the rendered audio.
+                // Jumping the decoded cursor here makes the playhead cross skipped ranges instead of crawling through them.
+                frame_index = skip_end.min(frame_count);
+                continue;
+            }
+        }
+
+        let source_sample = mono[frame_index];
         let time = frame_index as f32 / sample_rate.max(1) as f32;
         let angle = 2.0 * PI * orbit_rate * time;
 
@@ -230,14 +244,10 @@ pub fn render_orbit_to_stereo(
 
         output.push(left);
         output.push(right);
+        frame_index += 1;
     }
 
-    if let Some(start) = skipped_silence_start.take() {
-        silence_ranges.push((
-            start as f32 / sample_rate.max(1) as f32,
-            frame_count as f32 / sample_rate.max(1) as f32,
-        ));
-    }
+    apply_skip_boundary_smoothing(&mut output, sample_rate, start_frame, &skip_ranges);
 
     let original_duration_seconds = if sample_rate == 0 {
         0.0
@@ -264,12 +274,116 @@ pub fn render_orbit_to_stereo(
     )
 }
 
-fn silence_floor_from_percent(percent: u8) -> f32 {
-    if percent == 0 {
-        0.001
-    } else {
-        percent.clamp(1, 20) as f32 / 100.0
+fn silence_floor_from_percent(percent: u8, samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.008;
     }
+
+    let mut levels = samples
+        .iter()
+        .map(|sample| sample.abs())
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if levels.is_empty() {
+        return 0.008;
+    }
+
+    levels.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let peak = levels.last().copied().unwrap_or(0.0).max(0.001);
+    let low_noise_index = ((levels.len().saturating_sub(1)) as f32 * 0.12) as usize;
+    let low_noise_floor = levels.get(low_noise_index).copied().unwrap_or(0.0);
+
+    if percent == 0 {
+        // AIMP-like "silence" is not digital zero. MP3/AAC decoders and old masters often contain
+        // tiny dither or stream noise in otherwise empty parts, so level 0 still means near-silence.
+        (0.006_f32.max(peak * 0.004).max(low_noise_floor * 3.5)).clamp(0.004, 0.018)
+    } else {
+        let user_floor = percent.clamp(1, 20) as f32 / 100.0;
+        user_floor.max(0.008).max(low_noise_floor * 3.0).clamp(0.006, 0.20)
+    }
+}
+
+fn detect_silence_ranges(
+    mono: &[f32],
+    sample_rate: u32,
+    threshold_seconds: u8,
+    silence_floor: f32,
+) -> Vec<(usize, usize)> {
+    if mono.is_empty() || sample_rate == 0 {
+        return Vec::new();
+    }
+
+    let sample_rate_usize = sample_rate.max(1) as usize;
+    let window_frames = (sample_rate_usize / 25).max(256); // about 40 ms at common sample rates
+    let min_silent_windows = ((threshold_seconds.max(1) as f32 * sample_rate as f32) / window_frames as f32)
+        .ceil()
+        .max(1.0) as usize;
+    let bridge_tolerance_windows = ((sample_rate as f32 * 0.16) / window_frames as f32)
+        .ceil()
+        .max(1.0) as usize;
+    let edge_padding_frames = ((sample_rate as f32 * 0.025) as usize).max(1);
+
+    let mut ranges = Vec::new();
+    let mut candidate_start: Option<usize> = None;
+    let mut candidate_last_silent_end = 0usize;
+    let mut bridge_windows = 0usize;
+
+    for (window_index, chunk) in mono.chunks(window_frames).enumerate() {
+        let start = window_index * window_frames;
+        let end = (start + chunk.len()).min(mono.len());
+        let rms = (chunk.iter().map(|sample| sample * sample).sum::<f32>() / chunk.len().max(1) as f32).sqrt();
+        let peak = chunk.iter().map(|sample| sample.abs()).fold(0.0_f32, f32::max);
+        let silent = rms <= silence_floor && peak <= silence_floor * 7.5;
+
+        if silent {
+            if candidate_start.is_none() {
+                candidate_start = Some(start);
+            }
+            candidate_last_silent_end = end;
+            bridge_windows = 0;
+            continue;
+        }
+
+        if candidate_start.is_some() && bridge_windows < bridge_tolerance_windows && rms <= silence_floor * 1.8 {
+            bridge_windows += 1;
+            continue;
+        }
+
+        if let Some(start) = candidate_start.take() {
+            let silent_windows = candidate_last_silent_end.saturating_sub(start) / window_frames;
+            if silent_windows >= min_silent_windows {
+                push_silence_range(&mut ranges, start, candidate_last_silent_end, edge_padding_frames);
+            }
+        }
+        candidate_last_silent_end = 0;
+        bridge_windows = 0;
+    }
+
+    if let Some(start) = candidate_start.take() {
+        let silent_windows = mono.len().saturating_sub(start) / window_frames;
+        if silent_windows >= min_silent_windows {
+            push_silence_range(&mut ranges, start, mono.len(), edge_padding_frames);
+        }
+    }
+
+    ranges
+}
+
+fn push_silence_range(ranges: &mut Vec<(usize, usize)>, start: usize, end: usize, padding: usize) {
+    let start = start.saturating_add(padding);
+    let end = end.saturating_sub(padding);
+    if end <= start {
+        return;
+    }
+
+    if let Some((_, previous_end)) = ranges.last_mut() {
+        if start <= previous_end.saturating_add(padding * 2) {
+            *previous_end = (*previous_end).max(end);
+            return;
+        }
+    }
+
+    ranges.push((start, end));
 }
 
 fn render_plain_stereo(
@@ -279,47 +393,32 @@ fn render_plain_stereo(
     start_frame: usize,
     sample_rate: u32,
     output_level: f32,
-    skip_silence_enabled: bool,
-    silence_threshold_seconds: u8,
-    silence_floor: f32,
-) -> (Vec<f32>, f32, Vec<(f32, f32)>) {
+    skip_ranges: &[(usize, usize)],
+) -> (Vec<f32>, f32) {
     let frame_count = mono.len();
-    let sample_rate_usize = sample_rate.max(1) as usize;
-    let silence_limit = silence_threshold_seconds.max(1) as usize * sample_rate_usize;
-    let silence_bridge_limit = (sample_rate_usize / 20).max(1);
-    let mut consecutive_silent_frames = 0usize;
-    let mut non_silent_bridge_frames = 0usize;
-    let mut silence_ranges = Vec::new();
-    let mut skipped_silence_start: Option<usize> = None;
     let mut output = Vec::with_capacity((frame_count.saturating_sub(start_frame)) * 2);
+    let mut skip_index = skip_ranges
+        .iter()
+        .position(|(_, end)| *end > start_frame)
+        .unwrap_or(skip_ranges.len());
+    let mut frame_index = start_frame;
 
-    for frame_index in start_frame..frame_count {
-        let source_sample = mono[frame_index];
-        let is_below_silence_floor = source_sample.abs() <= silence_floor;
-        if is_below_silence_floor {
-            consecutive_silent_frames += 1;
-            non_silent_bridge_frames = 0;
-        } else if consecutive_silent_frames > 0 && non_silent_bridge_frames < silence_bridge_limit {
-            non_silent_bridge_frames += 1;
-            consecutive_silent_frames += 1;
-        } else {
-            consecutive_silent_frames = 0;
-            non_silent_bridge_frames = 0;
-        }
-
-        if skip_silence_enabled && consecutive_silent_frames > silence_limit {
-            if skipped_silence_start.is_none() {
-                skipped_silence_start = Some(frame_index.saturating_sub(silence_limit));
+    while frame_index < frame_count {
+        while let Some((_, end)) = skip_ranges.get(skip_index) {
+            if frame_index < *end {
+                break;
             }
-            continue;
-        }
-        if let Some(start) = skipped_silence_start.take() {
-            silence_ranges.push((
-                start as f32 / sample_rate.max(1) as f32,
-                frame_index as f32 / sample_rate.max(1) as f32,
-            ));
+            skip_index += 1;
         }
 
+        if let Some((skip_start, skip_end)) = skip_ranges.get(skip_index).copied() {
+            if frame_index >= skip_start && frame_index < skip_end {
+                frame_index = skip_end.min(frame_count);
+                continue;
+            }
+        }
+
+        let source_sample = mono[frame_index];
         let offset = frame_index * channels;
         let (left, right) = if channels == 1 {
             let sample = input_samples.get(offset).copied().unwrap_or(source_sample);
@@ -333,14 +432,10 @@ fn render_plain_stereo(
 
         output.push(left * output_level);
         output.push(right * output_level);
+        frame_index += 1;
     }
 
-    if let Some(start) = skipped_silence_start.take() {
-        silence_ranges.push((
-            start as f32 / sample_rate.max(1) as f32,
-            frame_count as f32 / sample_rate.max(1) as f32,
-        ));
-    }
+    apply_skip_boundary_smoothing(&mut output, sample_rate, start_frame, skip_ranges);
 
     let rendered_duration_seconds = if sample_rate == 0 {
         0.0
@@ -348,8 +443,53 @@ fn render_plain_stereo(
         (output.len() / 2) as f32 / sample_rate as f32
     };
 
-    (output, rendered_duration_seconds, silence_ranges)
+    (output, rendered_duration_seconds)
 }
+
+fn apply_skip_boundary_smoothing(
+    samples: &mut [f32],
+    sample_rate: u32,
+    start_frame: usize,
+    skip_ranges: &[(usize, usize)],
+) {
+    if samples.is_empty() || sample_rate == 0 || skip_ranges.is_empty() {
+        return;
+    }
+
+    // The cut points are already near silence. This short fade-in only hides decoder residue/clicks;
+    // it should not feel like a transition or crossfade.
+    let fade_frames = ((sample_rate as f32 * 0.006) as usize).clamp(8, 256);
+    let frame_count = samples.len() / 2;
+    let mut skipped_before = 0usize;
+
+    for (start, end) in skip_ranges.iter().copied() {
+        if end <= start_frame {
+            continue;
+        }
+
+        let effective_start = start.max(start_frame);
+        if end <= effective_start {
+            continue;
+        }
+
+        let rendered_cut_frame = effective_start
+            .saturating_sub(start_frame)
+            .saturating_sub(skipped_before)
+            .min(frame_count);
+
+        for frame in rendered_cut_frame..(rendered_cut_frame + fade_frames).min(frame_count) {
+            let gain = (frame - rendered_cut_frame) as f32 / fade_frames as f32;
+            let left = frame * 2;
+            samples[left] *= gain;
+            if let Some(right) = samples.get_mut(left + 1) {
+                *right *= gain;
+            }
+        }
+
+        skipped_before = skipped_before.saturating_add(end - effective_start);
+    }
+}
+
 
 #[derive(Clone, Copy)]
 struct OrbitPosition {

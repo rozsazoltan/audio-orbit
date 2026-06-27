@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use reqwest::blocking::Client;
+use reqwest::{blocking::Client, StatusCode};
 use semver::Version;
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize};
 use std::{
     env,
     fs,
@@ -41,14 +41,7 @@ pub fn check_for_update(include_prereleases: bool) -> Result<UpdateCheck> {
     let client = Client::builder().user_agent(USER_AGENT).build()?;
 
     let latest_release = if include_prereleases {
-        let releases: Vec<GitHubRelease> = client
-            .get(RELEASES_API)
-            .send()
-            .context("failed to contact GitHub releases")?
-            .error_for_status()
-            .context("GitHub releases request failed")?
-            .json()
-            .context("failed to parse GitHub releases response")?;
+        let releases: Vec<GitHubRelease> = get_github_json(&client, RELEASES_API, "GitHub releases")?;
 
         let mut candidates = releases
             .into_iter()
@@ -67,14 +60,7 @@ pub fn check_for_update(include_prereleases: bool) -> Result<UpdateCheck> {
             .map(|(_, release)| release)
             .context("no suitable GitHub release was found")?
     } else {
-        client
-            .get(LATEST_RELEASE_API)
-            .send()
-            .context("failed to contact GitHub latest release")?
-            .error_for_status()
-            .context("GitHub latest release request failed")?
-            .json()
-            .context("failed to parse GitHub latest release response")?
+        get_github_json(&client, LATEST_RELEASE_API, "GitHub latest release")?
     };
 
     let current_version = env!("CARGO_PKG_VERSION").to_owned();
@@ -96,6 +82,29 @@ pub fn check_for_update(include_prereleases: bool) -> Result<UpdateCheck> {
         is_update_available: latest_semver > current_semver,
         prerelease: latest_release.prerelease,
     })
+}
+
+fn get_github_json<T>(client: &Client, url: &str, label: &str) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let response = client
+        .get(url)
+        .send()
+        .with_context(|| format!("failed to contact {label}"))?;
+
+    let status = response.status();
+    if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
+        anyhow::bail!(
+            "GitHub temporarily refused the release check ({status}). Wait a little before checking again; repeated requests may trigger API rate limiting."
+        );
+    }
+
+    response
+        .error_for_status()
+        .with_context(|| format!("{label} request failed"))?
+        .json()
+        .with_context(|| format!("failed to parse {label} response"))
 }
 
 pub fn install_update(check: &UpdateCheck) -> Result<()> {

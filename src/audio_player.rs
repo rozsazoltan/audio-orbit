@@ -543,6 +543,10 @@ impl AudioPlayer {
             .map(|duration| self.current_start_offset_seconds + duration.as_secs_f32())
     }
 
+    pub fn current_start_offset_seconds(&self) -> f32 {
+        self.current_start_offset_seconds
+    }
+
     fn play_processed_samples(
         &mut self,
         samples: Vec<f32>,

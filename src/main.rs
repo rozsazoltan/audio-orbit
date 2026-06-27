@@ -31,7 +31,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const MAX_UPDATE_CHECKS_PER_SESSION: u8 = 2;
+const UPDATE_CHECKS_BEFORE_CONFIRMATION: u8 = 2;
 const AUTOMATIC_UPDATE_CHECK_INTERVAL_SECONDS: u64 = 60 * 60;
 
 fn min_window_size_for_mode(player_only_mode: bool) -> egui::Vec2 {
@@ -205,6 +205,7 @@ struct AudioOrbitApp {
     last_update_check: Option<updater::UpdateCheck>,
     update_check_receiver: Option<mpsc::Receiver<Result<updater::UpdateCheck, String>>>,
     update_check_count: u8,
+    show_update_check_confirmation: bool,
     media_key_receiver: Option<mpsc::Receiver<media_keys::MediaKeyEvent>>,
     media_key_status: String,
 }
@@ -275,6 +276,7 @@ impl AudioOrbitApp {
                     last_update_check: None,
                     update_check_receiver: None,
                     update_check_count: 0,
+                    show_update_check_confirmation: false,
                     media_key_receiver: None,
                     media_key_status: "Media keys: unavailable".to_owned(),
                 }
@@ -333,6 +335,7 @@ impl AudioOrbitApp {
                 last_update_check: None,
                 update_check_receiver: None,
                 update_check_count: 0,
+                show_update_check_confirmation: false,
                 media_key_receiver: None,
                 media_key_status: "Media keys: unavailable".to_owned(),
             },
@@ -1231,6 +1234,10 @@ impl AudioOrbitApp {
 
     fn apply_current_profile_live(&mut self) {
         let settings = self.current_settings();
+        let position = self.displayed_playback_position_seconds();
+        let Some(path) = self.active_track_path.clone() else {
+            return;
+        };
         let Some(player) = &mut self.player else {
             return;
         };
@@ -1239,14 +1246,13 @@ impl AudioOrbitApp {
             return;
         }
 
-        match player.apply_settings_to_current(settings) {
-            Ok(Some(info)) => {
+        match player.play_file_with_orbit_from(&path, settings, position) {
+            Ok(info) => {
                 self.status_message = "Applied sound profile after settings settled.".to_owned();
                 self.store_playback_metadata(&info);
                 self.last_playback = Some(info);
                 self.error_message = None;
             }
-            Ok(None) => {}
             Err(error) => {
                 self.error_message = Some(error.to_string());
             }
@@ -1279,10 +1285,17 @@ impl AudioOrbitApp {
             return (pending.previous_position + elapsed).min(pending.previous_duration);
         }
 
-        self.player
-            .as_ref()
-            .map(AudioPlayer::playback_position_seconds)
-            .unwrap_or(0.0)
+        let Some(player) = self.player.as_ref() else {
+            return 0.0;
+        };
+
+        let rendered_position = player.playback_position_seconds();
+        let render_start = player.current_start_offset_seconds();
+        if let Some(playback) = &self.last_playback {
+            rendered_to_original_position(rendered_position, render_start, playback)
+        } else {
+            rendered_position
+        }
     }
 
     fn displayed_playback_duration_seconds(&self) -> f32 {
@@ -1290,10 +1303,10 @@ impl AudioOrbitApp {
             return pending.previous_duration;
         }
 
-        self.player
+        self.last_playback
             .as_ref()
-            .and_then(AudioPlayer::playback_duration_seconds)
-            .or_else(|| self.last_playback.as_ref().map(|playback| playback.original_duration_seconds))
+            .map(|playback| playback.original_duration_seconds)
+            .or_else(|| self.player.as_ref().and_then(AudioPlayer::playback_duration_seconds))
             .unwrap_or(0.0)
     }
 
@@ -1301,6 +1314,7 @@ impl AudioOrbitApp {
         if self.show_folder_import_modal
             || self.show_settings_modal
             || self.show_release_modal
+            || self.show_update_check_confirmation
             || self.show_about_modal
             || self.show_radio_add_modal
             || self.details_modal.is_some()
@@ -1502,20 +1516,20 @@ impl AudioOrbitApp {
         }
     }
 
-    fn check_for_updates(&mut self) {
+    fn check_for_updates(&mut self, confirmed_after_limit: bool) {
         if self.update_check_receiver.is_some() {
             self.error_message = Some("An update check is already running.".to_owned());
             return;
         }
 
-        if self.update_check_count >= MAX_UPDATE_CHECKS_PER_SESSION {
-            self.error_message = Some(
-                "Update check limit reached for this app session. Restart Audio Orbit before checking again."
-                    .to_owned(),
-            );
+        if self.update_check_count >= UPDATE_CHECKS_BEFORE_CONFIRMATION && !confirmed_after_limit {
+            self.show_update_check_confirmation = true;
+            self.error_message = None;
+            self.status_message = "Confirm the extra release check before contacting GitHub again.".to_owned();
             return;
         }
 
+        self.show_update_check_confirmation = false;
         self.update_check_count += 1;
 
         match updater::check_for_update(self.state.update_settings.include_prereleases) {
@@ -1527,7 +1541,9 @@ impl AudioOrbitApp {
     }
 
     fn start_automatic_update_check_if_due(&mut self) {
-        if self.update_check_receiver.is_some() || self.update_check_count >= MAX_UPDATE_CHECKS_PER_SESSION {
+        if self.update_check_receiver.is_some()
+            || self.update_check_count >= UPDATE_CHECKS_BEFORE_CONFIRMATION
+        {
             return;
         }
 
@@ -1710,8 +1726,8 @@ impl AudioOrbitApp {
             return;
         }
 
-        let current = player.playback_position_seconds();
-        let duration = player.playback_duration_seconds().unwrap_or(current.max(0.0));
+        let current = self.displayed_playback_position_seconds();
+        let duration = self.displayed_playback_duration_seconds().max(current.max(0.0));
         let next = (current + delta_seconds).clamp(0.0, duration.max(0.0));
         self.seek_current(next);
     }
@@ -2034,6 +2050,10 @@ impl eframe::App for AudioOrbitApp {
 
         if self.show_release_modal {
             self.render_release_modal(context);
+        }
+
+        if self.show_update_check_confirmation {
+            self.render_update_check_confirmation_modal(context);
         }
 
         if self.show_about_modal {
@@ -2677,6 +2697,7 @@ impl AudioOrbitApp {
                         .unwrap_or(station.url.as_str())
                         .to_owned();
 
+                    let row_hovered = next_row_pointer_hovered(ui, row_width, 34.0);
                     let row_response = ui.allocate_ui_with_layout(
                         egui::vec2(row_width, 34.0),
                         egui::Layout::left_to_right(egui::Align::Center),
@@ -2737,16 +2758,25 @@ impl AudioOrbitApp {
                                     egui::Align2::RIGHT_CENTER,
                                     station_info,
                                     egui::FontId::proportional(12.0),
-                                    ui.visuals().widgets.inactive.fg_stroke.color,
+                                    if active || row_hovered {
+                                        ui.visuals().widgets.inactive.fg_stroke.color
+                                    } else {
+                                        ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.50)
+                                    },
                                 );
                             });
                         },
                     );
-                    if row_response.response.secondary_clicked() {
+                    let context_response = ui.interact(
+                        row_response.response.rect,
+                        ui.make_persistent_id(("radio_station_context", index)),
+                        egui::Sense::click(),
+                    );
+                    if row_response.response.secondary_clicked() || context_response.secondary_clicked() {
                         self.state.selected_radio_index = Some(index);
                         self.save_state_silently();
                     }
-                    row_response.response.context_menu(|ui| {
+                    context_response.context_menu(|ui| {
                         if ui.button(ui_icons::label(Icon::Play, "Play station")).clicked() {
                             play_radio_index = Some(index);
                             ui.close_menu();
@@ -2994,6 +3024,7 @@ impl AudioOrbitApp {
                     let path = track.path.clone();
                     let repeat_selection_mode = self.state.playback.repeat_mode == RepeatMode::Selection;
 
+                    let row_hovered = next_row_pointer_hovered(ui, row_width, 32.0);
                     let row_response = ui.allocate_ui_with_layout(
                         egui::vec2(row_width, 32.0),
                         egui::Layout::left_to_right(egui::Align::Center),
@@ -3066,15 +3097,24 @@ impl AudioOrbitApp {
                                     egui::Align2::RIGHT_CENTER,
                                     metadata,
                                     egui::FontId::proportional(12.0),
-                                    ui.visuals().widgets.inactive.fg_stroke.color,
+                                    if is_active || row_hovered {
+                                        ui.visuals().widgets.inactive.fg_stroke.color
+                                    } else {
+                                        ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.50)
+                                    },
                                 );
                             });
                         },
                     );
-                    if row_response.response.secondary_clicked() {
+                    let context_response = ui.interact(
+                        row_response.response.rect,
+                        ui.make_persistent_id(("track_context", index)),
+                        egui::Sense::click(),
+                    );
+                    if row_response.response.secondary_clicked() || context_response.secondary_clicked() {
                         self.selected_track_index = Some(index);
                     }
-                    row_response.response.context_menu(|ui| {
+                    context_response.context_menu(|ui| {
                         if ui.button(ui_icons::label(Icon::Play, "Play now")).clicked() {
                             self.selected_track_index = Some(index);
                             self.play_path(path.clone(), Some(index), 0.0);
@@ -3405,9 +3445,6 @@ impl AudioOrbitApp {
                                         if self.active_radio_index == Some(index) {
                                             detail_row(ui, "Elapsed", &self.radio_elapsed_seconds().map(format_duration).unwrap_or_else(|| "0:00".to_owned()));
                                         }
-                                        let profile = self.state.profiles.get(self.state.selected_profile_index).map(|profile| profile.name.as_str()).unwrap_or("Unknown");
-                                        detail_row(ui, "Active sound profile", profile);
-                                        detail_row(ui, "Orbit mode", if self.current_settings().orbit_enabled { "Enabled" } else { "Disabled" });
                                     } else {
                                         ui.label("This radio station is no longer available.");
                                     }
@@ -3536,6 +3573,67 @@ impl AudioOrbitApp {
         }
 
         self.show_release_modal = is_open;
+    }
+
+    fn render_update_check_confirmation_modal(&mut self, context: &egui::Context) {
+        self.render_modal_backdrop(context, "update_check_confirmation_backdrop");
+        let mut is_open = self.show_update_check_confirmation;
+        let modal_size = self.responsive_modal_size(context, 520.0, 260.0);
+
+        egui::Area::new(egui::Id::new("update_check_confirmation_modal"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(context, |ui| {
+                egui::Frame::window(ui.style()).show(ui, |ui| {
+                    ui.set_min_size(modal_size);
+                    ui.set_max_width(modal_size.x);
+
+                    ui.horizontal(|ui| {
+                        ui.heading(ui_icons::label(Icon::Info, "Confirm release check"));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button(ui_icons::icon(Icon::X)).on_hover_text("Close").clicked() {
+                                is_open = false;
+                            }
+                        });
+                    });
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::Label::new(format!(
+                            "Audio Orbit has already checked GitHub releases {} times in this app session.",
+                            self.update_check_count
+                        ))
+                        .wrap(),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            "More checks are still allowed, but repeated requests may temporarily trigger GitHub API rate limiting. Confirm before contacting GitHub again.",
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(14.0);
+
+                    ui.horizontal_wrapped(|ui| {
+                        let can_confirm = self.update_check_receiver.is_none();
+                        if ui
+                            .add_enabled(can_confirm, egui::Button::new(ui_icons::label(Icon::Search, "Check again")))
+                            .clicked()
+                        {
+                            self.check_for_updates(true);
+                            is_open = false;
+                        }
+
+                        if ui.button("Cancel").clicked() {
+                            is_open = false;
+                        }
+                    });
+                });
+            });
+
+        if context.input(|input| input.key_pressed(egui::Key::Escape)) {
+            is_open = false;
+        }
+
+        self.show_update_check_confirmation = is_open;
     }
 
     fn render_settings_modal(&mut self, context: &egui::Context) {
@@ -3800,16 +3898,16 @@ impl AudioOrbitApp {
             if profile.settings.skip_silence_enabled {
                 profile_changed |= ui
                     .add(
-                        egui::Slider::new(&mut profile.settings.silence_threshold_seconds, 1u8..=12u8)
-                            .text("Silence threshold seconds"),
+                        egui::Slider::new(&mut profile.settings.silence_threshold_seconds, 2u8..=30u8)
+                            .text("Minimum silent gap (sec)"),
                     )
                     .changed();
                 profile_changed |= ui
                     .add(
-                        egui::Slider::new(&mut profile.settings.silence_level_threshold_percent, 1u8..=20u8)
-                            .text("Silence level threshold (%)"),
+                        egui::Slider::new(&mut profile.settings.silence_level_threshold_percent, 0u8..=8u8)
+                            .text("Silence gate level (%)"),
                     )
-                    .on_hover_text("Audio below this level is treated as silence, so low noise floors can be skipped too.")
+                    .on_hover_text("0 means AIMP-like near-silence, not digital zero. Higher values also skip quiet noise floors.")
                     .changed();
             }
         }
@@ -3856,18 +3954,30 @@ impl AudioOrbitApp {
 
         ui.horizontal_wrapped(|ui| {
             let check_status = if self.update_check_receiver.is_some() {
-                format!("Checks used: {}/{} · checking...", self.update_check_count, MAX_UPDATE_CHECKS_PER_SESSION)
+                format!(
+                    "Checks this session: {} · checking...",
+                    self.update_check_count
+                )
+            } else if self.update_check_count >= UPDATE_CHECKS_BEFORE_CONFIRMATION {
+                format!(
+                    "Checks this session: {} · confirmation required for each extra check",
+                    self.update_check_count
+                )
             } else {
-                format!("Checks used: {}/{}", self.update_check_count, MAX_UPDATE_CHECKS_PER_SESSION)
+                format!(
+                    "Checks this session: {} · confirmation starts after {}",
+                    self.update_check_count,
+                    UPDATE_CHECKS_BEFORE_CONFIRMATION
+                )
             };
             ui.label(check_status);
 
-            let can_check = self.update_check_count < MAX_UPDATE_CHECKS_PER_SESSION && self.update_check_receiver.is_none();
+            let can_check = self.update_check_receiver.is_none();
             if ui
                 .add_enabled(can_check, egui::Button::new(ui_icons::label(Icon::Search, "Check releases")))
                 .clicked()
             {
-                self.check_for_updates();
+                self.check_for_updates(false);
             }
 
             if show_modal_button && ui.button(ui_icons::label(Icon::Download, "Open Updates panel")).clicked() {
@@ -3881,10 +3991,10 @@ impl AudioOrbitApp {
             }
         });
 
-        if self.update_check_count >= MAX_UPDATE_CHECKS_PER_SESSION {
+        if self.update_check_count >= UPDATE_CHECKS_BEFORE_CONFIRMATION {
             ui.colored_label(
                 egui::Color32::YELLOW,
-                "Check limit reached. Restart the app before checking again.",
+                "Further release checks are allowed, but Audio Orbit will ask before contacting GitHub again because repeated requests may trigger temporary API rate limiting.",
             );
         }
 
@@ -4405,6 +4515,54 @@ fn format_track_metadata_player_only(track: &Track) -> String {
     format!("{duration} · {size}")
 }
 
+fn next_row_pointer_hovered(ui: &egui::Ui, width: f32, height: f32) -> bool {
+    let rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(width, height));
+    ui.input(|input| {
+        input
+            .pointer
+            .hover_pos()
+            .map(|position| rect.contains(position))
+            .unwrap_or(false)
+    })
+}
+
+fn rendered_to_original_position(rendered_position: f32, render_start: f32, playback: &PlaybackInfo) -> f32 {
+    if playback.silence_ranges.is_empty() {
+        return rendered_position.clamp(0.0, playback.original_duration_seconds.max(0.0));
+    }
+
+    let mut original = rendered_position.max(render_start).max(0.0);
+    for _ in 0..8 {
+        let previous = original;
+        for (start, end) in &playback.silence_ranges {
+            let effective_start = (*start).max(render_start);
+            if *end > effective_start && original >= effective_start && original < *end {
+                original = *end;
+            }
+        }
+
+        let skipped_before = playback
+            .silence_ranges
+            .iter()
+            .filter_map(|(start, end)| {
+                let effective_start = (*start).max(render_start);
+                if *end <= effective_start || *end > original {
+                    None
+                } else {
+                    Some(*end - effective_start)
+                }
+            })
+            .sum::<f32>();
+
+        original = (rendered_position + skipped_before).min(playback.original_duration_seconds.max(0.0));
+        if (original - previous).abs() < 0.001 {
+            break;
+        }
+    }
+
+    original.clamp(0.0, playback.original_duration_seconds.max(0.0))
+}
+
 fn format_duration(seconds: f32) -> String {
     if !seconds.is_finite() || seconds <= 0.0 {
         return "0:00".to_owned();
@@ -4450,7 +4608,11 @@ fn detail_row(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.horizontal_wrapped(|ui| {
         ui.add_sized(
             egui::vec2(140.0, 20.0),
-            egui::Label::new(egui::RichText::new(label).strong()),
+            egui::Label::new(
+                egui::RichText::new(label)
+                    .strong()
+                    .color(ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.72)),
+            ),
         );
         ui.add(egui::Label::new(value).wrap());
     });
