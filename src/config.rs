@@ -314,6 +314,44 @@ impl DspProfile {
 }
 
 
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecognitionSettings {
+    #[serde(default)]
+    pub songrec_command: Option<PathBuf>,
+    #[serde(default = "default_recognition_sample_seconds")]
+    pub sample_seconds: u8,
+    #[serde(default = "default_true")]
+    pub prefer_stream_metadata: bool,
+}
+
+impl Default for RecognitionSettings {
+    fn default() -> Self {
+        Self {
+            songrec_command: None,
+            sample_seconds: default_recognition_sample_seconds(),
+            prefer_stream_metadata: true,
+        }
+    }
+}
+
+impl RecognitionSettings {
+    pub fn clamped_sample_seconds(&self) -> u8 {
+        self.sample_seconds.clamp(6, 20)
+    }
+
+    pub fn command_label(&self) -> String {
+        self.songrec_command
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "songrec from PATH".to_owned())
+    }
+}
+
+fn default_recognition_sample_seconds() -> u8 {
+    12
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RecordingSettings {
     #[serde(default)]
@@ -507,6 +545,8 @@ pub struct SavedState {
     #[serde(default)]
     pub recording: RecordingSettings,
     #[serde(default)]
+    pub recognition: RecognitionSettings,
+    #[serde(default)]
     pub ui: UiSettings,
 }
 
@@ -533,6 +573,7 @@ impl Default for SavedState {
             update_settings: UpdateSettings::default(),
             playback: PlaybackSettings::default(),
             recording: RecordingSettings::default(),
+            recognition: RecognitionSettings::default(),
             ui: UiSettings::default(),
         }
     }

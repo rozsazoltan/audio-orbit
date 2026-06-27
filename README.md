@@ -12,6 +12,7 @@ It is designed for people who keep music in local folders and want an AIMP-like 
   - [Backups](#backups)
   - [Updates](#updates)
   - [Radio recordings](#radio-recordings)
+  - [Free song recognition](#free-song-recognition)
 - [Get started](#get-started)
 - [Usage](#usage)
   - [Create a folder playlist](#create-a-folder-playlist)
@@ -60,6 +61,7 @@ Audio Orbit supports common desktop-player behavior:
 - favorite radio stations and filter the Radio list to favorites
 - show a live radio visualizer with elapsed listening time
 - record the original internet radio stream bytes to timestamped files
+- identify the current track with StreamTitle metadata or a free SongRec-compatible local recognizer
 - remember the window size and position between app launches
 - prevent multiple app instances from running at the same time
 
@@ -95,6 +97,12 @@ Audio files themselves are not embedded in the backup. The backup stores library
 Internet radio recordings are captured from the original stream bytes before volume, orbit, or any playback processing is applied. The toolbar microphone button starts recording the active radio station; while recording, the icon turns red and blinks. Press it again to stop and save the file.
 
 By default, recordings are saved next to the executable in `.audio-orbit-records/`. The folder can be changed from **Settings → Recording**.
+
+### Free song recognition
+
+Audio Orbit includes a 100% free recognition path. Internet radio can be identified instantly from stream metadata when the station provides `StreamTitle`. For audio fingerprint recognition, configure a local SongRec executable in **Settings → Recognition**. Audio Orbit captures a short DSP-free sample from the current local track or live radio stream, writes a temporary WAV file, and asks SongRec to recognize it. No paid API key is required.
+
+SongRec is an unofficial Shazam-compatible recognizer, so this feature is treated as a free external backend rather than an embedded paid service.
 
 ### Updates
 
@@ -148,7 +156,7 @@ Folder groups can be collapsed or expanded in the track list. When a folder play
 
 Use the center track list to browse tracks. Double-click a track to start it immediately.
 
-The top player bar keeps the current title left-aligned and truncates long titles so track names never overlap the technical details or controls. Local track metadata stays separated from the title, and player-only mode shows a reduced metadata set with just duration and size.
+The top player bar keeps the current title left-aligned and truncates long titles so track names never overlap the technical details or controls. Local track metadata stays separated from the title, and player-only mode shows a reduced metadata set with just duration.
 
 ### Play internet radio
 
@@ -183,6 +191,10 @@ Use the heart button next to a track to add or remove it from Favorites. Favorit
 Open **Settings**, then use **Backup and data**.
 
 Export creates a compressed ZIP backup of the full app state. Import restores the state from a ZIP backup.
+
+### Identify the current song
+
+Use the recognition button in the top toolbar. If the active internet radio stream provides the current title, Audio Orbit returns that metadata immediately. Otherwise, Audio Orbit can use the configured SongRec executable to fingerprint a short clean sample from the current playback.
 
 ### Check for updates
 

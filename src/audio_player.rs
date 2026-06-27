@@ -17,6 +17,7 @@ use std::{
 const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 180;
 const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 6;
 const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
+const RADIO_RECOGNITION_BUFFER_SECONDS: usize = 24;
 
 #[derive(Clone, Debug)]
 pub struct PlaybackInfo {
@@ -28,6 +29,62 @@ pub struct PlaybackInfo {
     pub size_bytes: Option<u64>,
     pub waveform: Vec<f32>,
     pub silence_ranges: Vec<(f32, f32)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RecognitionAudioSample {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub samples: Vec<f32>,
+}
+
+impl RecognitionAudioSample {
+    pub fn duration_seconds(&self) -> f32 {
+        if self.sample_rate == 0 || self.channels == 0 {
+            0.0
+        } else {
+            self.samples.len() as f32 / self.channels as f32 / self.sample_rate as f32
+        }
+    }
+
+    pub fn write_wav(&self, path: &Path) -> Result<()> {
+        if self.samples.is_empty() {
+            anyhow::bail!("recognition sample is empty");
+        }
+        if self.sample_rate == 0 || self.channels == 0 {
+            anyhow::bail!("recognition sample has an invalid audio format");
+        }
+
+        let mut file = File::create(path)
+            .with_context(|| format!("failed to create recognition sample: {}", path.display()))?;
+        let bits_per_sample = 16u16;
+        let bytes_per_sample = bits_per_sample / 8;
+        let block_align = self.channels.saturating_mul(bytes_per_sample);
+        let byte_rate = self.sample_rate.saturating_mul(block_align as u32);
+        let data_size = (self.samples.len() * bytes_per_sample as usize) as u32;
+        let chunk_size = 36u32.saturating_add(data_size);
+
+        file.write_all(b"RIFF")?;
+        file.write_all(&chunk_size.to_le_bytes())?;
+        file.write_all(b"WAVE")?;
+        file.write_all(b"fmt ")?;
+        file.write_all(&16u32.to_le_bytes())?;
+        file.write_all(&1u16.to_le_bytes())?;
+        file.write_all(&self.channels.to_le_bytes())?;
+        file.write_all(&self.sample_rate.to_le_bytes())?;
+        file.write_all(&byte_rate.to_le_bytes())?;
+        file.write_all(&block_align.to_le_bytes())?;
+        file.write_all(&bits_per_sample.to_le_bytes())?;
+        file.write_all(b"data")?;
+        file.write_all(&data_size.to_le_bytes())?;
+
+        for sample in &self.samples {
+            let scaled = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+            file.write_all(&scaled.to_le_bytes())?;
+        }
+        file.flush()?;
+        Ok(())
+    }
 }
 
 pub struct PreparedPlayback {
@@ -125,6 +182,49 @@ struct RadioVisualizerState {
 
 type RadioVisualizerHandle = Arc<Mutex<RadioVisualizerState>>;
 
+#[derive(Default)]
+struct RecognitionSampleBuffer {
+    sample_rate: u32,
+    samples: VecDeque<f32>,
+}
+
+type RecognitionSampleHandle = Arc<Mutex<RecognitionSampleBuffer>>;
+
+impl RecognitionSampleBuffer {
+    fn push_chunk(&mut self, sample_rate: u32, samples: &[f32]) {
+        if sample_rate == 0 || samples.is_empty() {
+            return;
+        }
+        if self.sample_rate != sample_rate {
+            self.sample_rate = sample_rate;
+            self.samples.clear();
+        }
+        self.samples.extend(samples.iter().copied().map(|sample| sample.clamp(-1.0, 1.0)));
+        let max_samples = sample_rate as usize * RADIO_RECOGNITION_BUFFER_SECONDS;
+        while self.samples.len() > max_samples {
+            self.samples.pop_front();
+        }
+    }
+
+    fn snapshot(&self, seconds: f32) -> Option<RecognitionAudioSample> {
+        if self.sample_rate == 0 || self.samples.is_empty() {
+            return None;
+        }
+        let take = (seconds.max(1.0) * self.sample_rate as f32).round() as usize;
+        let start = self.samples.len().saturating_sub(take);
+        let samples = self.samples.iter().skip(start).copied().collect::<Vec<_>>();
+        if samples.is_empty() {
+            None
+        } else {
+            Some(RecognitionAudioSample {
+                sample_rate: self.sample_rate,
+                channels: 1,
+                samples,
+            })
+        }
+    }
+}
+
 struct LiveRadioSource<S> {
     inner: S,
     settings: DspSettings,
@@ -138,10 +238,17 @@ struct LiveRadioSource<S> {
     visualizer_bucket_energy: f64,
     visualizer_bucket_sample_count: usize,
     visualizer_sample_counter: usize,
+    recognition: RecognitionSampleHandle,
+    recognition_chunk: Vec<f32>,
 }
 
 impl<S: Source<Item = f32>> LiveRadioSource<S> {
-    fn new(inner: S, settings: DspSettings, visualizer: RadioVisualizerHandle) -> Self {
+    fn new(
+        inner: S,
+        settings: DspSettings,
+        visualizer: RadioVisualizerHandle,
+        recognition: RecognitionSampleHandle,
+    ) -> Self {
         let input_channels = inner.channels().max(1);
         let sample_rate = inner.sample_rate().max(1);
         Self {
@@ -157,6 +264,8 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
             visualizer_bucket_energy: 0.0,
             visualizer_bucket_sample_count: 0,
             visualizer_sample_counter: 0,
+            recognition,
+            recognition_chunk: Vec::with_capacity((sample_rate as usize / 4).max(256)),
         }
     }
 
@@ -244,8 +353,22 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
         self.visualizer_sample_counter = 0;
     }
 
+    fn record_recognition_sample(&mut self, mono: f32) {
+        self.recognition_chunk.push(mono.clamp(-1.0, 1.0));
+        let flush_samples = (self.sample_rate.max(1) as usize / 5).max(1024);
+        if self.recognition_chunk.len() < flush_samples {
+            return;
+        }
+
+        if let Ok(mut buffer) = self.recognition.lock() {
+            buffer.push_chunk(self.sample_rate, &self.recognition_chunk);
+        }
+        self.recognition_chunk.clear();
+    }
+
     fn process_frame(&mut self, stereo: [f32; 2], mono: f32) -> [f32; 2] {
         self.record_visualizer_peak(stereo[0].abs().max(stereo[1].abs()).max(mono.abs()));
+        self.record_recognition_sample(mono);
         let output_level = self.settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
         if !self.settings.orbit_enabled {
             return [
@@ -334,6 +457,7 @@ pub struct AudioPlayer {
     volume_percent: u8,
     radio_visualizer: RadioVisualizerHandle,
     radio_recorder: RadioRecordingHandle,
+    radio_recognition: RecognitionSampleHandle,
 }
 
 impl AudioPlayer {
@@ -359,6 +483,7 @@ impl AudioPlayer {
             volume_percent: 100,
             radio_visualizer: Arc::new(Mutex::new(RadioVisualizerState::default())),
             radio_recorder: Arc::new(Mutex::new(None)),
+            radio_recognition: Arc::new(Mutex::new(RecognitionSampleBuffer::default())),
         })
     }
 
@@ -402,8 +527,10 @@ impl AudioPlayer {
         if !keep_visualizer_history {
             self.radio_visualizer = Arc::new(Mutex::new(RadioVisualizerState::default()));
         }
+        self.radio_recognition = Arc::new(Mutex::new(RecognitionSampleBuffer::default()));
         let visualizer = Arc::clone(&self.radio_visualizer);
-        let radio_source = LiveRadioSource::new(decoder.convert_samples::<f32>(), settings, visualizer);
+        let recognition = Arc::clone(&self.radio_recognition);
+        let radio_source = LiveRadioSource::new(decoder.convert_samples::<f32>(), settings, visualizer, recognition);
         let sink = Sink::try_new(&self.stream_handle)
             .context("failed to create audio playback sink")?;
         sink.set_volume(self.volume_gain());
@@ -552,6 +679,30 @@ impl AudioPlayer {
         }
     }
 
+    pub fn radio_recognition_sample(&self, seconds: f32) -> Result<Option<RecognitionAudioSample>> {
+        if self.current_radio_url.is_none() {
+            return Ok(None);
+        }
+
+        let sample = self
+            .radio_recognition
+            .lock()
+            .map_err(|_| anyhow::anyhow!("radio recognition buffer lock poisoned"))?
+            .snapshot(seconds);
+
+        if let Some(sample) = &sample {
+            if sample.duration_seconds() < 3.0 {
+                anyhow::bail!("wait a few seconds before identifying this internet radio stream");
+            }
+        }
+
+        Ok(sample)
+    }
+
+    pub fn capture_file_recognition_sample(path: &Path, start_seconds: f32, seconds: f32) -> Result<RecognitionAudioSample> {
+        capture_file_recognition_sample(path, start_seconds, seconds)
+    }
+
     pub fn prepare_file(path: PathBuf, settings: DspSettings, start_seconds: f32) -> Result<PreparedPlayback> {
         let (processed_samples, render_info, sample_rate) = render_file_data(&path, settings, start_seconds)?;
         Ok(PreparedPlayback {
@@ -679,6 +830,7 @@ impl AudioPlayer {
         self.current_settings = None;
         self.current_radio_url = None;
         self.current_radio_extension = "mp3".to_owned();
+        self.radio_recognition = Arc::new(Mutex::new(RecognitionSampleBuffer::default()));
     }
 
     pub fn pause_or_resume(&mut self) {
@@ -859,6 +1011,56 @@ pub fn current_default_output_device_name() -> String {
     host.default_output_device()
         .and_then(|device| device.name().ok())
         .unwrap_or_else(|| "Default output device".to_owned())
+}
+
+fn capture_file_recognition_sample(path: &Path, start_seconds: f32, seconds: f32) -> Result<RecognitionAudioSample> {
+    let file = File::open(path)
+        .with_context(|| format!("failed to open audio file for recognition: {}", path.display()))?;
+    let decoder = Decoder::new(BufReader::new(file))
+        .with_context(|| format!("failed to decode audio file for recognition: {}", path.display()))?;
+
+    let channels = decoder.channels().max(1) as usize;
+    let sample_rate = decoder.sample_rate().max(1);
+    let input_samples: Vec<f32> = decoder.convert_samples::<f32>().collect();
+    if input_samples.is_empty() {
+        anyhow::bail!("the selected audio file did not contain any decoded samples");
+    }
+
+    let total_frames = input_samples.len() / channels;
+    if total_frames == 0 {
+        anyhow::bail!("the selected audio file did not contain any complete audio frames");
+    }
+
+    let wanted_frames = (seconds.max(3.0) * sample_rate as f32).round() as usize;
+    let requested_start = (start_seconds.max(0.0) * sample_rate as f32).round() as usize;
+    let start_frame = requested_start.min(total_frames.saturating_sub(1));
+    let end_frame = (start_frame + wanted_frames).min(total_frames);
+    let mut samples = Vec::with_capacity(end_frame.saturating_sub(start_frame));
+
+    for frame in start_frame..end_frame {
+        let frame_offset = frame * channels;
+        let mut sum = 0.0_f32;
+        let mut count = 0usize;
+        for channel in 0..channels {
+            if let Some(sample) = input_samples.get(frame_offset + channel) {
+                sum += *sample;
+                count += 1;
+            }
+        }
+        if count > 0 {
+            samples.push((sum / count as f32).clamp(-1.0, 1.0));
+        }
+    }
+
+    if samples.len() < sample_rate as usize {
+        anyhow::bail!("recognition sample is too short");
+    }
+
+    Ok(RecognitionAudioSample {
+        sample_rate,
+        channels: 1,
+        samples,
+    })
 }
 
 fn render_file_data(

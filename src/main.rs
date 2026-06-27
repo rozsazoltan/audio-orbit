@@ -5,6 +5,7 @@ mod config;
 mod dsp;
 mod icon;
 mod media_keys;
+mod recognition;
 mod single_instance;
 mod ui_icons;
 mod updater;
@@ -126,6 +127,18 @@ fn initial_window_position(state: &SavedState) -> Option<egui::Pos2> {
     saved_window_geometry_for_mode(state, state.ui.player_only_mode)
         .or_else(|| saved_window_geometry_for_mode(state, !state.ui.player_only_mode))
         .map(|geometry| egui::pos2(geometry.x, geometry.y))
+}
+
+fn recognize_audio_sample_with_songrec(
+    sample: audio_player::RecognitionAudioSample,
+    command: Option<PathBuf>,
+) -> anyhow::Result<recognition::RecognitionResult> {
+    let sample_path = recognition::temporary_sample_path();
+    sample.write_wav(&sample_path)?;
+    recognition::ensure_sample_exists(&sample_path)?;
+    let result = recognition::recognize_with_songrec(command, &sample_path);
+    recognition::cleanup_sample(&sample_path);
+    result
 }
 
 
@@ -268,6 +281,8 @@ struct AudioOrbitApp {
     update_check_receiver: Option<mpsc::Receiver<Result<updater::UpdateCheck, String>>>,
     update_check_count: u8,
     show_update_check_confirmation: bool,
+    recognition_receiver: Option<mpsc::Receiver<Result<recognition::RecognitionResult, String>>>,
+    recognition_started_at: Option<Instant>,
     media_key_receiver: Option<mpsc::Receiver<media_keys::MediaKeyEvent>>,
     media_key_status: String,
 }
@@ -346,6 +361,8 @@ impl AudioOrbitApp {
                     update_check_receiver: None,
                     update_check_count: 0,
                     show_update_check_confirmation: false,
+                    recognition_receiver: None,
+                    recognition_started_at: None,
                     media_key_receiver: None,
                     media_key_status: "Media keys: unavailable".to_owned(),
                 }
@@ -412,6 +429,8 @@ impl AudioOrbitApp {
                 update_check_receiver: None,
                 update_check_count: 0,
                 show_update_check_confirmation: false,
+                recognition_receiver: None,
+                recognition_started_at: None,
                 media_key_receiver: None,
                 media_key_status: "Media keys: unavailable".to_owned(),
             },
@@ -1965,24 +1984,128 @@ impl AudioOrbitApp {
     }
 
     fn recognize_current_audio(&mut self) {
-        if let Some(title) = self
-            .active_radio_title
-            .clone()
-            .filter(|title| !title.trim().is_empty())
-        {
-            self.status_message = format!("Recognized from radio stream metadata: {title}.");
-            self.error_message = None;
+        if self.recognition_receiver.is_some() {
+            self.status_message = "Audio recognition is already running.".to_owned();
+            return;
+        }
+
+        if self.state.recognition.prefer_stream_metadata {
+            if let Some(title) = self
+                .active_radio_title
+                .clone()
+                .filter(|title| !title.trim().is_empty())
+            {
+                self.status_message = format!("Identified from radio stream metadata: {title}.");
+                self.error_message = None;
+                return;
+            }
+        }
+
+        let sample_seconds = self.state.recognition.clamped_sample_seconds() as f32;
+        let command = self.state.recognition.songrec_command.clone();
+
+        if self.active_radio_index.is_some() {
+            let Some(player) = &self.player else {
+                self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+                return;
+            };
+
+            match player.radio_recognition_sample(sample_seconds) {
+                Ok(Some(sample)) => {
+                    self.start_recognition_worker_from_sample(sample, command, "internet radio");
+                }
+                Ok(None) => {
+                    self.error_message = Some("Start an internet radio station before recognition.".to_owned());
+                }
+                Err(error) => {
+                    self.error_message = Some(error.to_string());
+                }
+            }
             return;
         }
 
         if let Some(path) = self.active_track_path.clone() {
-            let title = display_file_name(&path);
-            self.status_message = format!("Current local track candidate: {title}.");
-            self.error_message = Some("True Shazam-style fingerprint recognition needs a supported recognition backend; Shazam's browser extension is not embedded in Audio Orbit.".to_owned());
+            let position = self.displayed_playback_position_seconds();
+            let start_seconds = (position - 4.0).max(0.0);
+            self.start_recognition_worker_from_file(path, start_seconds, sample_seconds, command);
             return;
         }
 
         self.error_message = Some("Start a track or internet radio station before recognition.".to_owned());
+    }
+
+    fn start_recognition_worker_from_sample(
+        &mut self,
+        sample: audio_player::RecognitionAudioSample,
+        command: Option<PathBuf>,
+        source_label: &'static str,
+    ) {
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = recognize_audio_sample_with_songrec(sample, command)
+                .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+
+        self.recognition_receiver = Some(receiver);
+        self.recognition_started_at = Some(Instant::now());
+        self.status_message = format!("Identifying {source_label} with free SongRec-compatible recognition...");
+        self.error_message = None;
+    }
+
+    fn start_recognition_worker_from_file(
+        &mut self,
+        path: PathBuf,
+        start_seconds: f32,
+        sample_seconds: f32,
+        command: Option<PathBuf>,
+    ) {
+        let title = display_file_name(&path);
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = AudioPlayer::capture_file_recognition_sample(&path, start_seconds, sample_seconds)
+                .and_then(|sample| recognize_audio_sample_with_songrec(sample, command))
+                .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+
+        self.recognition_receiver = Some(receiver);
+        self.recognition_started_at = Some(Instant::now());
+        self.status_message = format!("Identifying {title} with free SongRec-compatible recognition...");
+        self.error_message = None;
+    }
+
+    fn process_recognition_events(&mut self) {
+        let Some(receiver) = &self.recognition_receiver else {
+            return;
+        };
+
+        match receiver.try_recv() {
+            Ok(Ok(result)) => {
+                self.recognition_receiver = None;
+                self.recognition_started_at = None;
+                self.status_message = format!("Recognized: {}.", result.display_label());
+                self.error_message = None;
+            }
+            Ok(Err(error)) => {
+                self.recognition_receiver = None;
+                self.recognition_started_at = None;
+                self.error_message = Some(error);
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                if let Some(started_at) = self.recognition_started_at {
+                    self.status_message = format!(
+                        "Identifying audio... {}",
+                        format_duration(started_at.elapsed().as_secs_f32())
+                    );
+                }
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.recognition_receiver = None;
+                self.recognition_started_at = None;
+                self.error_message = Some("Audio recognition worker stopped unexpectedly.".to_owned());
+            }
+        }
     }
 
     fn save_state_silently(&mut self) {
@@ -2368,6 +2491,7 @@ impl eframe::App for AudioOrbitApp {
 
         self.process_media_key_events();
         self.process_update_check_events();
+        self.process_recognition_events();
         self.process_escape_navigation(context);
         self.process_keyboard_shortcuts(context);
         self.process_radio_title_events();
@@ -2698,10 +2822,12 @@ impl AudioOrbitApp {
                 ui.separator();
             }
 
-            let can_recognize = has_now_playing;
+            let recognition_running = self.recognition_receiver.is_some();
+            let can_recognize = has_now_playing && !recognition_running;
+            let recognition_label = if recognition_running { "…" } else { "Ⓢ" };
             if ui
-                .add_enabled(can_recognize, egui::Button::new(egui::RichText::new("Ⓢ").strong()))
-                .on_hover_text("Identify the current song from stream metadata or a future recognition backend")
+                .add_enabled(can_recognize, egui::Button::new(egui::RichText::new(recognition_label).strong()))
+                .on_hover_text("Identify the current song with free SongRec-compatible recognition")
                 .clicked()
             {
                 self.recognize_current_audio();
@@ -4021,6 +4147,12 @@ impl AudioOrbitApp {
 
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
+            self.render_recognition_settings_section(ui);
+        });
+        ui.add_space(12.0);
+
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
             self.render_profile_panel(ui);
         });
     }
@@ -4320,6 +4452,54 @@ impl AudioOrbitApp {
         }
 
         self.show_radio_add_modal = is_open;
+    }
+
+    fn render_recognition_settings_section(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Recognition");
+        ui.small("100% free recognition mode. Audio Orbit first uses radio metadata when enabled, then can call a local SongRec executable for Shazam-compatible fingerprinting without paid API keys.");
+
+        let metadata_first_changed = ui
+            .checkbox(
+                &mut self.state.recognition.prefer_stream_metadata,
+                "Use radio StreamTitle metadata first",
+            )
+            .on_hover_text("When internet radio already provides the current track title, Audio Orbit returns that instantly and avoids an external lookup.")
+            .changed();
+        if metadata_first_changed {
+            self.save_state_silently();
+        }
+
+        ui.add_space(6.0);
+        ui.label("SongRec executable");
+        ui.horizontal_wrapped(|ui| {
+            ui.monospace(self.state.recognition.command_label());
+            if ui.button(ui_icons::label(Icon::FolderOpen, "Choose...")) .clicked() {
+                if let Some(path) = FileDialog::new().pick_file() {
+                    self.state.recognition.songrec_command = Some(path.clone());
+                    self.status_message = format!("SongRec executable set to {}.", path.display());
+                    self.error_message = None;
+                    self.save_state_silently();
+                }
+            }
+            if ui.button("Use PATH").clicked() {
+                self.state.recognition.songrec_command = None;
+                self.status_message = "SongRec executable reset to PATH lookup.".to_owned();
+                self.error_message = None;
+                self.save_state_silently();
+            }
+        });
+
+        let mut sample_seconds = self.state.recognition.clamped_sample_seconds();
+        if ui
+            .add(egui::Slider::new(&mut sample_seconds, 6..=20).text("sample seconds"))
+            .on_hover_text("Longer samples can improve recognition but take slightly longer to process.")
+            .changed()
+        {
+            self.state.recognition.sample_seconds = sample_seconds;
+            self.save_state_silently();
+        }
+
+        ui.small("SongRec is free/open-source, but it is an unofficial Shazam-compatible recognizer. Audio Orbit sends a generated fingerprint through SongRec, not raw DSP/orbit output.");
     }
 
     fn render_recording_settings_section(&mut self, ui: &mut egui::Ui) {
