@@ -1,6 +1,6 @@
 use rustfft::{num_complex::Complex, FftPlanner};
 
-const DEFAULT_FFT_SIZE: usize = 2048;
+const DEFAULT_FFT_SIZE: usize = 4096;
 const MIN_FREQUENCY_HZ: f32 = 28.0;
 const MAX_FREQUENCY_HZ: f32 = 16_000.0;
 
@@ -69,11 +69,11 @@ impl LiveSpectrumAnalyzer {
         ordered.extend_from_slice(&self.ring[..self.ring_pos]);
         let target = self.analyzer.analyze_window(&ordered);
 
-        // AIMP-style smooth envelope: transients can rise quickly, but release is slower.
+        // AIMP-style smooth envelope: transients rise clearly, then decay slowly instead of flickering.
         let smoothed = if target > self.previous_level {
-            self.previous_level * 0.42 + target * 0.58
+            self.previous_level * 0.58 + target * 0.42
         } else {
-            self.previous_level * 0.88 + target * 0.12
+            self.previous_level * 0.93 + target * 0.07
         };
         self.previous_level = smoothed.clamp(0.0, 1.0);
         Some(self.previous_level)
@@ -81,6 +81,7 @@ impl LiveSpectrumAnalyzer {
 }
 
 struct SpectrumAnalyzer {
+    sample_rate: u32,
     fft_size: usize,
     window: Vec<f32>,
     buffer: Vec<Complex<f32>>,
@@ -148,21 +149,21 @@ impl SpectrumAnalyzer {
         let spectral = self.perceptual_spectral_level();
         let loudness = db_to_unit(20.0 * rms.max(0.000_001).log10(), -58.0, -7.0, 1.38);
 
-        // Spectrum carries the visual shape; RMS keeps dense passages readable without saturating everything.
-        (spectral * 0.78 + loudness * 0.22).clamp(0.0, 1.0)
+        // Spectrum carries the musical shape; RMS keeps dense passages readable without saturating everything.
+        (spectral * 0.84 + loudness * 0.16).clamp(0.0, 1.0)
     }
 
     fn perceptual_spectral_level(&self) -> f32 {
         let nyquist = self.sample_rate as f32 / 2.0;
         let max_frequency = MAX_FREQUENCY_HZ.min(nyquist.max(MIN_FREQUENCY_HZ));
         let bands = [
-            (MIN_FREQUENCY_HZ, 80.0, 0.62),
-            (80.0, 180.0, 0.74),
-            (180.0, 420.0, 0.92),
-            (420.0, 1_000.0, 1.06),
-            (1_000.0, 2_600.0, 1.12),
-            (2_600.0, 6_000.0, 1.02),
-            (6_000.0, max_frequency, 0.78),
+            (MIN_FREQUENCY_HZ, 80.0, 0.54),
+            (80.0, 180.0, 0.70),
+            (180.0, 420.0, 0.94),
+            (420.0, 1_000.0, 1.08),
+            (1_000.0, 2_600.0, 1.14),
+            (2_600.0, 6_000.0, 1.05),
+            (6_000.0, max_frequency, 0.76),
         ];
 
         let mut weighted_sum = 0.0_f32;
@@ -183,7 +184,7 @@ impl SpectrumAnalyzer {
             0.0
         } else {
             let average = weighted_sum / weight_sum;
-            (average * 0.64 + strongest * 0.36).clamp(0.0, 1.0)
+            (average * 0.72 + strongest * 0.28).clamp(0.0, 1.0)
         }
     }
 
@@ -214,7 +215,7 @@ impl SpectrumAnalyzer {
 
         let energy = (sum / count as f64).sqrt() as f32;
         let db = 20.0 * energy.max(0.000_001).log10();
-        db_to_unit(db, -78.0, -18.0, 1.18)
+        db_to_unit(db, -82.0, -16.0, 1.28)
     }
 }
 

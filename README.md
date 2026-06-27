@@ -100,9 +100,11 @@ Saved files use the stop-time based format `audio-orbit-records-yyyy-mm-dd-hh-mm
 
 ### Free song recognition
 
-Audio Orbit includes a 100% free recognition path. Internet radio can be identified instantly from stream metadata when the station provides `StreamTitle`. For audio fingerprint recognition, configure a local SongRec executable in **Settings > Recognition**. Audio Orbit captures a short DSP-free sample from the current local track or live radio stream, writes a temporary WAV file, and asks SongRec to recognize it. No paid API key is required.
+Audio Orbit includes an optional 100% free recognition path. Recognition is off by default. When it is enabled, internet radio can be identified instantly from stream metadata when the station provides `StreamTitle`. For audio fingerprint recognition, Audio Orbit can install and manage SongRec in the portable `.audio-orbit-dll` helper folder, or you can set a custom SongRec executable in **Settings > Recognition**.
 
-SongRec is an unofficial Shazam-compatible recognizer, so this feature is treated as a free external backend rather than an embedded paid service.
+Audio Orbit captures a short DSP-free sample from the current local track or live radio stream, writes a temporary WAV file, and asks SongRec to recognize it. No paid API key is required. When automatic SongRec management is enabled, Audio Orbit checks SongRec releases at most once per day on startup and also provides manual Check / Install / update buttons.
+
+SongRec is an unofficial Shazam-compatible recognizer, so this feature is treated as a free optional external backend rather than a required runtime dependency.
 
 ### Updates
 
@@ -194,7 +196,7 @@ Export creates a compressed ZIP backup of the full app state. Import restores th
 
 ### Identify the current song
 
-Use the recognition button in the top toolbar. If the active internet radio stream provides the current title, Audio Orbit returns that metadata immediately. Otherwise, Audio Orbit can use the configured SongRec executable to fingerprint a short clean sample from the current playback.
+Enable recognition in **Settings > Recognition**, then use the recognition button in the top toolbar. If the active internet radio stream provides the current title, Audio Orbit returns that metadata immediately. Otherwise, Audio Orbit can install or use SongRec to fingerprint a short clean sample from the current playback.
 
 ### Check for updates
 
@@ -208,7 +210,7 @@ If an update is available, Audio Orbit can replace its current executable and re
 
 Audio Orbit remembers the window size and position when the app closes and restores the same layout on the next launch. Player-only and full-layout sizes are kept separately, and switching modes restores that mode's own saved width and height.
 
-Settings, release watcher, update, folder import, About content, and Details dialogs use responsive modal layouts with internal scrolling on small windows.
+Settings, Updates, Backup, About, folder import, add-radio, and Details dialogs use responsive modal layouts with internal scrolling on small windows and a fixed bottom info area for status/error messages.
 
 Only one Audio Orbit instance can run at a time. If the app is already open, starting the executable again exits immediately instead of opening a second player window.
 
@@ -244,6 +246,6 @@ Copyright (C) 2020–present [Zoltán Rózsa](https://github.com/rozsazoltan)
 
 ### Notes on waveform analysis and recognition
 
-Audio Orbit renders local and live radio waveform bars through a RustFFT-based spectrum analysis path, so the visible bars are based on frequency energy and loudness rather than raw sample peaks only. This keeps bass-heavy passages from turning every bar into the same full-height column.
+Audio Orbit renders local and live radio waveform bars through a RustFFT-based spectrum analysis path, so the visible bars are based on frequency energy and loudness rather than raw sample peaks only. This keeps bass-heavy passages from turning every bar into the same full-height column. Live radio uses a smoothed 15-second AIMP-style visible window so the visualizer feels stable instead of flickery.
 
-Free recognition uses radio stream metadata first when available. If a real audio lookup is needed, place `songrec.exe` or `songrec-cli.exe` in the `.audio-orbit-dll` folder next to Audio Orbit, or set a custom executable path in Settings > Recognition. Recognized titles are copied to the clipboard automatically.
+Free recognition uses radio stream metadata first when available. If a real audio lookup is needed, Audio Orbit can install or update `songrec.exe` / `songrec-cli.exe` in the managed `.audio-orbit-dll` folder, or use a custom executable path from Settings > Recognition. Recognized titles are copied to the clipboard automatically.

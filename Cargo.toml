@@ -16,6 +16,7 @@ lucide-icons = "1.21"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rfd = "0.15"
 rodio = { version = "0.19", features = ["symphonia-all"] }
+rustfft = "6"
 semver = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -318,19 +318,34 @@ impl DspProfile {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RecognitionSettings {
     #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
     pub songrec_command: Option<PathBuf>,
     #[serde(default = "default_recognition_sample_seconds")]
     pub sample_seconds: u8,
     #[serde(default = "default_true")]
     pub prefer_stream_metadata: bool,
+    #[serde(default = "default_true")]
+    pub manage_songrec_automatically: bool,
+    #[serde(default = "default_true")]
+    pub auto_update_songrec: bool,
+    #[serde(default)]
+    pub last_songrec_auto_check_unix_seconds: u64,
+    #[serde(default)]
+    pub installed_songrec_version: Option<String>,
 }
 
 impl Default for RecognitionSettings {
     fn default() -> Self {
         Self {
+            enabled: false,
             songrec_command: None,
             sample_seconds: default_recognition_sample_seconds(),
             prefer_stream_metadata: true,
+            manage_songrec_automatically: true,
+            auto_update_songrec: true,
+            last_songrec_auto_check_unix_seconds: 0,
+            installed_songrec_version: None,
         }
     }
 }
@@ -344,7 +359,7 @@ impl RecognitionSettings {
         self.songrec_command
             .as_ref()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "Auto: .audio-orbit-dll, app folder, then PATH".to_owned())
+            .unwrap_or_else(|| "Auto: managed .audio-orbit-dll, app folder, then PATH".to_owned())
     }
 }
 

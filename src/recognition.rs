@@ -1,13 +1,58 @@
 use crate::config::external_tools_dir;
 use anyhow::{Context, Result};
+use reqwest::{blocking::Client, StatusCode};
+use semver::Version;
+use serde::Deserialize;
 use serde_json::Value;
 use std::{
     env,
     fs,
+    io::{self, Cursor},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+const SONGREC_RELEASES_API: &str = "https://api.github.com/repos/marin-m/SongRec/releases";
+const SONGREC_USER_AGENT: &str = "Audio-Orbit-SongRec-Manager";
+const SONGREC_VERSION_FILE: &str = "songrec.version";
+
+
+#[derive(Clone, Debug)]
+pub struct SongRecToolStatus {
+    pub installed_version: Option<String>,
+    pub latest_version: Option<String>,
+    pub asset_name: Option<String>,
+    pub asset_download_url: Option<String>,
+    pub executable_path: Option<PathBuf>,
+    pub is_update_available: bool,
+}
+
+impl SongRecToolStatus {
+    pub fn is_installed(&self) -> bool {
+        self.executable_path.is_some()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct InstalledSongRec {
+    pub version: Option<String>,
+    pub executable_path: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    draft: bool,
+    prerelease: bool,
+    assets: Vec<GitHubAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubAsset {
+    name: String,
+    browser_download_url: String,
+}
 
 #[derive(Clone, Debug)]
 pub struct RecognitionResult {
@@ -99,8 +144,9 @@ fn songrec_candidates(command_path: Option<PathBuf>, sample_path: &Path) -> Vec<
         commands.push((command_path, "configured SongRec".to_owned()));
     } else {
         let tools = external_tools_dir();
-        commands.push((tools.join("songrec.exe"), ".audio-orbit-dll songrec.exe".to_owned()));
         commands.push((tools.join("songrec-cli.exe"), ".audio-orbit-dll songrec-cli.exe".to_owned()));
+        commands.push((tools.join("songrec.exe"), ".audio-orbit-dll songrec.exe".to_owned()));
+        commands.push((tools.join("songrec-cli"), ".audio-orbit-dll songrec-cli".to_owned()));
         commands.push((tools.join("songrec"), ".audio-orbit-dll songrec".to_owned()));
         if let Ok(current_exe) = env::current_exe() {
             if let Some(folder) = current_exe.parent() {
@@ -256,4 +302,187 @@ pub fn ensure_sample_exists(path: &Path) -> Result<()> {
         anyhow::bail!("recognition sample is too small: {}", path.display());
     }
     Ok(())
+}
+
+
+pub fn installed_songrec_executable() -> Option<PathBuf> {
+    managed_songrec_candidates()
+        .into_iter()
+        .find(|path| path.is_file())
+}
+
+pub fn installed_songrec_version() -> Option<String> {
+    fs::read_to_string(external_tools_dir().join(SONGREC_VERSION_FILE))
+        .ok()
+        .and_then(|value| non_empty(&value))
+}
+
+pub fn check_songrec_tool(include_prereleases: bool) -> Result<SongRecToolStatus> {
+    let executable_path = installed_songrec_executable();
+    let installed_version = installed_songrec_version();
+    let client = Client::builder().user_agent(SONGREC_USER_AGENT).build()?;
+    let releases: Vec<GitHubRelease> = get_github_json(&client, SONGREC_RELEASES_API, "SongRec GitHub releases")?;
+    let release = select_songrec_release(releases, include_prereleases)
+        .context("no suitable SongRec GitHub release was found")?;
+    let latest_version = release_version_label(&release);
+    let asset = release.assets.iter().find(|asset| is_windows_songrec_asset(&asset.name));
+    let is_update_available = match (&installed_version, &latest_version) {
+        (Some(installed), Some(latest)) => parse_version(latest) > parse_version(installed),
+        (None, Some(_)) => executable_path.is_none(),
+        _ => executable_path.is_none(),
+    } && asset.is_some();
+
+    Ok(SongRecToolStatus {
+        installed_version,
+        latest_version,
+        asset_name: asset.map(|asset| asset.name.clone()),
+        asset_download_url: asset.map(|asset| asset.browser_download_url.clone()),
+        executable_path,
+        is_update_available,
+    })
+}
+
+pub fn install_or_update_songrec(download_url: &str, version: Option<&str>, asset_name: Option<&str>) -> Result<InstalledSongRec> {
+    let tools_dir = external_tools_dir();
+    fs::create_dir_all(&tools_dir)
+        .with_context(|| format!("failed to create Audio Orbit tools folder: {}", tools_dir.display()))?;
+
+    let client = Client::builder().user_agent(SONGREC_USER_AGENT).build()?;
+    let bytes = client
+        .get(download_url)
+        .send()
+        .context("failed to download SongRec release asset")?
+        .error_for_status()
+        .context("SongRec release asset download failed")?
+        .bytes()
+        .context("failed to read SongRec release asset")?;
+
+    let asset_name = asset_name.unwrap_or("songrec.exe");
+    let executable_path = if asset_name.to_ascii_lowercase().ends_with(".zip") {
+        install_songrec_from_zip(&tools_dir, &bytes)?
+    } else {
+        let target = tools_dir.join(preferred_songrec_exe_name(asset_name));
+        fs::write(&target, &bytes)
+            .with_context(|| format!("failed to write SongRec executable: {}", target.display()))?;
+        target
+    };
+
+    if let Some(version) = version.and_then(non_empty) {
+        fs::write(tools_dir.join(SONGREC_VERSION_FILE), version.as_bytes())
+            .with_context(|| "failed to write SongRec version marker")?;
+    }
+
+    Ok(InstalledSongRec {
+        version: version.and_then(non_empty),
+        executable_path,
+    })
+}
+
+fn managed_songrec_candidates() -> Vec<PathBuf> {
+    let tools = external_tools_dir();
+    vec![
+        tools.join("songrec-cli.exe"),
+        tools.join("songrec.exe"),
+        tools.join("songrec-cli"),
+        tools.join("songrec"),
+    ]
+}
+
+fn get_github_json<T>(client: &Client, url: &str, label: &str) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let response = client
+        .get(url)
+        .send()
+        .with_context(|| format!("failed to contact {label}"))?;
+
+    let status = response.status();
+    if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
+        anyhow::bail!("GitHub temporarily refused the SongRec release check ({status}). Try again later.");
+    }
+
+    response
+        .error_for_status()
+        .with_context(|| format!("{label} request failed"))?
+        .json()
+        .with_context(|| format!("failed to parse {label} response"))
+}
+
+fn select_songrec_release(mut releases: Vec<GitHubRelease>, include_prereleases: bool) -> Option<GitHubRelease> {
+    releases.retain(|release| !release.draft && (include_prereleases || !release.prerelease));
+    releases.sort_by(|left, right| parse_version(&right.tag_name).cmp(&parse_version(&left.tag_name)));
+    releases.into_iter().next()
+}
+
+fn release_version_label(release: &GitHubRelease) -> Option<String> {
+    non_empty(release.tag_name.trim_start_matches('v'))
+}
+
+fn parse_version(value: &str) -> Version {
+    Version::parse(value.trim().trim_start_matches('v')).unwrap_or_else(|_| Version::new(0, 0, 0))
+}
+
+fn is_windows_songrec_asset(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let looks_windows = lower.contains("windows")
+        || lower.contains("win64")
+        || lower.contains("win32")
+        || lower.contains("x86_64-pc-windows")
+        || lower.ends_with(".exe");
+    let looks_downloadable = lower.ends_with(".zip") || lower.ends_with(".exe");
+    looks_windows && looks_downloadable && lower.contains("songrec")
+}
+
+fn preferred_songrec_exe_name(asset_name: &str) -> &'static str {
+    let lower = asset_name.to_ascii_lowercase();
+    if lower.contains("cli") {
+        "songrec-cli.exe"
+    } else {
+        "songrec.exe"
+    }
+}
+
+fn install_songrec_from_zip(tools_dir: &Path, bytes: &[u8]) -> Result<PathBuf> {
+    let reader = Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(reader).context("failed to open SongRec ZIP asset")?;
+    let mut selected_index = None;
+    let mut selected_name = "songrec.exe".to_owned();
+
+    for index in 0..archive.len() {
+        let file = archive.by_index(index)?;
+        let Some(name) = file.enclosed_name().map(|path| path.to_path_buf()) else {
+            continue;
+        };
+        let lower = name.to_string_lossy().to_ascii_lowercase();
+        if lower.ends_with(".exe") && lower.contains("songrec") {
+            selected_index = Some(index);
+            selected_name = if lower.contains("cli") {
+                "songrec-cli.exe".to_owned()
+            } else {
+                "songrec.exe".to_owned()
+            };
+            break;
+        }
+    }
+
+    let Some(index) = selected_index else {
+        anyhow::bail!("the SongRec ZIP asset did not contain songrec.exe or songrec-cli.exe");
+    };
+
+    let mut file = archive.by_index(index)?;
+    let target = tools_dir.join(selected_name);
+    let temp = target.with_extension("download");
+    let mut output = fs::File::create(&temp)
+        .with_context(|| format!("failed to create temporary SongRec executable: {}", temp.display()))?;
+    io::copy(&mut file, &mut output)
+        .with_context(|| format!("failed to extract SongRec executable: {}", target.display()))?;
+    fs::rename(&temp, &target)
+        .or_else(|_| {
+            fs::copy(&temp, &target)?;
+            let _ = fs::remove_file(&temp);
+            Ok::<(), io::Error>(())
+        })
+        .with_context(|| format!("failed to install SongRec executable: {}", target.display()))?;
+    Ok(target)
 }

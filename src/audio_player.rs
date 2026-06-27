@@ -17,7 +17,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 180;
+const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 20;
+const RADIO_VISUALIZER_VISIBLE_SECONDS: f32 = 15.0;
 const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 24;
 const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
 const RADIO_RECOGNITION_BUFFER_SECONDS: usize = 24;
@@ -617,8 +618,8 @@ impl AudioPlayer {
         }
 
         let now = Instant::now();
-        let bucket_seconds = 1.0 / RADIO_VISUALIZER_BUCKETS_PER_SECOND as f32;
-        let visible_seconds = requested_points as f32 * bucket_seconds;
+        let visible_seconds = RADIO_VISUALIZER_VISIBLE_SECONDS;
+        let bucket_seconds = visible_seconds / requested_points.max(1) as f32;
         let max_age = visible_seconds + bucket_seconds * 2.0;
 
         while state
@@ -626,24 +627,43 @@ impl AudioPlayer {
             .front()
             .map(|bucket| now.duration_since(bucket.at).as_secs_f32() > max_age)
             .unwrap_or(false)
-            || state.peaks.len() > requested_points + 4
+            || state.peaks.len() > RADIO_VISUALIZER_MAX_BUCKETS
         {
             state.peaks.pop_front();
         }
 
-        let bars = state
-            .peaks
-            .iter()
-            .filter_map(|bucket| {
-                let age_seconds = now.duration_since(bucket.at).as_secs_f32();
-                if age_seconds <= max_age {
-                    Some(RadioVisualizerBar {
-                        age_seconds,
-                        peak: bucket.peak,
-                    })
+        let mut slot_peaks = vec![0.0_f32; requested_points];
+        for bucket in &state.peaks {
+            let age_seconds = now.duration_since(bucket.at).as_secs_f32();
+            if age_seconds > max_age {
+                continue;
+            }
+            let slot_from_right = (age_seconds / bucket_seconds).floor() as usize;
+            if slot_from_right >= requested_points {
+                continue;
+            }
+            let slot = requested_points - 1 - slot_from_right;
+            slot_peaks[slot] = slot_peaks[slot].max(bucket.peak);
+        }
+
+        let mut previous = 0.0_f32;
+        let bars = slot_peaks
+            .into_iter()
+            .enumerate()
+            .filter_map(|(slot, peak)| {
+                let shaped = if peak > previous {
+                    previous * 0.25 + peak * 0.75
                 } else {
-                    None
+                    previous * 0.68 + peak * 0.32
+                };
+                previous = shaped;
+                if shaped <= 0.003 {
+                    return None;
                 }
+                Some(RadioVisualizerBar {
+                    age_seconds: (requested_points - 1 - slot) as f32 * bucket_seconds,
+                    peak: shaped.clamp(0.0, 1.0),
+                })
             })
             .collect();
 
