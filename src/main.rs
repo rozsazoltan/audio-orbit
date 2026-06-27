@@ -3001,21 +3001,6 @@ impl AudioOrbitApp {
                             }
 
                             let body_padding = 8.0;
-                            let info_width = if station_info.is_empty() {
-                                0.0
-                            } else {
-                                compact_right_text_width(&station_info, 12.0)
-                                    .min((body_rect.width() * 0.34).min(220.0).max(72.0))
-                            };
-                            let info_gap = if station_info.is_empty() { 0.0 } else { 8.0 };
-                            let title_left = body_rect.left() + body_padding;
-                            let title_right = (body_rect.right() - body_padding - info_width - info_gap)
-                                .max(title_left + 32.0);
-                            let title_rect = egui::Rect::from_min_max(
-                                egui::pos2(title_left, body_rect.top()),
-                                egui::pos2(title_right, body_rect.bottom()),
-                            );
-
                             let text_color = if selected {
                                 ui.visuals().selection.stroke.color
                             } else if active {
@@ -3023,12 +3008,33 @@ impl AudioOrbitApp {
                             } else {
                                 ui.visuals().widgets.inactive.fg_stroke.color
                             };
-                            let station_title = ellipsize_to_width(&station_title, title_rect.width(), 14.0);
+                            let title_font = egui::FontId::proportional(14.0);
+                            let info_font = egui::FontId::proportional(12.0);
+                            let info_color = if active || row_hovered {
+                                ui.visuals().widgets.inactive.fg_stroke.color
+                            } else {
+                                ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.50)
+                            };
+                            let info_width = if station_info.is_empty() {
+                                0.0
+                            } else {
+                                text_width(ui, &station_info, info_font.clone(), info_color).ceil()
+                            };
+                            let info_gap = if station_info.is_empty() { 0.0 } else { 6.0 };
+                            let title_left = body_rect.left() + body_padding;
+                            let title_right = (body_rect.right() - body_padding - info_width - info_gap)
+                                .max(title_left + 24.0);
+                            let title_rect = egui::Rect::from_min_max(
+                                egui::pos2(title_left, body_rect.top()),
+                                egui::pos2(title_right, body_rect.bottom()),
+                            );
+
+                            let station_title = ellipsize_to_width_exact(ui, &station_title, title_rect.width(), title_font.clone(), text_color);
                             ui.painter().with_clip_rect(title_rect).text(
                                 egui::pos2(title_rect.left(), title_rect.center().y),
                                 egui::Align2::LEFT_CENTER,
                                 station_title,
-                                egui::FontId::proportional(14.0),
+                                title_font,
                                 text_color,
                             );
 
@@ -3037,17 +3043,12 @@ impl AudioOrbitApp {
                                     egui::pos2(body_rect.right() - body_padding - info_width, body_rect.top()),
                                     egui::pos2(body_rect.right() - body_padding, body_rect.bottom()),
                                 );
-                                let station_info = ellipsize_to_width(&station_info, info_rect.width(), 12.0);
                                 ui.painter().with_clip_rect(info_rect).text(
                                     egui::pos2(info_rect.right(), info_rect.center().y),
                                     egui::Align2::RIGHT_CENTER,
                                     station_info,
-                                    egui::FontId::proportional(12.0),
-                                    if active || row_hovered {
-                                        ui.visuals().widgets.inactive.fg_stroke.color
-                                    } else {
-                                        ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.50)
-                                    },
+                                    info_font,
+                                    info_color,
                                 );
                             }
 
@@ -3379,17 +3380,6 @@ impl AudioOrbitApp {
                             }
 
                             let body_padding = 8.0;
-                            let metadata_width = compact_right_text_width(&metadata, 12.0)
-                                .min((body_rect.width() * 0.34).min(220.0).max(72.0));
-                            let metadata_gap = if metadata.is_empty() { 0.0 } else { 8.0 };
-                            let title_left = body_rect.left() + body_padding;
-                            let title_right = (body_rect.right() - body_padding - metadata_width - metadata_gap)
-                                .max(title_left + 32.0);
-                            let title_rect = egui::Rect::from_min_max(
-                                egui::pos2(title_left, body_rect.top()),
-                                egui::pos2(title_right, body_rect.bottom()),
-                            );
-
                             let text_color = if is_selected {
                                 ui.visuals().selection.stroke.color
                             } else if is_active {
@@ -3397,12 +3387,33 @@ impl AudioOrbitApp {
                             } else {
                                 ui.visuals().widgets.inactive.fg_stroke.color
                             };
-                            let title = ellipsize_to_width(&title, title_rect.width(), 14.0);
+                            let title_font = egui::FontId::proportional(14.0);
+                            let metadata_font = egui::FontId::proportional(12.0);
+                            let metadata_color = if is_active || row_hovered {
+                                ui.visuals().widgets.inactive.fg_stroke.color
+                            } else {
+                                ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.50)
+                            };
+                            let metadata_width = if metadata.is_empty() {
+                                0.0
+                            } else {
+                                text_width(ui, &metadata, metadata_font.clone(), metadata_color).ceil()
+                            };
+                            let metadata_gap = if metadata.is_empty() { 0.0 } else { 6.0 };
+                            let title_left = body_rect.left() + body_padding;
+                            let title_right = (body_rect.right() - body_padding - metadata_width - metadata_gap)
+                                .max(title_left + 24.0);
+                            let title_rect = egui::Rect::from_min_max(
+                                egui::pos2(title_left, body_rect.top()),
+                                egui::pos2(title_right, body_rect.bottom()),
+                            );
+
+                            let title = ellipsize_to_width_exact(ui, &title, title_rect.width(), title_font.clone(), text_color);
                             ui.painter().with_clip_rect(title_rect).text(
                                 egui::pos2(title_rect.left(), title_rect.center().y),
                                 egui::Align2::LEFT_CENTER,
                                 title,
-                                egui::FontId::proportional(14.0),
+                                title_font,
                                 text_color,
                             );
 
@@ -3411,17 +3422,12 @@ impl AudioOrbitApp {
                                     egui::pos2(body_rect.right() - body_padding - metadata_width, body_rect.top()),
                                     egui::pos2(body_rect.right() - body_padding, body_rect.bottom()),
                                 );
-                                let metadata = ellipsize_to_width(&metadata, metadata_rect.width(), 12.0);
                                 ui.painter().with_clip_rect(metadata_rect).text(
                                     egui::pos2(metadata_rect.right(), metadata_rect.center().y),
                                     egui::Align2::RIGHT_CENTER,
                                     metadata,
-                                    egui::FontId::proportional(12.0),
-                                    if is_active || row_hovered {
-                                        ui.visuals().widgets.inactive.fg_stroke.color
-                                    } else {
-                                        ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.50)
-                                    },
+                                    metadata_font,
+                                    metadata_color,
                                 );
                             }
 
@@ -4546,13 +4552,53 @@ fn clean_radio_metadata_value(value: &str) -> String {
 }
 
 
-fn compact_right_text_width(value: &str, font_size: f32) -> f32 {
+fn text_width(ui: &egui::Ui, value: &str, font_id: egui::FontId, color: egui::Color32) -> f32 {
     if value.trim().is_empty() {
         return 0.0;
     }
 
-    let average_char_width = (font_size * 0.50).max(4.8);
-    ((value.chars().count() as f32 * average_char_width) + 10.0).max(32.0)
+    ui.painter()
+        .layout_no_wrap(value.to_owned(), font_id, color)
+        .rect
+        .width()
+}
+
+fn ellipsize_to_width_exact(ui: &egui::Ui, value: &str, width: f32, font_id: egui::FontId, color: egui::Color32) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if text_width(ui, trimmed, font_id.clone(), color) <= width {
+        return trimmed.to_owned();
+    }
+
+    let ellipsis = "…";
+    let ellipsis_width = text_width(ui, ellipsis, font_id.clone(), color);
+    let available_width = (width - ellipsis_width).max(0.0);
+    if available_width <= 0.0 {
+        return ellipsis.to_owned();
+    }
+
+    let chars: Vec<char> = trimmed.chars().collect();
+    let mut low = 0usize;
+    let mut high = chars.len();
+
+    while low < high {
+        let mid = (low + high + 1) / 2;
+        let candidate: String = chars.iter().take(mid).collect();
+        if text_width(ui, &candidate, font_id.clone(), color) <= available_width {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    if low == 0 {
+        ellipsis.to_owned()
+    } else {
+        format!("{}{}", chars.iter().take(low).collect::<String>(), ellipsis)
+    }
 }
 
 fn ellipsize_to_width(value: &str, width: f32, font_size: f32) -> String {
