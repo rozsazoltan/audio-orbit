@@ -102,7 +102,7 @@ Saved files use the stop-time based format `audio-orbit-records-yyyy-mm-dd-hh-mm
 
 Audio Orbit includes an optional 100% free recognition path. Recognition is off by default. When it is enabled, internet radio can be identified instantly from stream metadata when the station provides `StreamTitle`. For audio fingerprint recognition, Audio Orbit can install and manage SongRec in the portable `.audio-orbit-dll` helper folder, or you can set a custom SongRec executable in **Settings > Recognition**.
 
-Audio Orbit captures a short DSP-free sample from the current local track or live radio stream, writes a temporary WAV file, and asks SongRec to recognize it. No paid API key is required. When automatic SongRec management is enabled, Audio Orbit checks SongRec releases at most once per day on startup and also provides manual Check / Install / update buttons.
+Audio Orbit captures a short DSP-free sample from the current local track or live radio stream, writes a temporary WAV file, and asks SongRec to recognize it. No paid API key is required. When automatic SongRec management is enabled, Audio Orbit checks SongRec releases at most once per day on startup and also provides manual Check / Install / update buttons. The managed installer downloads a Windows asset from GitHub releases into `.audio-orbit-dll` and extracts `songrec.exe` or `songrec-cli.exe` when the release asset is a ZIP.
 
 SongRec is an unofficial Shazam-compatible recognizer, so this feature is treated as a free optional external backend rather than a required runtime dependency.
 
@@ -182,7 +182,7 @@ Use the search button in the track list header to reveal search. Search filters 
 
 ### Waveform and silence skip
 
-Local track waveforms mark long quiet sections that silence skipping will bypass. Internet radio uses a live audio visualizer that fills from left to right with decoded stream levels and clips older levels as new audio arrives.
+Local track waveforms mark long quiet sections that silence skipping will bypass. Local tracks and internet radio both use RustFFT-based perceptual spectrum analysis, including low/high-frequency balance, so the bars show more than just quiet/loud changes. Internet radio uses a smoothed 15-second live visualizer window and clips older levels as new audio arrives.
 
 ### Manage Favorites
 
@@ -246,6 +246,6 @@ Copyright (C) 2020–present [Zoltán Rózsa](https://github.com/rozsazoltan)
 
 ### Notes on waveform analysis and recognition
 
-Audio Orbit renders local and live radio waveform bars through a RustFFT-based spectrum analysis path, so the visible bars are based on frequency energy and loudness rather than raw sample peaks only. This keeps bass-heavy passages from turning every bar into the same full-height column. Live radio uses a smoothed 15-second AIMP-style visible window so the visualizer feels stable instead of flickery.
+Audio Orbit renders local and live radio waveform bars through a RustFFT-based perceptual spectrum analysis path. The analyzer combines log-frequency band energy, spectral motion, loudness, and low/high-frequency balance, so the visible bars no longer represent only raw sample peaks or quiet/loud changes. Live radio uses a smoothed 15-second AIMP-style visible window so the visualizer feels stable instead of flickery.
 
 Free recognition uses radio stream metadata first when available. If a real audio lookup is needed, Audio Orbit can install or update `songrec.exe` / `songrec-cli.exe` in the managed `.audio-orbit-dll` folder, or use a custom executable path from Settings > Recognition. Recognized titles are copied to the clipboard automatically.

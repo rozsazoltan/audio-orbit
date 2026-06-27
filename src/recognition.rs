@@ -48,7 +48,7 @@ struct GitHubRelease {
     assets: Vec<GitHubAsset>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct GitHubAsset {
     name: String,
     browser_download_url: String,
@@ -322,21 +322,20 @@ pub fn check_songrec_tool(include_prereleases: bool) -> Result<SongRecToolStatus
     let installed_version = installed_songrec_version();
     let client = Client::builder().user_agent(SONGREC_USER_AGENT).build()?;
     let releases: Vec<GitHubRelease> = get_github_json(&client, SONGREC_RELEASES_API, "SongRec GitHub releases")?;
-    let release = select_songrec_release(releases, include_prereleases)
-        .context("no suitable SongRec GitHub release was found")?;
+    let (release, asset) = select_songrec_release_with_windows_asset(releases, include_prereleases)
+        .context("no suitable SongRec GitHub release with a downloadable Windows asset was found")?;
     let latest_version = release_version_label(&release);
-    let asset = release.assets.iter().find(|asset| is_windows_songrec_asset(&asset.name));
     let is_update_available = match (&installed_version, &latest_version) {
         (Some(installed), Some(latest)) => parse_version(latest) > parse_version(installed),
         (None, Some(_)) => executable_path.is_none(),
         _ => executable_path.is_none(),
-    } && asset.is_some();
+    };
 
     Ok(SongRecToolStatus {
         installed_version,
         latest_version,
-        asset_name: asset.map(|asset| asset.name.clone()),
-        asset_download_url: asset.map(|asset| asset.browser_download_url.clone()),
+        asset_name: Some(asset.name),
+        asset_download_url: Some(asset.browser_download_url),
         executable_path,
         is_update_available,
     })
@@ -409,10 +408,25 @@ where
         .with_context(|| format!("failed to parse {label} response"))
 }
 
-fn select_songrec_release(mut releases: Vec<GitHubRelease>, include_prereleases: bool) -> Option<GitHubRelease> {
+fn select_songrec_release_with_windows_asset(
+    mut releases: Vec<GitHubRelease>,
+    include_prereleases: bool,
+) -> Option<(GitHubRelease, GitHubAsset)> {
     releases.retain(|release| !release.draft && (include_prereleases || !release.prerelease));
     releases.sort_by(|left, right| parse_version(&right.tag_name).cmp(&parse_version(&left.tag_name)));
-    releases.into_iter().next()
+
+    for release in releases {
+        if let Some(asset) = release
+            .assets
+            .iter()
+            .find(|asset| is_windows_songrec_asset(&asset.name))
+            .cloned()
+        {
+            return Some((release, asset));
+        }
+    }
+
+    None
 }
 
 fn release_version_label(release: &GitHubRelease) -> Option<String> {
@@ -431,7 +445,8 @@ fn is_windows_songrec_asset(name: &str) -> bool {
         || lower.contains("x86_64-pc-windows")
         || lower.ends_with(".exe");
     let looks_downloadable = lower.ends_with(".zip") || lower.ends_with(".exe");
-    looks_windows && looks_downloadable && lower.contains("songrec")
+    let looks_cli_or_app = lower.contains("songrec") || lower.contains("audio-file-to-recognized-song");
+    looks_windows && looks_downloadable && looks_cli_or_app
 }
 
 fn preferred_songrec_exe_name(asset_name: &str) -> &'static str {

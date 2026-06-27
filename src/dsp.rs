@@ -78,6 +78,7 @@ pub struct RenderInfo {
     pub input_channels: u16,
     pub sample_rate: u32,
     pub waveform: Vec<f32>,
+    pub waveform_brightness: Vec<f32>,
     pub silence_ranges: Vec<(f32, f32)>,
 }
 
@@ -97,7 +98,7 @@ pub fn render_orbit_to_stereo(
     let frame_count = input_samples.len() / channels;
     let mono = downmix_to_mono(input_samples, channels, frame_count);
     let mut start_frame = ((start_seconds.max(0.0) * sample_rate as f32) as usize).min(frame_count);
-    let waveform = spectrum_waveform(&mono, sample_rate, WAVEFORM_POINTS);
+    let (waveform, waveform_brightness) = spectrum_waveform(&mono, sample_rate, WAVEFORM_POINTS);
 
     let output_level = settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
     let silence_floor = automatic_silence_floor(&mono);
@@ -156,6 +157,7 @@ pub fn render_orbit_to_stereo(
                 input_channels,
                 sample_rate,
                 waveform,
+                waveform_brightness,
                 silence_ranges,
             },
         );
@@ -270,6 +272,7 @@ pub fn render_orbit_to_stereo(
             input_channels,
             sample_rate,
             waveform,
+            waveform_brightness,
             silence_ranges,
         },
     )

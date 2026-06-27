@@ -75,6 +75,8 @@ pub struct Track {
     pub metadata: TrackMetadata,
     #[serde(default)]
     pub waveform: Vec<f32>,
+    #[serde(default)]
+    pub waveform_brightness: Vec<f32>,
 }
 
 impl Track {
@@ -98,6 +100,7 @@ impl Track {
             group,
             metadata,
             waveform: Vec::new(),
+            waveform_brightness: Vec::new(),
         }
     }
 
@@ -107,6 +110,7 @@ impl Track {
         sample_rate_hz: u32,
         channels: u16,
         waveform: Vec<f32>,
+        waveform_brightness: Vec<f32>,
     ) {
         self.metadata.duration_seconds = Some(duration_seconds);
         self.metadata.sample_rate_hz = Some(sample_rate_hz);
@@ -115,6 +119,7 @@ impl Track {
             self.metadata.size_bytes = fs::metadata(&self.path).ok().map(|metadata| metadata.len());
         }
         self.waveform = waveform;
+        self.waveform_brightness = waveform_brightness;
     }
 }
 

@@ -32,6 +32,7 @@ pub struct PlaybackInfo {
     pub sample_rate: u32,
     pub size_bytes: Option<u64>,
     pub waveform: Vec<f32>,
+    pub waveform_brightness: Vec<f32>,
     pub silence_ranges: Vec<(f32, f32)>,
 }
 
@@ -170,12 +171,14 @@ impl<R> Seek for RadioStream<R> {
 struct RadioVisualizerBucket {
     at: Instant,
     peak: f32,
+    brightness: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct RadioVisualizerBar {
     pub age_seconds: f32,
     pub peak: f32,
+    pub brightness: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -313,7 +316,7 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
     }
 
     fn record_visualizer_sample(&mut self, mono: f32) {
-        let Some(level) = self.visualizer_analyzer.push_sample(mono) else {
+        let Some(bucket) = self.visualizer_analyzer.push_sample(mono) else {
             return;
         };
         let now = Instant::now();
@@ -321,7 +324,8 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
         if let Ok(mut state) = self.visualizer.lock() {
             state.peaks.push_back(RadioVisualizerBucket {
                 at: now,
-                peak: level.clamp(0.0, 1.0),
+                peak: bucket.level.clamp(0.0, 1.0),
+                brightness: bucket.brightness.clamp(0.0, 1.0),
             });
 
             let history = Duration::from_secs(RADIO_VISUALIZER_HISTORY_SECONDS as u64);
@@ -633,6 +637,7 @@ impl AudioPlayer {
         }
 
         let mut slot_peaks = vec![0.0_f32; requested_points];
+        let mut slot_brightness = vec![0.5_f32; requested_points];
         for bucket in &state.peaks {
             let age_seconds = now.duration_since(bucket.at).as_secs_f32();
             if age_seconds > max_age {
@@ -643,26 +648,33 @@ impl AudioPlayer {
                 continue;
             }
             let slot = requested_points - 1 - slot_from_right;
-            slot_peaks[slot] = slot_peaks[slot].max(bucket.peak);
+            if bucket.peak >= slot_peaks[slot] {
+                slot_peaks[slot] = bucket.peak;
+                slot_brightness[slot] = bucket.brightness.clamp(0.0, 1.0);
+            }
         }
 
         let mut previous = 0.0_f32;
+        let mut previous_brightness = 0.5_f32;
         let bars = slot_peaks
             .into_iter()
+            .zip(slot_brightness.into_iter())
             .enumerate()
-            .filter_map(|(slot, peak)| {
+            .filter_map(|(slot, (peak, brightness))| {
                 let shaped = if peak > previous {
                     previous * 0.25 + peak * 0.75
                 } else {
                     previous * 0.68 + peak * 0.32
                 };
                 previous = shaped;
+                previous_brightness = previous_brightness * 0.70 + brightness * 0.30;
                 if shaped <= 0.003 {
                     return None;
                 }
                 Some(RadioVisualizerBar {
                     age_seconds: (requested_points - 1 - slot) as f32 * bucket_seconds,
                     peak: shaped.clamp(0.0, 1.0),
+                    brightness: previous_brightness.clamp(0.0, 1.0),
                 })
             })
             .collect();
@@ -1091,6 +1103,7 @@ fn playback_info(path: &Path, render_info: RenderInfo) -> PlaybackInfo {
         sample_rate: render_info.sample_rate,
         size_bytes: fs::metadata(path).ok().map(|metadata| metadata.len()),
         waveform: render_info.waveform,
+        waveform_brightness: render_info.waveform_brightness,
         silence_ranges: render_info.silence_ranges,
     }
 }
