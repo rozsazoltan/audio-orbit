@@ -14,8 +14,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 180;
-const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 5;
+const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 60;
+const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 2;
 const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
 
 #[derive(Clone, Debug)]
@@ -330,6 +330,9 @@ impl AudioPlayer {
 
         let peaks: Vec<f32> = state.peaks.iter().copied().collect();
         if peaks.len() <= requested_points {
+            if peaks.len() == RADIO_VISUALIZER_MAX_BUCKETS && peaks.len() > 1 {
+                return Self::resample_radio_peaks(&peaks, requested_points);
+            }
             return peaks;
         }
 
@@ -346,6 +349,31 @@ impl AudioPlayer {
                 .fold(0.0_f32, f32::max);
             rendered.push(peak);
         }
+        rendered
+    }
+
+    fn resample_radio_peaks(peaks: &[f32], requested_points: usize) -> Vec<f32> {
+        if requested_points == 0 || peaks.is_empty() {
+            return Vec::new();
+        }
+        if requested_points == peaks.len() {
+            return peaks.to_vec();
+        }
+
+        let mut rendered = Vec::with_capacity(requested_points);
+        let last_index = peaks.len().saturating_sub(1) as f32;
+        let output_last_index = requested_points.saturating_sub(1).max(1) as f32;
+
+        for index in 0..requested_points {
+            let source_position = index as f32 / output_last_index * last_index;
+            let left_index = source_position.floor() as usize;
+            let right_index = source_position.ceil() as usize;
+            let mix = source_position - left_index as f32;
+            let left = peaks.get(left_index).copied().unwrap_or(0.0);
+            let right = peaks.get(right_index).copied().unwrap_or(left);
+            rendered.push(left + (right - left) * mix);
+        }
+
         rendered
     }
 

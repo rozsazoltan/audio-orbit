@@ -142,8 +142,11 @@ pub fn render_orbit_to_stereo(
     let smoothing_time_seconds = 0.08 + smoothness * 0.70;
     let smoothing_coeff = (-1.0 / (sample_rate.max(1) as f32 * smoothing_time_seconds)).exp();
 
-    let silence_limit = settings.silence_threshold_seconds.max(1) as usize * sample_rate.max(1) as usize;
+    let sample_rate_usize = sample_rate.max(1) as usize;
+    let silence_limit = settings.silence_threshold_seconds.max(1) as usize * sample_rate_usize;
+    let silence_bridge_limit = (sample_rate_usize / 20).max(1);
     let mut consecutive_silent_frames = 0usize;
+    let mut non_silent_bridge_frames = 0usize;
     let mut silence_ranges = Vec::new();
     let mut skipped_silence_start: Option<usize> = None;
 
@@ -156,11 +159,17 @@ pub fn render_orbit_to_stereo(
 
     for frame_index in start_frame..frame_count {
         let source_sample = mono[frame_index];
-        let is_silent = source_sample.abs() <= silence_floor;
-        if is_silent {
+        let is_below_silence_floor = source_sample.abs() <= silence_floor;
+        if is_below_silence_floor {
+            consecutive_silent_frames += 1;
+            non_silent_bridge_frames = 0;
+        } else if consecutive_silent_frames > 0 && non_silent_bridge_frames < silence_bridge_limit {
+            // AIMP-style silence skipping should not be broken by tiny decoder clicks or noise-floor spikes.
+            non_silent_bridge_frames += 1;
             consecutive_silent_frames += 1;
         } else {
             consecutive_silent_frames = 0;
+            non_silent_bridge_frames = 0;
         }
 
         if settings.skip_silence_enabled && consecutive_silent_frames > silence_limit {
@@ -256,7 +265,11 @@ pub fn render_orbit_to_stereo(
 }
 
 fn silence_floor_from_percent(percent: u8) -> f32 {
-    percent.clamp(1, 20) as f32 / 100.0
+    if percent == 0 {
+        0.001
+    } else {
+        percent.clamp(1, 20) as f32 / 100.0
+    }
 }
 
 fn render_plain_stereo(
@@ -271,19 +284,27 @@ fn render_plain_stereo(
     silence_floor: f32,
 ) -> (Vec<f32>, f32, Vec<(f32, f32)>) {
     let frame_count = mono.len();
-    let silence_limit = silence_threshold_seconds.max(1) as usize * sample_rate.max(1) as usize;
+    let sample_rate_usize = sample_rate.max(1) as usize;
+    let silence_limit = silence_threshold_seconds.max(1) as usize * sample_rate_usize;
+    let silence_bridge_limit = (sample_rate_usize / 20).max(1);
     let mut consecutive_silent_frames = 0usize;
+    let mut non_silent_bridge_frames = 0usize;
     let mut silence_ranges = Vec::new();
     let mut skipped_silence_start: Option<usize> = None;
     let mut output = Vec::with_capacity((frame_count.saturating_sub(start_frame)) * 2);
 
     for frame_index in start_frame..frame_count {
         let source_sample = mono[frame_index];
-        let is_silent = source_sample.abs() <= silence_floor;
-        if is_silent {
+        let is_below_silence_floor = source_sample.abs() <= silence_floor;
+        if is_below_silence_floor {
+            consecutive_silent_frames += 1;
+            non_silent_bridge_frames = 0;
+        } else if consecutive_silent_frames > 0 && non_silent_bridge_frames < silence_bridge_limit {
+            non_silent_bridge_frames += 1;
             consecutive_silent_frames += 1;
         } else {
             consecutive_silent_frames = 0;
+            non_silent_bridge_frames = 0;
         }
 
         if skip_silence_enabled && consecutive_silent_frames > silence_limit {
