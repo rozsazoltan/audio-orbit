@@ -3300,8 +3300,10 @@ impl AudioOrbitApp {
             .vertical_scroll_offset(self.state.ui.playlist_scroll_offset_y.max(0.0))
             .auto_shrink([false, false])
             .max_height(scroll_height)
-            .show_viewport(ui, |ui, viewport| {
+            .show_viewport(ui, |ui, _viewport| {
                 ui.set_width(row_width);
+                let visible_rect = ui.clip_rect();
+                let sticky_top = visible_rect.top() + 4.0;
                 let mut viewport_group: Option<String> = None;
                 let mut next_group_header_top: Option<f32> = None;
                 for (index, track) in visible_tracks {
@@ -3321,9 +3323,9 @@ impl AudioOrbitApp {
                             ui.label(egui::RichText::new(group.as_str()).size(13.0).strong());
                         });
                         let header_rect = header_response.response.rect;
-                        if header_rect.top() <= viewport.top() + 4.0 {
+                        if header_rect.top() <= sticky_top {
                             viewport_group = Some(group.clone());
-                        } else if header_rect.top() > viewport.top() + 4.0 {
+                        } else if header_rect.top() > sticky_top {
                             next_group_header_top = Some(
                                 next_group_header_top
                                     .map(|current| current.min(header_rect.top()))
@@ -3477,7 +3479,7 @@ impl AudioOrbitApp {
                     context_response.context_menu(|ui| {
                         self.render_track_row_context_menu(ui, index, path.clone(), &add_targets);
                     });
-                    if viewport_group.is_none() && row_response.response.rect.intersects(viewport) {
+                    if viewport_group.is_none() && row_response.response.rect.intersects(visible_rect) {
                         viewport_group = Some(track.group.clone());
                     }
                     if self.scroll_to_active_track_requested && is_active {
@@ -3491,9 +3493,9 @@ impl AudioOrbitApp {
                     if let Some(group) = viewport_group {
                         let sticky_height = 26.0;
                         let push_offset_y = next_group_header_top
-                            .map(|next_top| (next_top - viewport.top() - sticky_height).min(0.0))
+                            .map(|next_top| (next_top - sticky_top - sticky_height).min(0.0))
                             .unwrap_or(0.0);
-                        paint_sticky_folder_header(ui.painter(), viewport, row_width, &group, push_offset_y);
+                        paint_sticky_folder_header(ui.painter(), visible_rect, row_width, &group, push_offset_y);
                     }
                 }
             });
@@ -4847,21 +4849,17 @@ fn next_valid_track_index(previous_index: usize, remaining_len: usize) -> Option
 
 fn paint_sticky_folder_header(
     painter: &egui::Painter,
-    viewport: egui::Rect,
+    visible_rect: egui::Rect,
     row_width: f32,
     group: &str,
     push_offset_y: f32,
 ) {
-    let header_width = (row_width - 14.0).max(120.0).min(viewport.width().max(120.0));
+    let header_width = (row_width - 14.0).max(120.0).min(visible_rect.width().max(120.0));
     let rect = egui::Rect::from_min_size(
-        egui::pos2(viewport.left() + 6.0, viewport.top() + 4.0 + push_offset_y),
+        egui::pos2(visible_rect.left() + 6.0, visible_rect.top() + 4.0 + push_offset_y),
         egui::vec2(header_width, 22.0),
     );
-    let clip_rect = viewport.intersect(egui::Rect::from_min_max(
-        egui::pos2(viewport.left(), viewport.top()),
-        egui::pos2(viewport.right(), viewport.bottom()),
-    ));
-    let painter = painter.with_clip_rect(clip_rect);
+    let painter = painter.with_clip_rect(visible_rect);
     painter.rect_filled(rect, 7.0, egui::Color32::from_black_alpha(215));
     painter.text(
         egui::pos2(rect.left() + 10.0, rect.center().y),
