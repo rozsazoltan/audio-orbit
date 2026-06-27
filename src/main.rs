@@ -549,10 +549,10 @@ impl AudioOrbitApp {
             return;
         }
 
-        if self.active_panel_modal.is_some() {
-            self.close_panel_modal();
-        } else if self.show_update_check_confirmation {
+        if self.show_update_check_confirmation {
             self.show_update_check_confirmation = false;
+        } else if self.active_panel_modal.is_some() {
+            self.close_panel_modal();
         } else if self.show_folder_import_modal {
             self.show_folder_import_modal = false;
         } else if self.show_radio_add_modal {
@@ -4007,62 +4007,77 @@ impl AudioOrbitApp {
     }
 
     fn render_update_check_confirmation_modal(&mut self, context: &egui::Context) {
-        self.render_modal_backdrop(context, "update_check_confirmation_backdrop");
         let mut is_open = self.show_update_check_confirmation;
-        let modal_size = self.responsive_modal_size(context, 520.0, 260.0);
+        let screen_rect = context.screen_rect();
+        let card_width = (screen_rect.width() - 48.0).clamp(300.0, 560.0);
+
+        egui::Area::new(egui::Id::new("update_check_confirmation_scrim"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen_rect.left_top())
+            .show(context, |ui| {
+                let local_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, screen_rect.size());
+                let response = ui.allocate_rect(local_rect, egui::Sense::click());
+                ui.painter().rect_filled(local_rect, 0.0, egui::Color32::from_black_alpha(188));
+                response.on_hover_text("Confirm or cancel the release check.");
+            });
 
         egui::Area::new(egui::Id::new("update_check_confirmation_modal"))
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(context, |ui| {
-                egui::Frame::window(ui.style()).show(ui, |ui| {
-                    ui.set_min_size(modal_size);
-                    ui.set_max_width(modal_size.x);
+                egui::Frame::window(ui.style())
+                    .inner_margin(egui::Margin::symmetric(18, 16))
+                    .show(ui, |ui| {
+                        ui.set_min_width(card_width);
+                        ui.set_max_width(card_width);
 
-                    ui.horizontal(|ui| {
-                        ui.heading(ui_icons::label(Icon::Info, "Confirm release check"));
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.heading(ui_icons::label(Icon::Info, "Confirm release check"));
+                                ui.add_space(2.0);
+                                ui.add(
+                                    egui::Label::new("GitHub release checks are still allowed, but Audio Orbit asks before making another request after repeated checks.")
+                                        .wrap(),
+                                );
+                            });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                if ui
+                                    .add_sized(egui::vec2(36.0, 30.0), egui::Button::new(ui_icons::icon(Icon::X)))
+                                    .on_hover_text("Cancel")
+                                    .clicked()
+                                {
+                                    is_open = false;
+                                }
+                            });
+                        });
+
+                        ui.add_space(12.0);
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(format!(
+                                "Checks this session: {}",
+                                self.update_check_count
+                            ));
+                            ui.small("Too many repeated GitHub API requests can be temporarily rate limited. Confirming only performs one additional release lookup now.");
+                        });
+
+                        ui.add_space(14.0);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button(ui_icons::icon(Icon::X)).on_hover_text("Close").clicked() {
+                            let can_confirm = self.update_check_receiver.is_none();
+                            if ui
+                                .add_enabled(can_confirm, egui::Button::new(ui_icons::label(Icon::Search, "Check again")))
+                                .clicked()
+                            {
+                                self.check_for_updates(true);
+                                is_open = false;
+                            }
+
+                            if ui.button("Cancel").clicked() {
                                 is_open = false;
                             }
                         });
                     });
-                    ui.add_space(8.0);
-                    ui.add(
-                        egui::Label::new(format!(
-                            "Audio Orbit has already checked GitHub releases {} times in this app session.",
-                            self.update_check_count
-                        ))
-                        .wrap(),
-                    );
-                    ui.add(
-                        egui::Label::new(
-                            "More checks are still allowed, but repeated requests may temporarily trigger GitHub API rate limiting. Confirm before contacting GitHub again.",
-                        )
-                        .wrap(),
-                    );
-                    ui.add_space(14.0);
-
-                    ui.horizontal_wrapped(|ui| {
-                        let can_confirm = self.update_check_receiver.is_none();
-                        if ui
-                            .add_enabled(can_confirm, egui::Button::new(ui_icons::label(Icon::Search, "Check again")))
-                            .clicked()
-                        {
-                            self.check_for_updates(true);
-                            is_open = false;
-                        }
-
-                        if ui.button("Cancel").clicked() {
-                            is_open = false;
-                        }
-                    });
-                });
             });
-
-        if context.input(|input| input.key_pressed(egui::Key::Escape)) {
-            is_open = false;
-        }
 
         self.show_update_check_confirmation = is_open;
     }
