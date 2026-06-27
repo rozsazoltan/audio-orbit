@@ -2280,7 +2280,13 @@ impl eframe::App for AudioOrbitApp {
                 .default_width(340.0)
                 .width_range(260.0..=520.0)
                 .show(context, |ui| {
-                    self.render_library_panel(ui);
+                    egui::ScrollArea::vertical()
+                        .id_salt("library_panel_outer_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            self.render_library_panel(ui);
+                        });
                 });
         }
 
@@ -2290,7 +2296,13 @@ impl eframe::App for AudioOrbitApp {
                 .default_width(340.0)
                 .width_range(280.0..=520.0)
                 .show(context, |ui| {
-                    self.render_profile_panel(ui);
+                    egui::ScrollArea::vertical()
+                        .id_salt("profile_panel_outer_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            self.render_profile_panel(ui);
+                        });
                 });
         }
 
@@ -2427,14 +2439,14 @@ impl AudioOrbitApp {
         });
 
         if self.active_radio_index.is_some() {
-            let requested_points = (ui.available_width() / 3.0).round().clamp(120.0, 900.0) as usize;
+            let requested_points = (ui.available_width() / 2.8).round().clamp(80.0, 900.0) as usize;
             let peaks = self
                 .player
                 .as_ref()
                 .map(|player| player.radio_visualizer_peaks(requested_points))
                 .unwrap_or_default();
             let response = draw_radio_visualizer(ui, &peaks);
-            response.on_hover_text("Internet radio streams are live: this shows the last three minutes of decoded audio proportionally. Gaps stay empty instead of being stretched.");
+            response.on_hover_text("Internet radio streams are live: new decoded audio enters on the right, older audio moves left, and connection gaps stay empty.");
         } else if has_now_playing {
             let position = self.displayed_playback_position_seconds();
             let duration = self.displayed_playback_duration_seconds();
@@ -2994,8 +3006,13 @@ impl AudioOrbitApp {
                                 favorite_toggle_index = Some(index);
                             }
 
-                            let info_width = if row_width < 620.0 { 150.0 } else { 260.0 };
-                            let title_width = (ui.available_width() - info_width - 8.0).max(110.0);
+                            let info_width = if station_info.is_empty() {
+                                0.0
+                            } else {
+                                ((station_info.chars().count() as f32 * 5.8) + 18.0)
+                                    .clamp(92.0, (row_width * 0.36).max(112.0))
+                            };
+                            let title_width = (ui.available_width() - info_width - 4.0).max(140.0);
                             let (title_rect, title_response) = ui.allocate_exact_size(
                                 egui::vec2(title_width, 24.0),
                                 egui::Sense::click(),
@@ -3011,7 +3028,7 @@ impl AudioOrbitApp {
                             } else {
                                 ui.visuals().widgets.inactive.fg_stroke.color
                             };
-                            let station_title = ellipsize_to_width(&station_title, title_width - 14.0, 14.0);
+                            let station_title = ellipsize_to_width(&station_title, title_width - 6.0, 14.0);
                             ui.painter().with_clip_rect(title_rect).text(
                                 egui::pos2(title_rect.left() + 8.0, title_rect.center().y),
                                 egui::Align2::LEFT_CENTER,
@@ -3029,24 +3046,26 @@ impl AudioOrbitApp {
                                 play_radio_index = Some(index);
                             }
 
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let (info_rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(info_width, 20.0),
-                                    egui::Sense::hover(),
-                                );
-                                let station_info = ellipsize_to_width(&station_info, info_width - 8.0, 12.0);
-                                ui.painter().with_clip_rect(info_rect).text(
-                                    egui::pos2(info_rect.right() - 4.0, info_rect.center().y),
-                                    egui::Align2::RIGHT_CENTER,
-                                    station_info,
-                                    egui::FontId::proportional(12.0),
-                                    if active || row_hovered {
-                                        ui.visuals().widgets.inactive.fg_stroke.color
-                                    } else {
-                                        ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.50)
-                                    },
-                                );
-                            });
+                            if info_width > 0.0 {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let (info_rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(info_width, 20.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    let station_info = ellipsize_to_width(&station_info, info_width - 6.0, 12.0);
+                                    ui.painter().with_clip_rect(info_rect).text(
+                                        egui::pos2(info_rect.right() - 4.0, info_rect.center().y),
+                                        egui::Align2::RIGHT_CENTER,
+                                        station_info,
+                                        egui::FontId::proportional(12.0),
+                                        if active || row_hovered {
+                                            ui.visuals().widgets.inactive.fg_stroke.color
+                                        } else {
+                                            ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.50)
+                                        },
+                                    );
+                                });
+                            }
                         },
                     );
                     let context_response = ui.interact(
@@ -3354,10 +3373,10 @@ impl AudioOrbitApp {
                                 self.toggle_favorite(path.clone());
                             }
 
-                            let metadata_width = ((metadata.chars().count() as f32 * 6.2) + 16.0)
-                                .clamp(150.0, (row_width * 0.48).max(150.0));
-                            let right_reserved_width = metadata_width + 8.0;
-                            let title_width = (ui.available_width() - right_reserved_width).max(96.0);
+                            let metadata_width = ((metadata.chars().count() as f32 * 6.0) + 12.0)
+                                .clamp(92.0, (row_width * 0.34).max(112.0));
+                            let right_reserved_width = metadata_width + 4.0;
+                            let title_width = (ui.available_width() - right_reserved_width).max(140.0);
                             let (title_rect, response) = ui.allocate_exact_size(
                                 egui::vec2(title_width, 24.0),
                                 egui::Sense::click(),
@@ -3373,7 +3392,7 @@ impl AudioOrbitApp {
                             } else {
                                 ui.visuals().widgets.inactive.fg_stroke.color
                             };
-                            let title = ellipsize_to_width(&title, title_width - 14.0, 14.0);
+                            let title = ellipsize_to_width(&title, title_width - 6.0, 14.0);
                             ui.painter().with_clip_rect(title_rect).text(
                                 egui::pos2(title_rect.left() + 8.0, title_rect.center().y),
                                 egui::Align2::LEFT_CENTER,
@@ -3389,6 +3408,12 @@ impl AudioOrbitApp {
                                 self.selected_track_index = Some(index);
                                 self.play_path(path.clone(), Some(index), 0.0);
                             }
+                            if response.secondary_clicked() {
+                                self.selected_track_index = Some(index);
+                            }
+                            response.context_menu(|ui| {
+                                self.render_track_row_context_menu(ui, index, path.clone(), &add_targets);
+                            });
 
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 let (metadata_rect, _) = ui.allocate_exact_size(
@@ -3425,47 +3450,7 @@ impl AudioOrbitApp {
                         self.selected_track_index = Some(index);
                     }
                     context_response.context_menu(|ui| {
-                        if ui.button(ui_icons::label(Icon::Play, "Play now")).clicked() {
-                            self.selected_track_index = Some(index);
-                            self.play_path(path.clone(), Some(index), 0.0);
-                            ui.close_menu();
-                        }
-                        if ui.button(ui_icons::label(Icon::Info, "Details")).clicked() {
-                            self.details_modal = Some(DetailsModal::Track(path.clone()));
-                            ui.close_menu();
-                        }
-                        if ui.button(ui_icons::label(Icon::ExternalLink, "Show in File Explorer")).clicked() {
-                            self.reveal_track_in_file_manager(path.clone());
-                            ui.close_menu();
-                        }
-
-                        ui.menu_button(ui_icons::label(Icon::ListPlus, "Add to playlist"), |ui| {
-                            for (target_index, target_name, kind) in add_targets.clone() {
-                                if kind.accepts_manual_tracks() {
-                                    let label = format!("{} {}", kind.icon(), target_name);
-                                    if ui.button(label).clicked() {
-                                        self.add_track_to_playlist(path.clone(), target_index);
-                                        ui.close_menu();
-                                    }
-                                }
-                            }
-                        });
-
-                        let can_remove_from_playlist = self
-                            .current_playlist()
-                            .map(|playlist| playlist.kind != PlaylistKind::Folder)
-                            .unwrap_or(false);
-                        if ui
-                            .add_enabled(can_remove_from_playlist, egui::Button::new(ui_icons::label(Icon::ListMinus, "Remove from playlist")))
-                            .clicked()
-                        {
-                            self.remove_track_from_current_playlist(index);
-                            ui.close_menu();
-                        }
-                        if ui.button(ui_icons::label(Icon::Trash2, "Delete from disk")).clicked() {
-                            self.delete_track_from_disk(path.clone());
-                            ui.close_menu();
-                        }
+                        self.render_track_row_context_menu(ui, index, path.clone(), &add_targets);
                     });
                     if viewport_group.is_none() && row_response.response.rect.intersects(viewport) {
                         viewport_group = Some(track.group.clone());
@@ -3488,6 +3473,56 @@ impl AudioOrbitApp {
                 }
             });
         self.state.ui.playlist_scroll_offset_y = scroll_output.state.offset.y.max(0.0);
+    }
+
+    fn render_track_row_context_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        index: usize,
+        path: PathBuf,
+        add_targets: &[(usize, String, PlaylistKind)],
+    ) {
+        if ui.button(ui_icons::label(Icon::Play, "Play now")).clicked() {
+            self.selected_track_index = Some(index);
+            self.play_path(path.clone(), Some(index), 0.0);
+            ui.close_menu();
+        }
+        if ui.button(ui_icons::label(Icon::Info, "Details")).clicked() {
+            self.details_modal = Some(DetailsModal::Track(path.clone()));
+            ui.close_menu();
+        }
+        if ui.button(ui_icons::label(Icon::ExternalLink, "Show in File Explorer")).clicked() {
+            self.reveal_track_in_file_manager(path.clone());
+            ui.close_menu();
+        }
+
+        ui.menu_button(ui_icons::label(Icon::ListPlus, "Add to playlist"), |ui| {
+            for (target_index, target_name, kind) in add_targets.iter() {
+                if kind.accepts_manual_tracks() {
+                    let label = format!("{} {}", kind.icon(), target_name);
+                    if ui.button(label).clicked() {
+                        self.add_track_to_playlist(path.clone(), *target_index);
+                        ui.close_menu();
+                    }
+                }
+            }
+        });
+
+        let can_remove_from_playlist = self
+            .current_playlist()
+            .map(|playlist| playlist.kind != PlaylistKind::Folder)
+            .unwrap_or(false);
+        if ui
+            .add_enabled(can_remove_from_playlist, egui::Button::new(ui_icons::label(Icon::ListMinus, "Remove from playlist")))
+            .clicked()
+        {
+            self.remove_track_from_current_playlist(index);
+            ui.close_menu();
+        }
+        if ui.button(ui_icons::label(Icon::Trash2, "Delete from disk")).clicked() {
+            self.delete_track_from_disk(path);
+            ui.close_menu();
+        }
     }
 
     fn render_profile_panel(&mut self, ui: &mut egui::Ui) {
@@ -4796,10 +4831,10 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, peaks: &[f32]) -> egui::Response {
 
     painter.rect_filled(rect, 8.0, egui::Color32::from_black_alpha(210));
 
-    let bar_count = (rect.width() / 3.2).round().clamp(48.0, 900.0) as usize;
-    let gap = 0.85;
+    let bar_count = (rect.width() / 2.8).round().clamp(80.0, 900.0) as usize;
+    let gap = 0.75;
     let bar_width = ((rect.width() - gap * bar_count.saturating_sub(1) as f32) / bar_count.max(1) as f32)
-        .clamp(0.75, 2.4);
+        .clamp(0.65, 2.2);
     let visible_values = if peaks.len() == bar_count {
         peaks.to_vec()
     } else {
@@ -4809,13 +4844,22 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, peaks: &[f32]) -> egui::Response {
     let mut active_values: Vec<f32> = visible_values
         .iter()
         .copied()
-        .filter(|value| *value > 0.0005)
+        .filter(|value| *value > 0.0008)
         .collect();
-    let peak = active_values.iter().copied().fold(0.0_f32, f32::max).max(0.06);
     active_values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-    let floor_index = ((active_values.len().saturating_sub(1)) as f32 * 0.12) as usize;
-    let noise_floor = active_values.get(floor_index).copied().unwrap_or(0.0).min(peak * 0.55);
-    let dynamic_range = (peak - noise_floor).max(0.035);
+
+    let percentile = |values: &[f32], pct: f32| -> f32 {
+        if values.is_empty() {
+            return 0.0;
+        }
+        let index = ((values.len().saturating_sub(1)) as f32 * pct.clamp(0.0, 1.0)).round() as usize;
+        values.get(index).copied().unwrap_or(0.0)
+    };
+
+    let noise_floor = percentile(&active_values, 0.08);
+    let body_peak = percentile(&active_values, 0.92).max(0.035);
+    let hard_peak = active_values.last().copied().unwrap_or(body_peak).max(body_peak);
+    let dynamic_range = (body_peak - noise_floor).max(0.025);
 
     for index in 0..bar_count {
         let x1 = rect.left() + index as f32 * (bar_width + gap);
@@ -4825,14 +4869,16 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, peaks: &[f32]) -> egui::Response {
         }
 
         let value = visible_values.get(index).copied().unwrap_or(0.0);
-        let has_signal = value > 0.0005;
+        let has_signal = value > 0.0008;
         let normalized = if has_signal {
-            ((value - noise_floor) / dynamic_range).clamp(0.018, 1.0).powf(0.68)
+            let main_body = ((value - noise_floor) / dynamic_range).clamp(0.0, 1.0);
+            let transient = (value / hard_peak.max(0.04)).clamp(0.0, 1.0);
+            (main_body * 0.78 + transient * 0.22).clamp(0.0, 1.0).powf(0.82)
         } else {
             0.0
         };
         let height = if has_signal {
-            (rect.height() * 0.84 * normalized).max(3.0)
+            (rect.height() * 0.86 * normalized).clamp(2.0, rect.height() * 0.90)
         } else {
             0.0
         };
@@ -4841,7 +4887,7 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, peaks: &[f32]) -> egui::Response {
         let color = if has_signal {
             visuals.selection.bg_fill
         } else {
-            visuals.widgets.inactive.fg_stroke.color.linear_multiply(0.18)
+            visuals.widgets.inactive.fg_stroke.color.linear_multiply(0.16)
         };
 
         if has_signal {
@@ -4853,7 +4899,7 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, peaks: &[f32]) -> egui::Response {
         } else {
             let center_y = rect.center().y;
             painter.rect_filled(
-                egui::Rect::from_min_max(egui::pos2(x1, center_y - 0.5), egui::pos2(x2, center_y + 0.5)),
+                egui::Rect::from_min_max(egui::pos2(x1, center_y - 0.45), egui::pos2(x2, center_y + 0.45)),
                 bar_width / 2.0,
                 color,
             );
@@ -5104,22 +5150,25 @@ fn display_parent(path: &Path) -> String {
 
 
 fn detail_row(ui: &mut egui::Ui, label: &str, value: &str) {
-    let available_width = ui.available_width();
-    ui.horizontal(|ui| {
+    let available_width = ui.available_width().max(260.0);
+    let label_width = available_width.min(170.0);
+    let value_width = (available_width - label_width - 14.0).max(120.0);
+
+    ui.horizontal_top(|ui| {
         ui.set_width(available_width);
-        ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-            ui.add_sized(
-                egui::vec2(150.0, 20.0),
-                egui::Label::new(
-                    egui::RichText::new(label)
-                        .strong()
-                        .color(ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.72)),
-                ),
+        ui.vertical(|ui| {
+            ui.set_min_width(label_width);
+            ui.set_max_width(label_width);
+            ui.label(
+                egui::RichText::new(label)
+                    .strong()
+                    .color(ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.72)),
             );
-            ui.add_sized(
-                egui::vec2((available_width - 158.0).max(120.0), 20.0),
-                egui::Label::new(value).wrap(),
-            );
+        });
+        ui.vertical(|ui| {
+            ui.set_min_width(value_width);
+            ui.set_max_width(value_width);
+            ui.add(egui::Label::new(value).wrap());
         });
     });
     ui.add_space(4.0);

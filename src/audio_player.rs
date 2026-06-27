@@ -15,7 +15,7 @@ use std::{
 };
 
 const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 180;
-const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 10;
+const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 6;
 const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
 
 #[derive(Clone, Debug)]
@@ -243,12 +243,12 @@ fn record_radio_peak(visualizer: &RadioVisualizerHandle, sample_rate: u32, peak:
         } else {
             (state.bucket_energy / state.bucket_sample_count as f64).sqrt() as f32
         };
-        let envelope = (rms * 2.75).max(state.current_peak * 0.72).clamp(0.0, 1.0);
+        let envelope = (rms * 1.65 + state.current_peak * 0.28).clamp(0.0, 1.0);
         let previous = state.peaks.back().map(|bucket| bucket.peak).unwrap_or(state.smoothed_peak);
         state.smoothed_peak = if envelope > previous {
-            previous * 0.38 + envelope * 0.62
+            previous * 0.30 + envelope * 0.70
         } else {
-            previous * 0.88 + envelope * 0.12
+            previous * 0.82 + envelope * 0.18
         };
         let display_peak = state.smoothed_peak.clamp(0.0, 1.0);
         let now = Instant::now();
@@ -376,26 +376,33 @@ impl AudioPlayer {
     }
 
     pub fn radio_visualizer_peaks(&self, requested_points: usize) -> Vec<f32> {
-        let Ok(state) = self.radio_visualizer.lock() else {
+        let Ok(mut state) = self.radio_visualizer.lock() else {
             return Vec::new();
         };
         if requested_points == 0 || state.peaks.is_empty() {
             return Vec::new();
         }
 
+        while state.peaks.len() > requested_points {
+            state.peaks.pop_front();
+        }
+
         let mut rendered = vec![0.0_f32; requested_points];
         let now = Instant::now();
-        let history_seconds = RADIO_VISUALIZER_HISTORY_SECONDS as f32;
-        let history = Duration::from_secs(RADIO_VISUALIZER_HISTORY_SECONDS as u64);
-        let window_start = now.checked_sub(history).unwrap_or(now);
+        let bucket_seconds = 1.0 / RADIO_VISUALIZER_BUCKETS_PER_SECOND as f32;
+        let visible_seconds = requested_points as f32 * bucket_seconds;
 
         for bucket in state.peaks.iter() {
-            if bucket.at < window_start {
+            let age_seconds = now.duration_since(bucket.at).as_secs_f32();
+            if age_seconds > visible_seconds {
                 continue;
             }
-            let age_from_start = bucket.at.duration_since(window_start).as_secs_f32();
-            let position = (age_from_start / history_seconds).clamp(0.0, 0.999_999);
-            let index = (position * requested_points as f32).floor() as usize;
+
+            let offset_from_right = (age_seconds / bucket_seconds).floor() as usize;
+            if offset_from_right >= requested_points {
+                continue;
+            }
+            let index = requested_points - 1 - offset_from_right;
             if let Some(slot) = rendered.get_mut(index) {
                 *slot = slot.max(bucket.peak);
             }
