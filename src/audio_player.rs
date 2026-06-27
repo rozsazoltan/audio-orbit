@@ -14,8 +14,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 60;
-const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 2;
+const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 15;
+const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 8;
 const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
 
 #[derive(Clone, Debug)]
@@ -73,6 +73,7 @@ impl<R> Seek for RadioStream<R> {
 struct RadioVisualizerState {
     peaks: VecDeque<f32>,
     current_peak: f32,
+    smoothed_peak: f32,
     sample_counter: usize,
 }
 
@@ -211,17 +212,25 @@ fn record_radio_peak(visualizer: &RadioVisualizerHandle, sample_rate: u32, peak:
     let Ok(mut state) = visualizer.lock() else {
         return;
     };
-    state.current_peak = state.current_peak.max(peak.min(1.0));
+
+    let peak = peak.abs().min(1.0);
+    let envelope = peak.powf(0.72);
+    state.smoothed_peak = if envelope > state.smoothed_peak {
+        state.smoothed_peak * 0.62 + envelope * 0.38
+    } else {
+        state.smoothed_peak * 0.90 + envelope * 0.10
+    };
+    state.current_peak = state.current_peak.max(state.smoothed_peak);
     state.sample_counter += 1;
 
     let samples_per_bucket = (sample_rate.max(1) as usize / RADIO_VISUALIZER_BUCKETS_PER_SECOND).max(1);
     if state.sample_counter >= samples_per_bucket {
-        let peak = state.current_peak;
+        let peak = (state.current_peak * 1.18).clamp(0.015, 1.0);
         state.peaks.push_back(peak);
         while state.peaks.len() > RADIO_VISUALIZER_MAX_BUCKETS {
             state.peaks.pop_front();
         }
-        state.current_peak = 0.0;
+        state.current_peak = state.smoothed_peak * 0.72;
         state.sample_counter = 0;
     }
 }
@@ -388,6 +397,33 @@ impl AudioPlayer {
         self.stop();
         let rendered_duration = Duration::from_secs_f32(render_info.rendered_duration_seconds.max(0.0));
         self.play_processed_samples(processed_samples, sample_rate, rendered_duration, path, settings, start_seconds)?;
+
+        Ok(playback_info(path, render_info))
+    }
+
+    pub fn play_file_with_orbit_from_live_position(
+        &mut self,
+        path: &Path,
+        settings: DspSettings,
+        start_seconds: f32,
+    ) -> Result<PlaybackInfo> {
+        let render_started_at = Instant::now();
+        let (mut processed_samples, mut render_info, sample_rate) = self.render_file(path, settings, start_seconds)?;
+        let render_elapsed_seconds = render_started_at.elapsed().as_secs_f32();
+        let compensated_start_seconds = start_seconds + render_elapsed_seconds;
+
+        if render_elapsed_seconds > 0.025 {
+            let trim_frames = (render_elapsed_seconds * sample_rate as f32).round().max(0.0) as usize;
+            let trim_samples = (trim_frames * 2).min(processed_samples.len());
+            if trim_samples > 0 && trim_samples < processed_samples.len() {
+                processed_samples.drain(0..trim_samples);
+                render_info.rendered_duration_seconds = (render_info.rendered_duration_seconds - render_elapsed_seconds).max(0.0);
+            }
+        }
+
+        self.stop();
+        let rendered_duration = Duration::from_secs_f32(render_info.rendered_duration_seconds.max(0.0));
+        self.play_processed_samples(processed_samples, sample_rate, rendered_duration, path, settings, compensated_start_seconds)?;
 
         Ok(playback_info(path, render_info))
     }

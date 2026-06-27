@@ -123,6 +123,8 @@ pub struct RadioStation {
     pub name: String,
     pub url: String,
     #[serde(default)]
+    pub last_station_name: Option<String>,
+    #[serde(default)]
     pub last_stream_title: Option<String>,
     #[serde(default)]
     pub favorite: bool,
@@ -133,6 +135,7 @@ impl RadioStation {
         Self {
             name: name.into(),
             url: url.into(),
+            last_station_name: None,
             last_stream_title: None,
             favorite: false,
         }
