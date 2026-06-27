@@ -3011,21 +3011,32 @@ impl AudioOrbitApp {
                                 favorite_toggle_index = Some(index);
                             }
 
-                            let info_width = if station_info.is_empty() {
-                                0.0
-                            } else {
-                                ((station_info.chars().count() as f32 * 5.8) + 18.0)
-                                    .clamp(92.0, (row_width * 0.36).max(112.0))
-                            };
-                            let title_width = (ui.available_width() - info_width - 4.0).max(140.0);
-                            let (title_rect, title_response) = ui.allocate_exact_size(
-                                egui::vec2(title_width, 24.0),
+                            let body_width = ui.available_width().max(160.0);
+                            let (body_rect, title_response) = ui.allocate_exact_size(
+                                egui::vec2(body_width, 24.0),
                                 egui::Sense::click(),
                             );
 
                             if selected {
-                                ui.painter().rect_filled(title_rect, 5.0, ui.visuals().selection.bg_fill);
+                                ui.painter().rect_filled(body_rect, 5.0, ui.visuals().selection.bg_fill);
                             }
+
+                            let body_padding = 8.0;
+                            let info_width = if station_info.is_empty() {
+                                0.0
+                            } else {
+                                compact_right_text_width(&station_info, 12.0)
+                                    .min((body_rect.width() * 0.34).min(220.0).max(72.0))
+                            };
+                            let info_gap = if station_info.is_empty() { 0.0 } else { 8.0 };
+                            let title_left = body_rect.left() + body_padding;
+                            let title_right = (body_rect.right() - body_padding - info_width - info_gap)
+                                .max(title_left + 32.0);
+                            let title_rect = egui::Rect::from_min_max(
+                                egui::pos2(title_left, body_rect.top()),
+                                egui::pos2(title_right, body_rect.bottom()),
+                            );
+
                             let text_color = if selected {
                                 ui.visuals().selection.stroke.color
                             } else if active {
@@ -3033,14 +3044,33 @@ impl AudioOrbitApp {
                             } else {
                                 ui.visuals().widgets.inactive.fg_stroke.color
                             };
-                            let station_title = ellipsize_to_width(&station_title, title_width - 6.0, 14.0);
+                            let station_title = ellipsize_to_width(&station_title, title_rect.width(), 14.0);
                             ui.painter().with_clip_rect(title_rect).text(
-                                egui::pos2(title_rect.left() + 8.0, title_rect.center().y),
+                                egui::pos2(title_rect.left(), title_rect.center().y),
                                 egui::Align2::LEFT_CENTER,
                                 station_title,
                                 egui::FontId::proportional(14.0),
                                 text_color,
                             );
+
+                            if info_width > 0.0 {
+                                let info_rect = egui::Rect::from_min_max(
+                                    egui::pos2(body_rect.right() - body_padding - info_width, body_rect.top()),
+                                    egui::pos2(body_rect.right() - body_padding, body_rect.bottom()),
+                                );
+                                let station_info = ellipsize_to_width(&station_info, info_rect.width(), 12.0);
+                                ui.painter().with_clip_rect(info_rect).text(
+                                    egui::pos2(info_rect.right(), info_rect.center().y),
+                                    egui::Align2::RIGHT_CENTER,
+                                    station_info,
+                                    egui::FontId::proportional(12.0),
+                                    if active || row_hovered {
+                                        ui.visuals().widgets.inactive.fg_stroke.color
+                                    } else {
+                                        ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.50)
+                                    },
+                                );
+                            }
 
                             if title_response.clicked() {
                                 self.state.selected_radio_index = Some(index);
@@ -3049,27 +3079,6 @@ impl AudioOrbitApp {
                             }
                             if title_response.double_clicked() {
                                 play_radio_index = Some(index);
-                            }
-
-                            if info_width > 0.0 {
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    let (info_rect, _) = ui.allocate_exact_size(
-                                        egui::vec2(info_width, 20.0),
-                                        egui::Sense::hover(),
-                                    );
-                                    let station_info = ellipsize_to_width(&station_info, info_width - 6.0, 12.0);
-                                    ui.painter().with_clip_rect(info_rect).text(
-                                        egui::pos2(info_rect.right() - 4.0, info_rect.center().y),
-                                        egui::Align2::RIGHT_CENTER,
-                                        station_info,
-                                        egui::FontId::proportional(12.0),
-                                        if active || row_hovered {
-                                            ui.visuals().widgets.inactive.fg_stroke.color
-                                        } else {
-                                            ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.50)
-                                        },
-                                    );
-                                });
                             }
                         },
                     );
@@ -3378,18 +3387,28 @@ impl AudioOrbitApp {
                                 self.toggle_favorite(path.clone());
                             }
 
-                            let metadata_width = ((metadata.chars().count() as f32 * 6.0) + 12.0)
-                                .clamp(92.0, (row_width * 0.34).max(112.0));
-                            let right_reserved_width = metadata_width + 4.0;
-                            let title_width = (ui.available_width() - right_reserved_width).max(140.0);
-                            let (title_rect, response) = ui.allocate_exact_size(
-                                egui::vec2(title_width, 24.0),
+                            let body_width = ui.available_width().max(160.0);
+                            let (body_rect, response) = ui.allocate_exact_size(
+                                egui::vec2(body_width, 24.0),
                                 egui::Sense::click(),
                             );
 
                             if is_selected {
-                                ui.painter().rect_filled(title_rect, 5.0, ui.visuals().selection.bg_fill);
+                                ui.painter().rect_filled(body_rect, 5.0, ui.visuals().selection.bg_fill);
                             }
+
+                            let body_padding = 8.0;
+                            let metadata_width = compact_right_text_width(&metadata, 12.0)
+                                .min((body_rect.width() * 0.34).min(220.0).max(72.0));
+                            let metadata_gap = if metadata.is_empty() { 0.0 } else { 8.0 };
+                            let title_left = body_rect.left() + body_padding;
+                            let title_right = (body_rect.right() - body_padding - metadata_width - metadata_gap)
+                                .max(title_left + 32.0);
+                            let title_rect = egui::Rect::from_min_max(
+                                egui::pos2(title_left, body_rect.top()),
+                                egui::pos2(title_right, body_rect.bottom()),
+                            );
+
                             let text_color = if is_selected {
                                 ui.visuals().selection.stroke.color
                             } else if is_active {
@@ -3397,14 +3416,33 @@ impl AudioOrbitApp {
                             } else {
                                 ui.visuals().widgets.inactive.fg_stroke.color
                             };
-                            let title = ellipsize_to_width(&title, title_width - 6.0, 14.0);
+                            let title = ellipsize_to_width(&title, title_rect.width(), 14.0);
                             ui.painter().with_clip_rect(title_rect).text(
-                                egui::pos2(title_rect.left() + 8.0, title_rect.center().y),
+                                egui::pos2(title_rect.left(), title_rect.center().y),
                                 egui::Align2::LEFT_CENTER,
                                 title,
                                 egui::FontId::proportional(14.0),
                                 text_color,
                             );
+
+                            if !metadata.is_empty() {
+                                let metadata_rect = egui::Rect::from_min_max(
+                                    egui::pos2(body_rect.right() - body_padding - metadata_width, body_rect.top()),
+                                    egui::pos2(body_rect.right() - body_padding, body_rect.bottom()),
+                                );
+                                let metadata = ellipsize_to_width(&metadata, metadata_rect.width(), 12.0);
+                                ui.painter().with_clip_rect(metadata_rect).text(
+                                    egui::pos2(metadata_rect.right(), metadata_rect.center().y),
+                                    egui::Align2::RIGHT_CENTER,
+                                    metadata,
+                                    egui::FontId::proportional(12.0),
+                                    if is_active || row_hovered {
+                                        ui.visuals().widgets.inactive.fg_stroke.color
+                                    } else {
+                                        ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.50)
+                                    },
+                                );
+                            }
 
                             if response.clicked() {
                                 self.selected_track_index = Some(index);
@@ -3418,24 +3456,6 @@ impl AudioOrbitApp {
                             }
                             response.context_menu(|ui| {
                                 self.render_track_row_context_menu(ui, index, path.clone(), &add_targets);
-                            });
-
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let (metadata_rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(metadata_width, 20.0),
-                                    egui::Sense::hover(),
-                                );
-                                ui.painter().with_clip_rect(metadata_rect).text(
-                                    egui::pos2(metadata_rect.right() - 4.0, metadata_rect.center().y),
-                                    egui::Align2::RIGHT_CENTER,
-                                    metadata,
-                                    egui::FontId::proportional(12.0),
-                                    if is_active || row_hovered {
-                                        ui.visuals().widgets.inactive.fg_stroke.color
-                                    } else {
-                                        ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.50)
-                                    },
-                                );
                             });
                         },
                     );
@@ -4719,6 +4739,15 @@ fn clean_radio_metadata_value(value: &str) -> String {
         .to_owned()
 }
 
+
+fn compact_right_text_width(value: &str, font_size: f32) -> f32 {
+    if value.trim().is_empty() {
+        return 0.0;
+    }
+
+    let average_char_width = (font_size * 0.50).max(4.8);
+    ((value.chars().count() as f32 * average_char_width) + 10.0).max(32.0)
+}
 
 fn ellipsize_to_width(value: &str, width: f32, font_size: f32) -> String {
     let trimmed = value.trim();
