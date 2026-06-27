@@ -99,7 +99,7 @@ pub fn render_orbit_to_stereo(
     let waveform = waveform_peaks(&mono, WAVEFORM_POINTS);
 
     let output_level = settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
-    let silence_floor = silence_floor_from_percent(settings.silence_level_threshold_percent, &mono);
+    let silence_floor = automatic_silence_floor(&mono);
     let skip_ranges = if settings.skip_silence_enabled {
         detect_silence_ranges(
             &mono,
@@ -274,9 +274,9 @@ pub fn render_orbit_to_stereo(
     )
 }
 
-fn silence_floor_from_percent(percent: u8, samples: &[f32]) -> f32 {
+fn automatic_silence_floor(samples: &[f32]) -> f32 {
     if samples.is_empty() {
-        return 0.008;
+        return 0.012;
     }
 
     let mut levels = samples
@@ -285,22 +285,29 @@ fn silence_floor_from_percent(percent: u8, samples: &[f32]) -> f32 {
         .filter(|value| value.is_finite())
         .collect::<Vec<_>>();
     if levels.is_empty() {
-        return 0.008;
+        return 0.012;
     }
 
     levels.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
     let peak = levels.last().copied().unwrap_or(0.0).max(0.001);
-    let low_noise_index = ((levels.len().saturating_sub(1)) as f32 * 0.12) as usize;
-    let low_noise_floor = levels.get(low_noise_index).copied().unwrap_or(0.0);
+    let percentile = |fraction: f32| -> f32 {
+        let index = ((levels.len().saturating_sub(1)) as f32 * fraction.clamp(0.0, 1.0)) as usize;
+        levels.get(index).copied().unwrap_or(0.0)
+    };
 
-    if percent == 0 {
-        // AIMP-like "silence" is not digital zero. MP3/AAC decoders and old masters often contain
-        // tiny dither or stream noise in otherwise empty parts, so level 0 still means near-silence.
-        (0.006_f32.max(peak * 0.004).max(low_noise_floor * 3.5)).clamp(0.004, 0.018)
-    } else {
-        let user_floor = percent.clamp(1, 20) as f32 / 100.0;
-        user_floor.max(0.008).max(low_noise_floor * 3.0).clamp(0.006, 0.20)
-    }
+    let p08 = percentile(0.08);
+    let p18 = percentile(0.18);
+    let p35 = percentile(0.35);
+
+    // AIMP-like behavior: the user controls only how long a gap must be. The level is inferred
+    // from the track's own noise floor so MP3/AAC dither and tiny decoder noise still count as silence,
+    // while genuinely quiet musical passages are not aggressively removed.
+    (0.010_f32
+        .max(p08 * 5.0)
+        .max(p18 * 3.0)
+        .max(p35 * 1.35)
+        .max(peak * 0.005))
+        .clamp(0.006, 0.034)
 }
 
 fn detect_silence_ranges(
@@ -318,7 +325,7 @@ fn detect_silence_ranges(
     let min_silent_windows = ((threshold_seconds.max(1) as f32 * sample_rate as f32) / window_frames as f32)
         .ceil()
         .max(1.0) as usize;
-    let bridge_tolerance_windows = ((sample_rate as f32 * 0.16) / window_frames as f32)
+    let bridge_tolerance_windows = ((sample_rate as f32 * 0.24) / window_frames as f32)
         .ceil()
         .max(1.0) as usize;
     let edge_padding_frames = ((sample_rate as f32 * 0.025) as usize).max(1);
@@ -333,7 +340,7 @@ fn detect_silence_ranges(
         let end = (start + chunk.len()).min(mono.len());
         let rms = (chunk.iter().map(|sample| sample * sample).sum::<f32>() / chunk.len().max(1) as f32).sqrt();
         let peak = chunk.iter().map(|sample| sample.abs()).fold(0.0_f32, f32::max);
-        let silent = rms <= silence_floor && peak <= silence_floor * 7.5;
+        let silent = rms <= silence_floor && peak <= silence_floor * 12.0;
 
         if silent {
             if candidate_start.is_none() {
@@ -344,7 +351,7 @@ fn detect_silence_ranges(
             continue;
         }
 
-        if candidate_start.is_some() && bridge_windows < bridge_tolerance_windows && rms <= silence_floor * 1.8 {
+        if candidate_start.is_some() && bridge_windows < bridge_tolerance_windows && rms <= silence_floor * 2.25 {
             bridge_windows += 1;
             continue;
         }

@@ -30,6 +30,15 @@ pub struct PlaybackInfo {
     pub silence_ranges: Vec<(f32, f32)>,
 }
 
+pub struct PreparedPlayback {
+    path: PathBuf,
+    settings: DspSettings,
+    start_seconds: f32,
+    processed_samples: Vec<f32>,
+    render_info: RenderInfo,
+    sample_rate: u32,
+}
+
 struct RadioStream<R> {
     inner: Mutex<R>,
     position: u64,
@@ -74,6 +83,8 @@ struct RadioVisualizerState {
     peaks: VecDeque<f32>,
     current_peak: f32,
     smoothed_peak: f32,
+    bucket_energy: f64,
+    bucket_sample_count: usize,
     sample_counter: usize,
 }
 
@@ -213,24 +224,34 @@ fn record_radio_peak(visualizer: &RadioVisualizerHandle, sample_rate: u32, peak:
         return;
     };
 
-    let peak = peak.abs().min(1.0);
-    let envelope = peak.powf(0.72);
-    state.smoothed_peak = if envelope > state.smoothed_peak {
-        state.smoothed_peak * 0.62 + envelope * 0.38
-    } else {
-        state.smoothed_peak * 0.90 + envelope * 0.10
-    };
-    state.current_peak = state.current_peak.max(state.smoothed_peak);
+    let level = peak.abs().min(1.0);
+    state.current_peak = state.current_peak.max(level);
+    state.bucket_energy += (level as f64) * (level as f64);
+    state.bucket_sample_count += 1;
     state.sample_counter += 1;
 
     let samples_per_bucket = (sample_rate.max(1) as usize / RADIO_VISUALIZER_BUCKETS_PER_SECOND).max(1);
     if state.sample_counter >= samples_per_bucket {
-        let peak = (state.current_peak * 1.18).clamp(0.015, 1.0);
-        state.peaks.push_back(peak);
+        let rms = if state.bucket_sample_count == 0 {
+            0.0
+        } else {
+            (state.bucket_energy / state.bucket_sample_count as f64).sqrt() as f32
+        };
+        let envelope = (rms * 2.15).max(state.current_peak * 0.68).powf(0.72).clamp(0.0, 1.0);
+        let previous = state.peaks.back().copied().unwrap_or(state.smoothed_peak);
+        state.smoothed_peak = if envelope > previous {
+            previous * 0.48 + envelope * 0.52
+        } else {
+            previous * 0.84 + envelope * 0.16
+        };
+        let display_peak = (state.smoothed_peak * 1.12).clamp(0.012, 1.0);
+        state.peaks.push_back(display_peak);
         while state.peaks.len() > RADIO_VISUALIZER_MAX_BUCKETS {
             state.peaks.pop_front();
         }
-        state.current_peak = state.smoothed_peak * 0.72;
+        state.current_peak = 0.0;
+        state.bucket_energy = 0.0;
+        state.bucket_sample_count = 0;
         state.sample_counter = 0;
     }
 }
@@ -386,19 +407,73 @@ impl AudioPlayer {
         rendered
     }
 
+    pub fn prepare_file(path: PathBuf, settings: DspSettings, start_seconds: f32) -> Result<PreparedPlayback> {
+        let (processed_samples, render_info, sample_rate) = render_file_data(&path, settings, start_seconds)?;
+        Ok(PreparedPlayback {
+            path,
+            settings,
+            start_seconds,
+            processed_samples,
+            render_info,
+            sample_rate,
+        })
+    }
+
+    pub fn play_prepared(&mut self, prepared: PreparedPlayback) -> Result<PlaybackInfo> {
+        let PreparedPlayback {
+            path,
+            settings,
+            start_seconds,
+            processed_samples,
+            render_info,
+            sample_rate,
+        } = prepared;
+
+        self.stop();
+        let rendered_duration = Duration::from_secs_f32(render_info.rendered_duration_seconds.max(0.0));
+        self.play_processed_samples(processed_samples, sample_rate, rendered_duration, &path, settings, start_seconds)?;
+
+        Ok(playback_info(&path, render_info))
+    }
+
+    pub fn play_prepared_from_live_position(
+        &mut self,
+        mut prepared: PreparedPlayback,
+        render_elapsed_seconds: f32,
+    ) -> Result<PlaybackInfo> {
+        let compensated_start_seconds = prepared.start_seconds + render_elapsed_seconds.max(0.0);
+
+        if render_elapsed_seconds > 0.025 {
+            let trim_frames = (render_elapsed_seconds * prepared.sample_rate as f32).round().max(0.0) as usize;
+            let trim_samples = (trim_frames * 2).min(prepared.processed_samples.len());
+            if trim_samples > 0 && trim_samples < prepared.processed_samples.len() {
+                prepared.processed_samples.drain(0..trim_samples);
+                prepared.render_info.rendered_duration_seconds = (prepared.render_info.rendered_duration_seconds - render_elapsed_seconds).max(0.0);
+            }
+        }
+
+        self.stop();
+        let rendered_duration = Duration::from_secs_f32(prepared.render_info.rendered_duration_seconds.max(0.0));
+        self.play_processed_samples(
+            prepared.processed_samples,
+            prepared.sample_rate,
+            rendered_duration,
+            &prepared.path,
+            prepared.settings,
+            compensated_start_seconds,
+        )?;
+
+        Ok(playback_info(&prepared.path, prepared.render_info))
+    }
+
     pub fn play_file_with_orbit_from(
         &mut self,
         path: &Path,
         settings: DspSettings,
         start_seconds: f32,
     ) -> Result<PlaybackInfo> {
-        let (processed_samples, render_info, sample_rate) = self.render_file(path, settings, start_seconds)?;
-
-        self.stop();
-        let rendered_duration = Duration::from_secs_f32(render_info.rendered_duration_seconds.max(0.0));
-        self.play_processed_samples(processed_samples, sample_rate, rendered_duration, path, settings, start_seconds)?;
-
-        Ok(playback_info(path, render_info))
+        let prepared = Self::prepare_file(path.to_path_buf(), settings, start_seconds)?;
+        self.play_prepared(prepared)
     }
 
     pub fn play_file_with_orbit_from_live_position(
@@ -408,39 +483,20 @@ impl AudioPlayer {
         start_seconds: f32,
     ) -> Result<PlaybackInfo> {
         let render_started_at = Instant::now();
-        let (mut processed_samples, mut render_info, sample_rate) = self.render_file(path, settings, start_seconds)?;
-        let render_elapsed_seconds = render_started_at.elapsed().as_secs_f32();
-        let compensated_start_seconds = start_seconds + render_elapsed_seconds;
-
-        if render_elapsed_seconds > 0.025 {
-            let trim_frames = (render_elapsed_seconds * sample_rate as f32).round().max(0.0) as usize;
-            let trim_samples = (trim_frames * 2).min(processed_samples.len());
-            if trim_samples > 0 && trim_samples < processed_samples.len() {
-                processed_samples.drain(0..trim_samples);
-                render_info.rendered_duration_seconds = (render_info.rendered_duration_seconds - render_elapsed_seconds).max(0.0);
-            }
-        }
-
-        self.stop();
-        let rendered_duration = Duration::from_secs_f32(render_info.rendered_duration_seconds.max(0.0));
-        self.play_processed_samples(processed_samples, sample_rate, rendered_duration, path, settings, compensated_start_seconds)?;
-
-        Ok(playback_info(path, render_info))
+        let prepared = Self::prepare_file(path.to_path_buf(), settings, start_seconds)?;
+        self.play_prepared_from_live_position(prepared, render_started_at.elapsed().as_secs_f32())
     }
 
-    pub fn crossfade_to_file_with_orbit_from(
+    pub fn crossfade_to_prepared(
         &mut self,
-        path: &Path,
-        settings: DspSettings,
-        start_seconds: f32,
+        mut prepared: PreparedPlayback,
         crossfade_seconds: f32,
     ) -> Result<PlaybackInfo> {
-        let (mut processed_samples, render_info, sample_rate) = self.render_file(path, settings, start_seconds)?;
         let fade_seconds = crossfade_seconds
             .max(0.0)
-            .min(render_info.rendered_duration_seconds.max(0.0));
+            .min(prepared.render_info.rendered_duration_seconds.max(0.0));
 
-        apply_fade_in(&mut processed_samples, sample_rate, fade_seconds);
+        apply_fade_in(&mut prepared.processed_samples, prepared.sample_rate, fade_seconds);
 
         if fade_seconds > 0.05 {
             if let Some(old_sink) = self.sink.take() {
@@ -450,42 +506,28 @@ impl AudioPlayer {
             self.stop();
         }
 
-        let rendered_duration = Duration::from_secs_f32(render_info.rendered_duration_seconds.max(0.0));
-        self.play_processed_samples(processed_samples, sample_rate, rendered_duration, path, settings, start_seconds)?;
+        let rendered_duration = Duration::from_secs_f32(prepared.render_info.rendered_duration_seconds.max(0.0));
+        self.play_processed_samples(
+            prepared.processed_samples,
+            prepared.sample_rate,
+            rendered_duration,
+            &prepared.path,
+            prepared.settings,
+            prepared.start_seconds,
+        )?;
 
-        Ok(playback_info(path, render_info))
+        Ok(playback_info(&prepared.path, prepared.render_info))
     }
 
-    fn render_file(
-        &self,
+    pub fn crossfade_to_file_with_orbit_from(
+        &mut self,
         path: &Path,
         settings: DspSettings,
         start_seconds: f32,
-    ) -> Result<(Vec<f32>, RenderInfo, u32)> {
-        let file = File::open(path)
-            .with_context(|| format!("failed to open audio file: {}", path.display()))?;
-        let decoder = Decoder::new(BufReader::new(file))
-            .with_context(|| format!("failed to decode audio file: {}", path.display()))?;
-
-        let input_channels = decoder.channels();
-        let sample_rate = decoder.sample_rate();
-        if sample_rate == 0 {
-            anyhow::bail!("the selected audio file reported an invalid sample rate");
-        }
-
-        let input_samples: Vec<f32> = decoder.convert_samples::<f32>().collect();
-        if input_samples.is_empty() {
-            anyhow::bail!("the selected audio file did not contain any decoded samples");
-        }
-
-        let (processed_samples, render_info) =
-            render_orbit_to_stereo(&input_samples, input_channels, sample_rate, settings, start_seconds);
-
-        if processed_samples.is_empty() {
-            anyhow::bail!("the rendered audio was empty after processing; disable silence skip or seek earlier in the track");
-        }
-
-        Ok((processed_samples, render_info, sample_rate))
+        crossfade_seconds: f32,
+    ) -> Result<PlaybackInfo> {
+        let prepared = Self::prepare_file(path.to_path_buf(), settings, start_seconds)?;
+        self.crossfade_to_prepared(prepared, crossfade_seconds)
     }
 
     pub fn seek_current(&mut self, seconds: f32) -> Result<Option<PlaybackInfo>> {
@@ -652,6 +694,37 @@ pub fn current_default_output_device_name() -> String {
     host.default_output_device()
         .and_then(|device| device.name().ok())
         .unwrap_or_else(|| "Default output device".to_owned())
+}
+
+fn render_file_data(
+    path: &Path,
+    settings: DspSettings,
+    start_seconds: f32,
+) -> Result<(Vec<f32>, RenderInfo, u32)> {
+    let file = File::open(path)
+        .with_context(|| format!("failed to open audio file: {}", path.display()))?;
+    let decoder = Decoder::new(BufReader::new(file))
+        .with_context(|| format!("failed to decode audio file: {}", path.display()))?;
+
+    let input_channels = decoder.channels();
+    let sample_rate = decoder.sample_rate();
+    if sample_rate == 0 {
+        anyhow::bail!("the selected audio file reported an invalid sample rate");
+    }
+
+    let input_samples: Vec<f32> = decoder.convert_samples::<f32>().collect();
+    if input_samples.is_empty() {
+        anyhow::bail!("the selected audio file did not contain any decoded samples");
+    }
+
+    let (processed_samples, render_info) =
+        render_orbit_to_stereo(&input_samples, input_channels, sample_rate, settings, start_seconds);
+
+    if processed_samples.is_empty() {
+        anyhow::bail!("the rendered audio was empty after processing; disable silence skip or seek earlier in the track");
+    }
+
+    Ok((processed_samples, render_info, sample_rate))
 }
 
 fn playback_info(path: &Path, render_info: RenderInfo) -> PlaybackInfo {
