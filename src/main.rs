@@ -2005,7 +2005,7 @@ impl AudioOrbitApp {
                 .clone()
                 .filter(|title| !title.trim().is_empty())
             {
-                self.status_message = format!("Identified from radio stream metadata: {title}.");
+                self.status_message = format!("Radio stream title: {title}.");
                 self.error_message = None;
                 return;
             }
@@ -2550,6 +2550,12 @@ impl eframe::App for AudioOrbitApp {
                 });
         }
 
+        if !self.status_message.is_empty() || !self.media_key_status.is_empty() {
+            egui::TopBottomPanel::bottom("status_panel").show(context, |ui| {
+                self.render_status_panel(ui);
+            });
+        }
+
         egui::CentralPanel::default().show(context, |ui| {
             self.render_main_content_panel(ui);
         });
@@ -2574,7 +2580,7 @@ impl eframe::App for AudioOrbitApp {
             self.render_details_modal(context);
         }
 
-        self.render_status_overlay(context);
+        self.render_error_toast(context);
     }
 }
 
@@ -2816,8 +2822,6 @@ impl AudioOrbitApp {
                     ui.visuals().widgets.inactive.fg_stroke.color
                 };
                 let record_text = egui::RichText::new(ui_icons::icon(Icon::Mic))
-                    .size(18.0)
-                    .strong()
                     .color(record_icon_color);
                 let record_button = if is_recording {
                     egui::Button::new(record_text).fill(egui::Color32::from_rgb(82, 24, 28))
@@ -2853,8 +2857,6 @@ impl AudioOrbitApp {
                     can_recognize,
                     egui::Button::new(
                         egui::RichText::new(ui_icons::icon(recognition_icon))
-                            .size(18.0)
-                            .strong()
                             .color(recognition_color),
                     ),
                 )
@@ -4815,7 +4817,7 @@ impl AudioOrbitApp {
     }
 
     fn render_inline_status_strip(&mut self, ui: &mut egui::Ui) {
-        if self.status_message.is_empty() && self.error_message.is_none() {
+        if self.status_message.is_empty() {
             return;
         }
         ui.add_space(6.0);
@@ -4826,55 +4828,48 @@ impl AudioOrbitApp {
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal_wrapped(|ui| {
-                    if !self.status_message.is_empty() {
-                        ui.label(self.status_message.as_str());
-                    }
-                    if let Some(error_message) = &self.error_message {
-                        if !self.status_message.is_empty() {
-                            ui.separator();
-                        }
-                        ui.colored_label(egui::Color32::RED, error_message);
-                    }
+                    ui.label(self.status_message.as_str());
                 });
             });
         ui.add_space(4.0);
     }
 
-    fn render_status_overlay(&mut self, context: &egui::Context) {
-        if self.status_message.is_empty() && self.error_message.is_none() && self.media_key_status.is_empty() {
+    fn render_status_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if !self.status_message.is_empty() {
+                ui.label(self.status_message.as_str());
+                if !self.media_key_status.is_empty() {
+                    ui.separator();
+                }
+            }
+            if !self.media_key_status.is_empty() {
+                ui.small(self.media_key_status.as_str());
+            }
+        });
+    }
+
+    fn render_error_toast(&mut self, context: &egui::Context) {
+        let Some(error_message) = self.error_message.clone() else {
             return;
-        }
+        };
 
         let screen_rect = context.screen_rect();
-        let width = (screen_rect.width() - 24.0).max(240.0);
-        egui::Area::new(egui::Id::new("status_overlay_footer"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::LEFT_BOTTOM, [12.0, -10.0])
+        let horizontal_margin = 16.0;
+        let width = (screen_rect.width() - horizontal_margin * 2.0).max(240.0);
+        egui::Area::new(egui::Id::new("error_toast_overlay"))
+            .order(egui::Order::Tooltip)
+            .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -12.0])
             .show(context, |ui| {
                 ui.set_width(width);
                 egui::Frame::new()
-                    .fill(egui::Color32::from_black_alpha(235))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(28)))
+                    .fill(egui::Color32::from_black_alpha(238))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(150, 54, 62)))
                     .corner_radius(egui::CornerRadius::same(8))
                     .inner_margin(egui::Margin::symmetric(12, 7))
                     .show(ui, |ui| {
                         ui.set_width(width);
                         ui.horizontal_wrapped(|ui| {
-                            if let Some(error_message) = &self.error_message {
-                                ui.colored_label(egui::Color32::from_rgb(255, 112, 112), error_message);
-                                if !self.status_message.is_empty() || !self.media_key_status.is_empty() {
-                                    ui.separator();
-                                }
-                            }
-                            if !self.status_message.is_empty() {
-                                ui.label(self.status_message.as_str());
-                                if !self.media_key_status.is_empty() {
-                                    ui.separator();
-                                }
-                            }
-                            if !self.media_key_status.is_empty() {
-                                ui.small(self.media_key_status.as_str());
-                            }
+                            ui.colored_label(egui::Color32::from_rgb(255, 112, 112), error_message.as_str());
                         });
                     });
             });
@@ -5274,81 +5269,48 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
     let gap = 0.75;
     let bar_width = ((rect.width() - gap * bar_count.saturating_sub(1) as f32) / bar_count.max(1) as f32)
         .clamp(0.65, 2.2);
-    let visible_values = if frame.peaks.len() == bar_count {
-        frame.peaks.clone()
-    } else {
-        resample_time_series(&frame.peaks, bar_count)
-    };
     let pitch = bar_width + gap;
-    let scroll_offset = frame.scroll_fraction.clamp(0.0, 0.995) * pitch;
+    let bucket_seconds = if frame.bucket_seconds > 0.0 { frame.bucket_seconds } else { 1.0 / 24.0 };
 
+    let zero_color = visuals.widgets.inactive.fg_stroke.color.linear_multiply(0.14);
+    let center_y = rect.center().y;
     for index in 0..bar_count {
-        let x1 = rect.left() + index as f32 * pitch - scroll_offset;
+        let x1 = rect.left() + index as f32 * pitch;
         let x2 = (x1 + bar_width).min(rect.right());
-        if x1 >= rect.right() {
-            break;
-        }
-        if x2 <= rect.left() {
+        painter.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(x1, center_y - 0.35), egui::pos2(x2, center_y + 0.35)),
+            bar_width / 2.0,
+            zero_color,
+        );
+    }
+
+    for bar in &frame.bars {
+        let offset = bar.age_seconds.max(0.0) / bucket_seconds;
+        let x2 = rect.right() - offset * pitch;
+        let x1 = x2 - bar_width;
+        if x1 >= rect.right() || x2 <= rect.left() {
             continue;
         }
 
-        let value = visible_values.get(index).copied().unwrap_or(0.0).clamp(0.0, 1.0);
-        let has_signal = value > 0.006;
-        let normalized = if has_signal { value.powf(0.86) } else { 0.0 };
-        let height = if has_signal {
-            (rect.height() * 0.88 * normalized).clamp(2.0, rect.height() * 0.92)
-        } else {
-            0.0
-        };
+        let value = bar.peak.clamp(0.0, 1.0);
+        if value <= 0.006 {
+            continue;
+        }
+        let normalized = value.powf(0.92);
+        let height = (rect.height() * 0.88 * normalized).clamp(2.0, rect.height() * 0.92);
         let y1 = rect.center().y - height / 2.0;
         let y2 = rect.center().y + height / 2.0;
-        let color = if has_signal {
-            visuals.selection.bg_fill
-        } else {
-            visuals.widgets.inactive.fg_stroke.color.linear_multiply(0.16)
-        };
 
-        if has_signal {
-            painter.rect_filled(
-                egui::Rect::from_min_max(egui::pos2(x1, y1), egui::pos2(x2, y2)),
-                bar_width / 2.0,
-                color,
-            );
-        } else {
-            let center_y = rect.center().y;
-            painter.rect_filled(
-                egui::Rect::from_min_max(egui::pos2(x1, center_y - 0.45), egui::pos2(x2, center_y + 0.45)),
-                bar_width / 2.0,
-                color,
-            );
-        }
+        painter.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(x1.max(rect.left()), y1), egui::pos2(x2.min(rect.right()), y2)),
+            bar_width / 2.0,
+            visuals.selection.bg_fill,
+        );
     }
 
     response
 }
 
-fn resample_time_series(values: &[f32], requested_points: usize) -> Vec<f32> {
-    if requested_points == 0 {
-        return Vec::new();
-    }
-    if values.is_empty() {
-        return vec![0.0; requested_points];
-    }
-    if values.len() == requested_points {
-        return values.to_vec();
-    }
-
-    let mut rendered = Vec::with_capacity(requested_points);
-    let bucket_width = values.len() as f32 / requested_points as f32;
-    for index in 0..requested_points {
-        let start = ((index as f32 * bucket_width).floor() as usize).min(values.len() - 1);
-        let end = (((index + 1) as f32 * bucket_width).ceil() as usize)
-            .max(start + 1)
-            .min(values.len());
-        rendered.push(values[start..end].iter().copied().fold(0.0_f32, f32::max));
-    }
-    rendered
-}
 
 fn draw_waveform_seek(ui: &mut egui::Ui, waveform: &[f32], progress: f32, silence_ranges: &[(f32, f32)], duration_seconds: f32) -> egui::Response {
     let desired_size = egui::vec2(ui.available_width(), 46.0);

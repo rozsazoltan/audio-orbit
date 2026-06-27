@@ -15,7 +15,7 @@ use std::{
 };
 
 const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 180;
-const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 12;
+const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 24;
 const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
 const RADIO_RECOGNITION_BUFFER_SECONDS: usize = 24;
 
@@ -168,16 +168,20 @@ struct RadioVisualizerBucket {
     peak: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct RadioVisualizerBar {
+    pub age_seconds: f32,
+    pub peak: f32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct RadioVisualizerFrame {
-    pub peaks: Vec<f32>,
-    pub scroll_fraction: f32,
+    pub bars: Vec<RadioVisualizerBar>,
+    pub bucket_seconds: f32,
 }
 
 struct RadioVisualizerState {
     peaks: VecDeque<RadioVisualizerBucket>,
-    noise_floor: f32,
-    signal_ceiling: f32,
     displayed_peak: f32,
 }
 
@@ -185,8 +189,6 @@ impl Default for RadioVisualizerState {
     fn default() -> Self {
         Self {
             peaks: VecDeque::new(),
-            noise_floor: 0.006,
-            signal_ceiling: 0.16,
             displayed_peak: 0.0,
         }
     }
@@ -331,33 +333,24 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
         } else {
             (self.visualizer_bucket_energy / self.visualizer_bucket_sample_count as f64).sqrt() as f32
         };
-        let raw_envelope = (rms * 1.18 + self.visualizer_current_peak * 0.18).clamp(0.0, 1.0);
+
+        // Use a fixed dB mapping instead of frame-by-frame auto-normalization.
+        // This keeps live radio from randomly turning every bar into a full-height
+        // bar when the adaptive ceiling changes during quiet/loud passages.
+        let envelope = (rms * 0.86 + self.visualizer_current_peak * 0.14).clamp(0.0, 1.0);
+        let target = if envelope <= 0.000_08 {
+            0.0
+        } else {
+            let db = 20.0 * envelope.max(0.000_08).log10();
+            ((db + 52.0) / 44.0).clamp(0.0, 1.0).powf(0.72)
+        };
         let now = Instant::now();
 
         if let Ok(mut state) = self.visualizer.lock() {
-            let floor_target = raw_envelope.min(0.045);
-            state.noise_floor = if floor_target < state.noise_floor {
-                state.noise_floor * 0.88 + floor_target * 0.12
+            state.displayed_peak = if target > state.displayed_peak {
+                state.displayed_peak * 0.30 + target * 0.70
             } else {
-                state.noise_floor * 0.997 + floor_target * 0.003
-            }
-            .clamp(0.001, 0.055);
-
-            state.signal_ceiling = if raw_envelope > state.signal_ceiling {
-                state.signal_ceiling * 0.86 + raw_envelope * 0.14
-            } else {
-                state.signal_ceiling * 0.9992 + raw_envelope * 0.0008
-            }
-            .max(state.noise_floor + 0.055)
-            .clamp(0.08, 1.0);
-
-            let normalized = ((raw_envelope - state.noise_floor) / (state.signal_ceiling - state.noise_floor).max(0.055))
-                .clamp(0.0, 1.0)
-                .powf(0.78);
-            state.displayed_peak = if normalized > state.displayed_peak {
-                state.displayed_peak * 0.42 + normalized * 0.58
-            } else {
-                state.displayed_peak * 0.78 + normalized * 0.22
+                state.displayed_peak * 0.84 + target * 0.16
             };
 
             let display_peak = state.displayed_peak.clamp(0.0, 1.0);
@@ -664,45 +657,40 @@ impl AudioPlayer {
             return RadioVisualizerFrame::default();
         }
 
-        // Keep only the buckets that can affect the currently visible waveform, plus
-        // a tiny overscan margin. This avoids re-sampling old live-radio history into
-        // the visible strip and keeps movement time-based instead of stretched.
-        while state.peaks.len() > requested_points + 2 {
-            state.peaks.pop_front();
-        }
-
-        let mut rendered = vec![0.0_f32; requested_points];
         let now = Instant::now();
         let bucket_seconds = 1.0 / RADIO_VISUALIZER_BUCKETS_PER_SECOND as f32;
         let visible_seconds = requested_points as f32 * bucket_seconds;
-        let scroll_fraction = state
+        let max_age = visible_seconds + bucket_seconds * 2.0;
+
+        while state
             .peaks
-            .back()
-            .map(|bucket| {
-                let newest_age = now.duration_since(bucket.at).as_secs_f32();
-                (newest_age / bucket_seconds).fract().clamp(0.0, 0.995)
-            })
-            .unwrap_or(0.0);
-
-        for bucket in state.peaks.iter() {
-            let age_seconds = now.duration_since(bucket.at).as_secs_f32();
-            if age_seconds > visible_seconds + bucket_seconds {
-                continue;
-            }
-
-            let offset_from_right = (age_seconds / bucket_seconds).floor() as usize;
-            if offset_from_right >= requested_points {
-                continue;
-            }
-            let index = requested_points - 1 - offset_from_right;
-            if let Some(slot) = rendered.get_mut(index) {
-                *slot = slot.max(bucket.peak);
-            }
+            .front()
+            .map(|bucket| now.duration_since(bucket.at).as_secs_f32() > max_age)
+            .unwrap_or(false)
+            || state.peaks.len() > requested_points + 4
+        {
+            state.peaks.pop_front();
         }
 
+        let bars = state
+            .peaks
+            .iter()
+            .filter_map(|bucket| {
+                let age_seconds = now.duration_since(bucket.at).as_secs_f32();
+                if age_seconds <= max_age {
+                    Some(RadioVisualizerBar {
+                        age_seconds,
+                        peak: bucket.peak,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         RadioVisualizerFrame {
-            peaks: rendered,
-            scroll_fraction,
+            bars,
+            bucket_seconds,
         }
     }
 
