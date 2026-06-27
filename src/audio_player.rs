@@ -1,4 +1,7 @@
-use crate::dsp::{render_orbit_to_stereo, DspSettings, RenderInfo};
+use crate::{
+    dsp::{render_orbit_to_stereo, DspSettings, RenderInfo},
+    spectrum_waveform::LiveSpectrumAnalyzer,
+};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait};
 use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, OutputStreamHandle, Sink, Source};
@@ -182,14 +185,12 @@ pub struct RadioVisualizerFrame {
 
 struct RadioVisualizerState {
     peaks: VecDeque<RadioVisualizerBucket>,
-    displayed_peak: f32,
 }
 
 impl Default for RadioVisualizerState {
     fn default() -> Self {
         Self {
             peaks: VecDeque::new(),
-            displayed_peak: 0.0,
         }
     }
 }
@@ -248,10 +249,7 @@ struct LiveRadioSource<S> {
     output_frame: [f32; 2],
     output_channel: usize,
     visualizer: RadioVisualizerHandle,
-    visualizer_current_peak: f32,
-    visualizer_bucket_energy: f64,
-    visualizer_bucket_sample_count: usize,
-    visualizer_sample_counter: usize,
+    visualizer_analyzer: LiveSpectrumAnalyzer,
     recognition: RecognitionSampleHandle,
     recognition_chunk: Vec<f32>,
 }
@@ -274,10 +272,7 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
             output_frame: [0.0, 0.0],
             output_channel: 2,
             visualizer,
-            visualizer_current_peak: 0.0,
-            visualizer_bucket_energy: 0.0,
-            visualizer_bucket_sample_count: 0,
-            visualizer_sample_counter: 0,
+            visualizer_analyzer: LiveSpectrumAnalyzer::new(sample_rate, RADIO_VISUALIZER_BUCKETS_PER_SECOND),
             recognition,
             recognition_chunk: Vec::with_capacity((sample_rate as usize / 4).max(256)),
         }
@@ -316,47 +311,16 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
         }
     }
 
-    fn record_visualizer_peak(&mut self, peak: f32) {
-        let level = peak.abs().min(1.0);
-        self.visualizer_current_peak = self.visualizer_current_peak.max(level);
-        self.visualizer_bucket_energy += (level as f64) * (level as f64);
-        self.visualizer_bucket_sample_count += 1;
-        self.visualizer_sample_counter += 1;
-
-        let samples_per_bucket = (self.sample_rate.max(1) as usize / RADIO_VISUALIZER_BUCKETS_PER_SECOND).max(1);
-        if self.visualizer_sample_counter < samples_per_bucket {
+    fn record_visualizer_sample(&mut self, mono: f32) {
+        let Some(level) = self.visualizer_analyzer.push_sample(mono) else {
             return;
-        }
-
-        let rms = if self.visualizer_bucket_sample_count == 0 {
-            0.0
-        } else {
-            (self.visualizer_bucket_energy / self.visualizer_bucket_sample_count as f64).sqrt() as f32
-        };
-
-        // Use a fixed dB mapping instead of frame-by-frame auto-normalization.
-        // This keeps live radio from randomly turning every bar into a full-height
-        // bar when the adaptive ceiling changes during quiet/loud passages.
-        let envelope = (rms * 0.86 + self.visualizer_current_peak * 0.14).clamp(0.0, 1.0);
-        let target = if envelope <= 0.000_08 {
-            0.0
-        } else {
-            let db = 20.0 * envelope.max(0.000_08).log10();
-            ((db + 52.0) / 44.0).clamp(0.0, 1.0).powf(0.72)
         };
         let now = Instant::now();
 
         if let Ok(mut state) = self.visualizer.lock() {
-            state.displayed_peak = if target > state.displayed_peak {
-                state.displayed_peak * 0.30 + target * 0.70
-            } else {
-                state.displayed_peak * 0.84 + target * 0.16
-            };
-
-            let display_peak = state.displayed_peak.clamp(0.0, 1.0);
             state.peaks.push_back(RadioVisualizerBucket {
                 at: now,
-                peak: display_peak,
+                peak: level.clamp(0.0, 1.0),
             });
 
             let history = Duration::from_secs(RADIO_VISUALIZER_HISTORY_SECONDS as u64);
@@ -370,11 +334,6 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
                 state.peaks.pop_front();
             }
         }
-
-        self.visualizer_current_peak = 0.0;
-        self.visualizer_bucket_energy = 0.0;
-        self.visualizer_bucket_sample_count = 0;
-        self.visualizer_sample_counter = 0;
     }
 
     fn record_recognition_sample(&mut self, mono: f32) {
@@ -391,7 +350,7 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
     }
 
     fn process_frame(&mut self, stereo: [f32; 2], mono: f32) -> [f32; 2] {
-        self.record_visualizer_peak(stereo[0].abs().max(stereo[1].abs()).max(mono.abs()));
+        self.record_visualizer_sample(mono);
         self.record_recognition_sample(mono);
         let output_level = self.settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
         if !self.settings.orbit_enabled {

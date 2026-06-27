@@ -1,3 +1,4 @@
+use crate::config::external_tools_dir;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::{
@@ -82,12 +83,12 @@ pub fn recognize_with_songrec(command_path: Option<PathBuf>, sample_path: &Path)
 
     if errors.iter().all(|error| error.contains("No such file") || error.contains("not found") || error.contains("os error 2")) {
         anyhow::bail!(
-            "SongRec was not found. Install SongRec, place songrec.exe or songrec-cli.exe next to Audio Orbit, or set the executable path in Settings → Recognition."
+            "SongRec was not found. Put songrec.exe or songrec-cli.exe in .audio-orbit-dll, next to Audio Orbit, on PATH, or set the executable path in Settings > Recognition."
         );
     }
 
     anyhow::bail!(
-        "free SongRec recognition failed. Install SongRec or set its executable path in Settings → Recognition. Details: {}",
+        "free SongRec recognition failed. Put SongRec in .audio-orbit-dll or set its executable path in Settings > Recognition. Details: {}",
         errors.join(" | ")
     )
 }
@@ -97,11 +98,15 @@ fn songrec_candidates(command_path: Option<PathBuf>, sample_path: &Path) -> Vec<
     if let Some(command_path) = command_path {
         commands.push((command_path, "configured SongRec".to_owned()));
     } else {
+        let tools = external_tools_dir();
+        commands.push((tools.join("songrec.exe"), ".audio-orbit-dll songrec.exe".to_owned()));
+        commands.push((tools.join("songrec-cli.exe"), ".audio-orbit-dll songrec-cli.exe".to_owned()));
+        commands.push((tools.join("songrec"), ".audio-orbit-dll songrec".to_owned()));
         if let Ok(current_exe) = env::current_exe() {
             if let Some(folder) = current_exe.parent() {
-                commands.push((folder.join("songrec.exe"), "bundled songrec.exe".to_owned()));
-                commands.push((folder.join("songrec-cli.exe"), "bundled songrec-cli.exe".to_owned()));
-                commands.push((folder.join("songrec"), "bundled songrec".to_owned()));
+                commands.push((folder.join("songrec.exe"), "app folder songrec.exe".to_owned()));
+                commands.push((folder.join("songrec-cli.exe"), "app folder songrec-cli.exe".to_owned()));
+                commands.push((folder.join("songrec"), "app folder songrec".to_owned()));
             }
         }
         commands.push((PathBuf::from("songrec"), "PATH songrec".to_owned()));

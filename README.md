@@ -96,11 +96,11 @@ Audio files themselves are not embedded in the backup. The backup stores library
 
 Internet radio recordings are captured from the original stream bytes before volume, orbit, or any playback processing is applied. The toolbar microphone button starts recording the active radio station; while recording, the Lucide microphone icon turns red and blinks. Press it again to stop and save the file.
 
-Saved files use the stop-time based format `audio-orbit-records-yyyy-mm-dd-hh-mm-ss.mp3`. By default, recordings are saved next to the executable in `.audio-orbit-records/`. Right-click the microphone button to open the current recordings folder, or open/change it from **Settings → Recording**.
+Saved files use the stop-time based format `audio-orbit-records-yyyy-mm-dd-hh-mm-ss.mp3`. By default, recordings are saved next to the executable in `.audio-orbit-records/`. Right-click the microphone button to open the current recordings folder, or open/change it from **Settings > Recording**.
 
 ### Free song recognition
 
-Audio Orbit includes a 100% free recognition path. Internet radio can be identified instantly from stream metadata when the station provides `StreamTitle`. For audio fingerprint recognition, configure a local SongRec executable in **Settings → Recognition**. Audio Orbit captures a short DSP-free sample from the current local track or live radio stream, writes a temporary WAV file, and asks SongRec to recognize it. No paid API key is required.
+Audio Orbit includes a 100% free recognition path. Internet radio can be identified instantly from stream metadata when the station provides `StreamTitle`. For audio fingerprint recognition, configure a local SongRec executable in **Settings > Recognition**. Audio Orbit captures a short DSP-free sample from the current local track or live radio stream, writes a temporary WAV file, and asks SongRec to recognize it. No paid API key is required.
 
 SongRec is an unofficial Shazam-compatible recognizer, so this feature is treated as a free external backend rather than an embedded paid service.
 
@@ -241,3 +241,9 @@ Audio Orbit is open source and released under the [GNU Affero General Public Lic
 The app uses Rust ecosystem libraries for the desktop UI, audio decoding/playback, metadata reading, ZIP backups, HTTP update checks, and Lucide icons.
 
 Copyright (C) 2020–present [Zoltán Rózsa](https://github.com/rozsazoltan)
+
+### Notes on waveform analysis and recognition
+
+Audio Orbit renders local and live radio waveform bars through a RustFFT-based spectrum analysis path, so the visible bars are based on frequency energy and loudness rather than raw sample peaks only. This keeps bass-heavy passages from turning every bar into the same full-height column.
+
+Free recognition uses radio stream metadata first when available. If a real audio lookup is needed, place `songrec.exe` or `songrec-cli.exe` in the `.audio-orbit-dll` folder next to Audio Orbit, or set a custom executable path in Settings > Recognition. Recognized titles are copied to the clipboard automatically.

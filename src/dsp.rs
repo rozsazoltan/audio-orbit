@@ -1,3 +1,4 @@
+use crate::spectrum_waveform::spectrum_waveform;
 use serde::{Deserialize, Serialize};
 use std::f32::consts::PI;
 
@@ -96,7 +97,7 @@ pub fn render_orbit_to_stereo(
     let frame_count = input_samples.len() / channels;
     let mono = downmix_to_mono(input_samples, channels, frame_count);
     let mut start_frame = ((start_seconds.max(0.0) * sample_rate as f32) as usize).min(frame_count);
-    let waveform = waveform_peaks(&mono, WAVEFORM_POINTS);
+    let waveform = spectrum_waveform(&mono, sample_rate, WAVEFORM_POINTS);
 
     let output_level = settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
     let silence_floor = automatic_silence_floor(&mono);
@@ -600,30 +601,6 @@ fn downmix_to_mono(input_samples: &[f32], channels: usize, frame_count: usize) -
     }
 
     mono
-}
-
-fn waveform_peaks(samples: &[f32], points: usize) -> Vec<f32> {
-    if samples.is_empty() || points == 0 {
-        return Vec::new();
-    }
-
-    let chunk_size = (samples.len() / points).max(1);
-    let mut peaks = Vec::with_capacity(points);
-
-    for chunk in samples.chunks(chunk_size).take(points) {
-        let peak = chunk
-            .iter()
-            .map(|sample| sample.abs())
-            .fold(0.0_f32, f32::max)
-            .min(1.0);
-        peaks.push(peak);
-    }
-
-    while peaks.len() < points {
-        peaks.push(0.0);
-    }
-
-    peaks
 }
 
 fn smooth_value(previous: f32, target: f32, smoothing_coeff: f32) -> f32 {

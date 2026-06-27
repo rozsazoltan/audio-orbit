@@ -344,7 +344,7 @@ impl RecognitionSettings {
         self.songrec_command
             .as_ref()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "songrec from PATH".to_owned())
+            .unwrap_or_else(|| "Auto: .audio-orbit-dll, app folder, then PATH".to_owned())
     }
 }
 
@@ -371,6 +371,14 @@ pub fn default_recording_output_folder() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join(".audio-orbit-records")))
+}
+
+
+pub fn external_tools_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(".audio-orbit-dll")))
+        .unwrap_or_else(|| PathBuf::from(".audio-orbit-dll"))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -497,6 +505,8 @@ pub struct UiSettings {
     pub player_only_mode: bool,
     #[serde(default)]
     pub show_track_search: bool,
+    #[serde(default = "default_true")]
+    pub search_playback_filtered_only: bool,
     #[serde(default)]
     pub window_geometry: Option<WindowGeometry>,
     #[serde(default)]
@@ -514,6 +524,7 @@ impl Default for UiSettings {
             show_profile_panel: true,
             player_only_mode: false,
             show_track_search: false,
+            search_playback_filtered_only: true,
             window_geometry: None,
             full_layout_window_geometry: None,
             player_only_window_geometry: None,
