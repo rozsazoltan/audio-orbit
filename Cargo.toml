@@ -1,6 +1,6 @@
 [package]
 name = "audio-orbit"
-version = "0.8.9"
+version = "0.8.12"
 edition = "2021"
 build = "build.rs"
 
