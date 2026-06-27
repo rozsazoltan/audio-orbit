@@ -7,11 +7,11 @@ use std::{
     f32::consts::PI,
     fs,
     fs::File,
-    io::{self, BufReader, Read, Seek, SeekFrom},
+    io::{self, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 180;
@@ -39,16 +39,34 @@ pub struct PreparedPlayback {
     sample_rate: u32,
 }
 
+#[derive(Clone, Debug)]
+pub struct RadioRecordingInfo {
+    pub path: PathBuf,
+    pub started_at: Instant,
+    pub bytes_written: u64,
+}
+
+struct ActiveRadioRecording {
+    file: File,
+    path: PathBuf,
+    started_at: Instant,
+    bytes_written: u64,
+}
+
+type RadioRecordingHandle = Arc<Mutex<Option<ActiveRadioRecording>>>;
+
 struct RadioStream<R> {
     inner: Mutex<R>,
     position: u64,
+    recorder: RadioRecordingHandle,
 }
 
 impl<R> RadioStream<R> {
-    fn new(inner: R) -> Self {
+    fn new(inner: R, recorder: RadioRecordingHandle) -> Self {
         Self {
             inner: Mutex::new(inner),
             position: 0,
+            recorder,
         }
     }
 }
@@ -60,6 +78,15 @@ impl<R: Read + Send> Read for RadioStream<R> {
             .lock()
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "radio stream lock poisoned"))?;
         let read = inner.read(buffer)?;
+        if read > 0 {
+            if let Ok(mut recording) = self.recorder.lock() {
+                if let Some(recording) = recording.as_mut() {
+                    if recording.file.write_all(&buffer[..read]).is_ok() {
+                        recording.bytes_written = recording.bytes_written.saturating_add(read as u64);
+                    }
+                }
+            }
+        }
         self.position += read as u64;
         Ok(read)
     }
@@ -84,16 +111,10 @@ struct RadioVisualizerBucket {
     peak: f32,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct RadioVisualizerPoint {
-    pub age_seconds: f32,
-    pub peak: f32,
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct RadioVisualizerFrame {
-    pub points: Vec<RadioVisualizerPoint>,
-    pub bucket_seconds: f32,
+    pub peaks: Vec<f32>,
+    pub scroll_fraction: f32,
 }
 
 #[derive(Default)]
@@ -309,8 +330,10 @@ pub struct AudioPlayer {
     current_path: Option<PathBuf>,
     current_settings: Option<DspSettings>,
     current_radio_url: Option<String>,
+    current_radio_extension: String,
     volume_percent: u8,
     radio_visualizer: RadioVisualizerHandle,
+    radio_recorder: RadioRecordingHandle,
 }
 
 impl AudioPlayer {
@@ -332,8 +355,10 @@ impl AudioPlayer {
             current_path: None,
             current_settings: None,
             current_radio_url: None,
+            current_radio_extension: "mp3".to_owned(),
             volume_percent: 100,
             radio_visualizer: Arc::new(Mutex::new(RadioVisualizerState::default())),
+            radio_recorder: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -361,8 +386,14 @@ impl AudioPlayer {
             .with_context(|| format!("failed to open internet radio stream: {url}"))?
             .error_for_status()
             .with_context(|| format!("internet radio stream returned an error: {url}"))?;
+        let radio_extension = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(guess_recording_extension)
+            .unwrap_or_else(|| guess_recording_extension(url));
 
-        let stream = RadioStream::new(response);
+        let stream = RadioStream::new(response, Arc::clone(&self.radio_recorder));
         let decoder = Decoder::new(BufReader::new(stream))
             .with_context(|| format!("failed to decode internet radio stream: {url}"))?;
 
@@ -388,8 +419,87 @@ impl AudioPlayer {
         self.current_path = None;
         self.current_settings = None;
         self.current_radio_url = Some(url.to_owned());
+        self.current_radio_extension = radio_extension;
 
         Ok(())
+    }
+
+    pub fn is_radio_recording(&self) -> bool {
+        self.radio_recorder
+            .lock()
+            .ok()
+            .and_then(|recording| recording.as_ref().map(|_| ()))
+            .is_some()
+    }
+
+    pub fn radio_recording_info(&self) -> Option<RadioRecordingInfo> {
+        self.radio_recorder.lock().ok().and_then(|recording| {
+            recording.as_ref().map(|recording| RadioRecordingInfo {
+                path: recording.path.clone(),
+                started_at: recording.started_at,
+                bytes_written: recording.bytes_written,
+            })
+        })
+    }
+
+    pub fn start_radio_recording(
+        &mut self,
+        output_folder: &Path,
+        station_name: &str,
+        stream_title: Option<&str>,
+    ) -> Result<PathBuf> {
+        if self.current_radio_url.is_none() {
+            anyhow::bail!("start an internet radio station before recording");
+        }
+        if self.is_radio_recording() {
+            if let Some(info) = self.radio_recording_info() {
+                return Ok(info.path);
+            }
+        }
+
+        fs::create_dir_all(output_folder)
+            .with_context(|| format!("failed to create recording folder: {}", output_folder.display()))?;
+        let timestamp = recording_timestamp();
+        let station = sanitize_filename(station_name).unwrap_or_else(|| "internet-radio".to_owned());
+        let title = stream_title.and_then(sanitize_filename);
+        let extension = self.current_radio_extension.trim().trim_start_matches('.');
+        let extension = if extension.is_empty() { "mp3" } else { extension };
+        let filename = if let Some(title) = title {
+            format!("{timestamp}-{station}-{title}.{extension}")
+        } else {
+            format!("{timestamp}-{station}.{extension}")
+        };
+        let path = output_folder.join(filename);
+        let file = File::create(&path)
+            .with_context(|| format!("failed to create recording file: {}", path.display()))?;
+
+        let mut recorder = self
+            .radio_recorder
+            .lock()
+            .map_err(|_| anyhow::anyhow!("radio recorder lock poisoned"))?;
+        *recorder = Some(ActiveRadioRecording {
+            file,
+            path: path.clone(),
+            started_at: Instant::now(),
+            bytes_written: 0,
+        });
+        Ok(path)
+    }
+
+    pub fn stop_radio_recording(&mut self) -> Result<Option<RadioRecordingInfo>> {
+        let mut recorder = self
+            .radio_recorder
+            .lock()
+            .map_err(|_| anyhow::anyhow!("radio recorder lock poisoned"))?;
+        let Some(mut recording) = recorder.take() else {
+            return Ok(None);
+        };
+        recording.file.flush()?;
+        Ok(Some(RadioRecordingInfo {
+            path: recording.path,
+            started_at: recording.started_at,
+            bytes_written: recording.bytes_written,
+        }))
     }
 
     pub fn radio_visualizer_frame(&self, requested_points: usize) -> RadioVisualizerFrame {
@@ -400,42 +510,45 @@ impl AudioPlayer {
             return RadioVisualizerFrame::default();
         }
 
+        // Keep only the buckets that can affect the currently visible waveform, plus
+        // a tiny overscan margin. This avoids re-sampling old live-radio history into
+        // the visible strip and keeps movement time-based instead of stretched.
+        while state.peaks.len() > requested_points + 2 {
+            state.peaks.pop_front();
+        }
+
+        let mut rendered = vec![0.0_f32; requested_points];
         let now = Instant::now();
         let bucket_seconds = 1.0 / RADIO_VISUALIZER_BUCKETS_PER_SECOND as f32;
         let visible_seconds = requested_points as f32 * bucket_seconds;
-        let overscan_seconds = bucket_seconds * 2.0;
-
-        while state
+        let scroll_fraction = state
             .peaks
-            .front()
-            .map(|bucket| now.duration_since(bucket.at).as_secs_f32() > visible_seconds + overscan_seconds)
-            .unwrap_or(false)
-        {
-            state.peaks.pop_front();
-        }
-        while state.peaks.len() > requested_points + 4 {
-            state.peaks.pop_front();
-        }
-
-        let points = state
-            .peaks
-            .iter()
-            .filter_map(|bucket| {
-                let age_seconds = now.duration_since(bucket.at).as_secs_f32();
-                if age_seconds > visible_seconds + overscan_seconds {
-                    None
-                } else {
-                    Some(RadioVisualizerPoint {
-                        age_seconds,
-                        peak: bucket.peak,
-                    })
-                }
+            .back()
+            .map(|bucket| {
+                let newest_age = now.duration_since(bucket.at).as_secs_f32();
+                (newest_age / bucket_seconds).fract().clamp(0.0, 0.995)
             })
-            .collect();
+            .unwrap_or(0.0);
+
+        for bucket in state.peaks.iter() {
+            let age_seconds = now.duration_since(bucket.at).as_secs_f32();
+            if age_seconds > visible_seconds + bucket_seconds {
+                continue;
+            }
+
+            let offset_from_right = (age_seconds / bucket_seconds).floor() as usize;
+            if offset_from_right >= requested_points {
+                continue;
+            }
+            let index = requested_points - 1 - offset_from_right;
+            if let Some(slot) = rendered.get_mut(index) {
+                *slot = slot.max(bucket.peak);
+            }
+        }
 
         RadioVisualizerFrame {
-            points,
-            bucket_seconds,
+            peaks: rendered,
+            scroll_fraction,
         }
     }
 
@@ -552,6 +665,7 @@ impl AudioPlayer {
     }
 
     pub fn stop(&mut self) {
+        let _ = self.stop_radio_recording();
         if let Some(sink) = self.sink.take() {
             sink.stop();
         }
@@ -564,6 +678,7 @@ impl AudioPlayer {
         self.current_path = None;
         self.current_settings = None;
         self.current_radio_url = None;
+        self.current_radio_extension = "mp3".to_owned();
     }
 
     pub fn pause_or_resume(&mut self) {
@@ -652,8 +767,55 @@ impl AudioPlayer {
         self.current_path = Some(path.to_path_buf());
         self.current_settings = Some(settings);
         self.current_radio_url = None;
+        self.current_radio_extension = "mp3".to_owned();
 
         Ok(())
+    }
+}
+
+fn recording_timestamp() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    format!("{seconds}")
+}
+
+fn sanitize_filename(value: &str) -> Option<String> {
+    let sanitized = value
+        .chars()
+        .map(|character| match character {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => character,
+            ' ' | '.' => '-',
+            _ => '-',
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(sanitized.chars().take(80).collect())
+    }
+}
+
+fn guess_recording_extension(value: &str) -> String {
+    let value = value.to_ascii_lowercase();
+    if value.contains("aac") || value.contains("audio/aac") || value.contains("audio/aacp") {
+        "aac".to_owned()
+    } else if value.contains("ogg") || value.contains("opus") {
+        "ogg".to_owned()
+    } else if value.contains("flac") {
+        "flac".to_owned()
+    } else if value.contains("wav") {
+        "wav".to_owned()
+    } else if value.contains("mp3") || value.contains("mpeg") || value.ends_with(".mp3") {
+        "mp3".to_owned()
+    } else {
+        "mp3".to_owned()
     }
 }
 

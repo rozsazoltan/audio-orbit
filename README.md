@@ -11,6 +11,7 @@ It is designed for people who keep music in local folders and want an AIMP-like 
   - [Sound profiles](#sound-profiles)
   - [Backups](#backups)
   - [Updates](#updates)
+  - [Radio recordings](#radio-recordings)
 - [Get started](#get-started)
 - [Usage](#usage)
   - [Create a folder playlist](#create-a-folder-playlist)
@@ -58,6 +59,7 @@ Audio Orbit supports common desktop-player behavior:
 - play saved internet radio streams from the Radio tab
 - favorite radio stations and filter the Radio list to favorites
 - show a live radio visualizer with elapsed listening time
+- record the original internet radio stream bytes to timestamped files
 - remember the window size and position between app launches
 - prevent multiple app instances from running at the same time
 
@@ -86,6 +88,13 @@ Backups are ZIP files containing the full app state:
 - UI layout settings
 
 Audio files themselves are not embedded in the backup. The backup stores library and playlist state, not your music collection.
+
+
+### Radio recordings
+
+Internet radio recordings are captured from the original stream bytes before volume, orbit, or any playback processing is applied. The toolbar microphone button starts recording the active radio station; while recording, the icon turns red and blinks. Press it again to stop and save the file.
+
+By default, recordings are saved next to the executable in `.audio-orbit-records/`. The folder can be changed from **Settings → Recording**.
 
 ### Updates
 

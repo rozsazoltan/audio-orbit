@@ -219,6 +219,8 @@ struct AudioOrbitApp {
     status_last_seen: String,
     status_updated_at: Instant,
     error_message: Option<String>,
+    error_last_seen: Option<String>,
+    error_updated_at: Instant,
     crossfade_started_for_path: Option<PathBuf>,
     pending_track_switch: Option<PendingTrackSwitch>,
     pending_prepared_track_receiver: Option<mpsc::Receiver<Result<PreparedTrackPlayback, String>>>,
@@ -295,6 +297,8 @@ impl AudioOrbitApp {
                     status_last_seen: String::new(),
                     status_updated_at: Instant::now(),
                     error_message: None,
+                    error_last_seen: None,
+                    error_updated_at: Instant::now(),
                     crossfade_started_for_path: None,
                     pending_track_switch: None,
                     pending_prepared_track_receiver: None,
@@ -359,6 +363,8 @@ impl AudioOrbitApp {
                 status_last_seen: String::new(),
                 status_updated_at: Instant::now(),
                 error_message: Some(error.to_string()),
+                error_last_seen: Some(error.to_string()),
+                error_updated_at: Instant::now(),
                 crossfade_started_for_path: None,
                 pending_track_switch: None,
                 pending_prepared_track_receiver: None,
@@ -1868,6 +1874,117 @@ impl AudioOrbitApp {
         }
     }
 
+    fn current_radio_recording_name(&self) -> String {
+        if let Some(index) = self.active_radio_index {
+            if let Some(station) = self.state.radio_stations.get(index) {
+                return self
+                    .active_radio_station_name
+                    .clone()
+                    .or_else(|| station.last_station_name.clone())
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| station.name.clone());
+            }
+        }
+        "internet-radio".to_owned()
+    }
+
+    fn toggle_radio_recording(&mut self) {
+        let is_recording = match self.player.as_ref() {
+            Some(player) => player.is_radio_recording(),
+            None => {
+                self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+                return;
+            }
+        };
+
+        if is_recording {
+            let result = self
+                .player
+                .as_mut()
+                .map(|player| player.stop_radio_recording());
+            match result {
+                Some(Ok(Some(info))) => {
+                    self.status_message = format!(
+                        "Saved radio recording: {} ({}).",
+                        info.path.display(),
+                        format_file_size(info.bytes_written)
+                    );
+                    self.error_message = None;
+                }
+                Some(Ok(None)) => {
+                    self.status_message = "No active radio recording.".to_owned();
+                }
+                Some(Err(error)) => {
+                    self.error_message = Some(error.to_string());
+                }
+                None => {
+                    self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+                }
+            }
+            return;
+        }
+
+        if self.active_radio_index.is_none() {
+            self.error_message = Some("Start an internet radio station before recording.".to_owned());
+            return;
+        }
+
+        let folder = self.state.recording.resolved_output_folder();
+        let station_name = self.current_radio_recording_name();
+        let stream_title = self.active_radio_title.clone();
+        let result = self
+            .player
+            .as_mut()
+            .map(|player| player.start_radio_recording(&folder, &station_name, stream_title.as_deref()));
+        match result {
+            Some(Ok(path)) => {
+                self.status_message = format!("Recording internet radio to {}.", path.display());
+                self.error_message = None;
+            }
+            Some(Err(error)) => {
+                self.error_message = Some(error.to_string());
+            }
+            None => {
+                self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+            }
+        }
+    }
+
+    fn choose_recording_folder(&mut self) {
+        let initial_dir = self.state.recording.resolved_output_folder();
+        let mut dialog = FileDialog::new();
+        if initial_dir.exists() {
+            dialog = dialog.set_directory(initial_dir);
+        }
+        if let Some(path) = dialog.pick_folder() {
+            self.state.recording.output_folder = Some(path.clone());
+            self.status_message = format!("Radio recordings folder set to {}.", path.display());
+            self.error_message = None;
+            self.save_state_silently();
+        }
+    }
+
+    fn recognize_current_audio(&mut self) {
+        if let Some(title) = self
+            .active_radio_title
+            .clone()
+            .filter(|title| !title.trim().is_empty())
+        {
+            self.status_message = format!("Recognized from radio stream metadata: {title}.");
+            self.error_message = None;
+            return;
+        }
+
+        if let Some(path) = self.active_track_path.clone() {
+            let title = display_file_name(&path);
+            self.status_message = format!("Current local track candidate: {title}.");
+            self.error_message = Some("True Shazam-style fingerprint recognition needs a supported recognition backend; Shazam's browser extension is not embedded in Audio Orbit.".to_owned());
+            return;
+        }
+
+        self.error_message = Some("Start a track or internet radio station before recognition.".to_owned());
+    }
+
     fn save_state_silently(&mut self) {
         if let Err(error) = save_state(&self.state) {
             self.error_message = Some(error.to_string());
@@ -1878,13 +1995,19 @@ impl AudioOrbitApp {
         if self.status_message != self.status_last_seen {
             self.status_last_seen = self.status_message.clone();
             self.status_updated_at = Instant::now();
-            return;
-        }
-
-        if !self.status_message.is_empty() && self.status_updated_at.elapsed() >= Duration::from_secs(10) {
+        } else if !self.status_message.is_empty() && self.status_updated_at.elapsed() >= Duration::from_secs(10) {
             self.status_message.clear();
             self.status_last_seen.clear();
             self.status_updated_at = Instant::now();
+        }
+
+        if self.error_message != self.error_last_seen {
+            self.error_last_seen = self.error_message.clone();
+            self.error_updated_at = Instant::now();
+        } else if self.error_message.is_some() && self.error_updated_at.elapsed() >= Duration::from_secs(10) {
+            self.error_message = None;
+            self.error_last_seen = None;
+            self.error_updated_at = Instant::now();
         }
     }
 
@@ -2550,8 +2673,41 @@ impl AudioOrbitApp {
 
                 ui.separator();
             } else {
+                let is_recording = self.player.as_ref().map(|player| player.is_radio_recording()).unwrap_or(false);
+                let blink_on = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| (duration.as_millis() / 500) % 2 == 0)
+                    .unwrap_or(true);
+                let record_text = if is_recording {
+                    egui::RichText::new("🎙").color(if blink_on { egui::Color32::RED } else { ui.visuals().widgets.inactive.fg_stroke.color })
+                } else {
+                    egui::RichText::new("🎙")
+                };
+                let record_button = if is_recording {
+                    egui::Button::new(record_text).fill(egui::Color32::from_rgb(86, 24, 24))
+                } else {
+                    egui::Button::new(record_text)
+                };
+                if ui
+                    .add_enabled(self.active_radio_index.is_some(), record_button)
+                    .on_hover_text(if is_recording { "Stop and save radio recording" } else { "Record original internet radio stream" })
+                    .clicked()
+                {
+                    self.toggle_radio_recording();
+                }
                 ui.separator();
             }
+
+            let can_recognize = has_now_playing;
+            if ui
+                .add_enabled(can_recognize, egui::Button::new(egui::RichText::new("Ⓢ").strong()))
+                .on_hover_text("Identify the current song from stream metadata or a future recognition backend")
+                .clicked()
+            {
+                self.recognize_current_audio();
+            }
+            ui.separator();
+
             let volume_icon = if self.effective_volume_percent() == 0 { Icon::VolumeX } else { Icon::Volume2 };
             if ui
                 .button(ui_icons::icon(volume_icon))
@@ -3812,6 +3968,7 @@ impl AudioOrbitApp {
                         });
                         ui.add_space(1.0);
                         ui.add(egui::Label::new(panel.description()).wrap());
+                        self.render_inline_status_strip(ui);
                         ui.add_space(8.0);
 
                         egui::ScrollArea::vertical()
@@ -3853,6 +4010,12 @@ impl AudioOrbitApp {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
             self.render_playback_settings_section(ui);
+        });
+        ui.add_space(12.0);
+
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            self.render_recording_settings_section(ui);
         });
         ui.add_space(12.0);
 
@@ -3906,6 +4069,7 @@ impl AudioOrbitApp {
                         });
                     });
                     ui.separator();
+                    self.render_inline_status_strip(ui);
 
                     egui::ScrollArea::vertical()
                         .max_height(scroll_height)
@@ -4126,6 +4290,7 @@ impl AudioOrbitApp {
                     });
                     ui.add(egui::Label::new("Add a stream URL. If the name is empty, Audio Orbit tries to read the station name from stream headers and falls back to the stream host.").wrap());
                     ui.separator();
+                    self.render_inline_status_strip(ui);
 
                     ui.label("Stream URL");
                     ui.add_sized(
@@ -4155,6 +4320,36 @@ impl AudioOrbitApp {
         }
 
         self.show_radio_add_modal = is_open;
+    }
+
+    fn render_recording_settings_section(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Recording");
+        ui.small("Internet radio recordings are saved from the original stream bytes before volume, orbit, silence skip, or any other playback processing.");
+        let folder = self.state.recording.resolved_output_folder();
+        ui.label("Radio recording folder");
+        ui.horizontal_wrapped(|ui| {
+            ui.monospace(folder.display().to_string());
+            if ui.button(ui_icons::label(Icon::FolderOpen, "Choose folder...")).clicked() {
+                self.choose_recording_folder();
+            }
+            if ui.button("Reset default").clicked() {
+                self.state.recording.output_folder = None;
+                self.status_message = "Radio recording folder reset to .audio-orbit-records next to the executable.".to_owned();
+                self.error_message = None;
+                self.save_state_silently();
+            }
+        });
+        if let Some(info) = self.player.as_ref().and_then(|player| player.radio_recording_info()) {
+            ui.colored_label(
+                egui::Color32::RED,
+                format!(
+                    "Recording: {} · {} · {}",
+                    info.path.display(),
+                    format_duration(info.started_at.elapsed().as_secs_f32()),
+                    format_file_size(info.bytes_written)
+                ),
+            );
+        }
     }
 
     fn render_playback_settings_section(&mut self, ui: &mut egui::Ui) {
@@ -4403,6 +4598,32 @@ impl AudioOrbitApp {
         ui.label("M — Player-only / full layout");
         ui.label("Ctrl + L — Show or hide Library panel");
         ui.label("Ctrl + P — Show or hide Sound profiles panel");
+    }
+
+    fn render_inline_status_strip(&mut self, ui: &mut egui::Ui) {
+        if self.status_message.is_empty() && self.error_message.is_none() {
+            return;
+        }
+        ui.add_space(6.0);
+        egui::Frame::new()
+            .fill(egui::Color32::from_black_alpha(92))
+            .corner_radius(egui::CornerRadius::same(6))
+            .inner_margin(egui::Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    if !self.status_message.is_empty() {
+                        ui.label(self.status_message.as_str());
+                    }
+                    if let Some(error_message) = &self.error_message {
+                        if !self.status_message.is_empty() {
+                            ui.separator();
+                        }
+                        ui.colored_label(egui::Color32::RED, error_message);
+                    }
+                });
+            });
+        ui.add_space(4.0);
     }
 
     fn render_status_panel(&mut self, ui: &mut egui::Ui) {
@@ -4814,13 +5035,17 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
     let gap = 0.75;
     let bar_width = ((rect.width() - gap * bar_count.saturating_sub(1) as f32) / bar_count.max(1) as f32)
         .clamp(0.65, 2.2);
+    let visible_values = if frame.peaks.len() == bar_count {
+        frame.peaks.clone()
+    } else {
+        resample_time_series(&frame.peaks, bar_count)
+    };
     let pitch = bar_width + gap;
-    let bucket_seconds = frame.bucket_seconds.max(0.001);
+    let scroll_offset = frame.scroll_fraction.clamp(0.0, 0.995) * pitch;
 
-    let mut active_values: Vec<f32> = frame
-        .points
+    let mut active_values: Vec<f32> = visible_values
         .iter()
-        .map(|point| point.peak)
+        .copied()
         .filter(|value| *value > 0.0008)
         .collect();
     active_values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
@@ -4837,33 +5062,18 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
     let body_peak = percentile(&active_values, 0.92).max(0.035);
     let hard_peak = active_values.last().copied().unwrap_or(body_peak).max(body_peak);
     let dynamic_range = (body_peak - noise_floor).max(0.025);
-    let center_y = rect.center().y;
 
-    if frame.points.is_empty() {
-        let muted = visuals.widgets.inactive.fg_stroke.color.linear_multiply(0.16);
-        for index in 0..bar_count {
-            let x1 = rect.left() + index as f32 * pitch;
-            let x2 = (x1 + bar_width).min(rect.right());
-            painter.rect_filled(
-                egui::Rect::from_min_max(egui::pos2(x1, center_y - 0.45), egui::pos2(x2, center_y + 0.45)),
-                bar_width / 2.0,
-                muted,
-            );
-        }
-        return response;
-    }
-
-    for point in &frame.points {
-        let x2 = rect.right() - (point.age_seconds / bucket_seconds) * pitch;
-        let x1 = x2 - bar_width;
+    for index in 0..bar_count {
+        let x1 = rect.left() + index as f32 * pitch - scroll_offset;
+        let x2 = (x1 + bar_width).min(rect.right());
         if x1 >= rect.right() {
-            continue;
+            break;
         }
         if x2 <= rect.left() {
             continue;
         }
 
-        let value = point.peak;
+        let value = visible_values.get(index).copied().unwrap_or(0.0);
         let has_signal = value > 0.0008;
         let normalized = if has_signal {
             let main_body = ((value - noise_floor) / dynamic_range).clamp(0.0, 1.0);
@@ -4877,6 +5087,8 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
         } else {
             0.0
         };
+        let y1 = rect.center().y - height / 2.0;
+        let y2 = rect.center().y + height / 2.0;
         let color = if has_signal {
             visuals.selection.bg_fill
         } else {
@@ -4884,19 +5096,15 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
         };
 
         if has_signal {
-            let y1 = center_y - height / 2.0;
-            let y2 = center_y + height / 2.0;
             painter.rect_filled(
-                egui::Rect::from_min_max(egui::pos2(x1.max(rect.left()), y1), egui::pos2(x2.min(rect.right()), y2)),
+                egui::Rect::from_min_max(egui::pos2(x1, y1), egui::pos2(x2, y2)),
                 bar_width / 2.0,
                 color,
             );
         } else {
+            let center_y = rect.center().y;
             painter.rect_filled(
-                egui::Rect::from_min_max(
-                    egui::pos2(x1.max(rect.left()), center_y - 0.45),
-                    egui::pos2(x2.min(rect.right()), center_y + 0.45),
-                ),
+                egui::Rect::from_min_max(egui::pos2(x1, center_y - 0.45), egui::pos2(x2, center_y + 0.45)),
                 bar_width / 2.0,
                 color,
             );
