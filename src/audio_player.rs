@@ -505,17 +505,6 @@ impl AudioPlayer {
         self.play_prepared(prepared)
     }
 
-    pub fn play_file_with_orbit_from_live_position(
-        &mut self,
-        path: &Path,
-        settings: DspSettings,
-        start_seconds: f32,
-    ) -> Result<PlaybackInfo> {
-        let render_started_at = Instant::now();
-        let prepared = Self::prepare_file(path.to_path_buf(), settings, start_seconds)?;
-        self.play_prepared_from_live_position(prepared, render_started_at.elapsed().as_secs_f32())
-    }
-
     pub fn crossfade_to_prepared(
         &mut self,
         mut prepared: PreparedPlayback,
@@ -548,17 +537,6 @@ impl AudioPlayer {
         Ok(playback_info(&prepared.path, prepared.render_info))
     }
 
-    pub fn crossfade_to_file_with_orbit_from(
-        &mut self,
-        path: &Path,
-        settings: DspSettings,
-        start_seconds: f32,
-        crossfade_seconds: f32,
-    ) -> Result<PlaybackInfo> {
-        let prepared = Self::prepare_file(path.to_path_buf(), settings, start_seconds)?;
-        self.crossfade_to_prepared(prepared, crossfade_seconds)
-    }
-
     pub fn seek_current(&mut self, seconds: f32) -> Result<Option<PlaybackInfo>> {
         let Some(path) = self.current_path.clone() else {
             return Ok(None);
@@ -568,15 +546,6 @@ impl AudioPlayer {
         };
 
         self.play_file_with_orbit_from(&path, settings, seconds).map(Some)
-    }
-
-    pub fn apply_settings_to_current(&mut self, settings: DspSettings) -> Result<Option<PlaybackInfo>> {
-        let position = self.playback_position_seconds();
-        let Some(path) = self.current_path.clone() else {
-            return Ok(None);
-        };
-
-        self.play_file_with_orbit_from(&path, settings, position).map(Some)
     }
 
     pub fn stop(&mut self) {

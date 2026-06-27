@@ -225,10 +225,6 @@ struct AudioOrbitApp {
     pending_profile_apply_at: Option<Instant>,
     suppress_window_geometry_save_until: Option<Instant>,
     show_folder_import_modal: bool,
-    show_settings_modal: bool,
-    show_release_modal: bool,
-    show_backup_modal: bool,
-    show_about_modal: bool,
     show_radio_add_modal: bool,
     active_panel_modal: Option<AppPanelModal>,
     panel_modal_history: Vec<AppPanelModal>,
@@ -304,10 +300,6 @@ impl AudioOrbitApp {
                     pending_profile_apply_at: None,
                     suppress_window_geometry_save_until: None,
                     show_folder_import_modal: false,
-                    show_settings_modal: false,
-                    show_release_modal: false,
-                    show_backup_modal: false,
-                    show_about_modal: false,
                     show_radio_add_modal: false,
                     active_panel_modal: None,
                     panel_modal_history: Vec::new(),
@@ -371,10 +363,6 @@ impl AudioOrbitApp {
                 pending_profile_apply_at: None,
                 suppress_window_geometry_save_until: None,
                 show_folder_import_modal: false,
-                show_settings_modal: false,
-                show_release_modal: false,
-                show_backup_modal: false,
-                show_about_modal: false,
                 show_radio_add_modal: false,
                 active_panel_modal: None,
                 panel_modal_history: Vec::new(),
@@ -504,7 +492,6 @@ impl AudioOrbitApp {
 
     fn open_panel_modal(&mut self, panel: AppPanelModal) {
         if self.active_panel_modal == Some(panel) {
-            self.sync_panel_modal_flags();
             return;
         }
 
@@ -512,20 +499,12 @@ impl AudioOrbitApp {
             self.panel_modal_history.push(current);
         }
         self.active_panel_modal = Some(panel);
-        self.sync_panel_modal_flags();
     }
 
     fn close_panel_modal(&mut self) {
         self.active_panel_modal = self.panel_modal_history.pop();
-        self.sync_panel_modal_flags();
     }
 
-    fn sync_panel_modal_flags(&mut self) {
-        self.show_settings_modal = self.active_panel_modal == Some(AppPanelModal::Settings);
-        self.show_release_modal = self.active_panel_modal == Some(AppPanelModal::Updates);
-        self.show_backup_modal = self.active_panel_modal == Some(AppPanelModal::Backup);
-        self.show_about_modal = self.active_panel_modal == Some(AppPanelModal::About);
-    }
 
     fn close_track_search(&mut self) {
         if self.show_track_search {
@@ -3733,11 +3712,6 @@ impl AudioOrbitApp {
 
 
 
-    fn full_panel_modal_size(&self, context: &egui::Context) -> egui::Vec2 {
-        let screen_rect = context.screen_rect();
-        egui::vec2(screen_rect.width().max(320.0), screen_rect.height().max(240.0))
-    }
-
     fn render_panel_modal(&mut self, context: &egui::Context, panel: AppPanelModal) {
         self.render_modal_backdrop(context, "panel_modal_backdrop");
         let screen_rect = context.screen_rect();
@@ -3752,7 +3726,7 @@ impl AudioOrbitApp {
             .order(egui::Order::Foreground)
             .fixed_pos(screen_rect.left_top())
             .show(context, |ui| {
-                egui::Frame::none()
+                egui::Frame::new()
                     .fill(egui::Color32::from_black_alpha(244))
                     .inner_margin(egui::Margin::symmetric(outer_padding.x as i8, outer_padding.y as i8))
                     .show(ui, |ui| {
@@ -3988,51 +3962,6 @@ impl AudioOrbitApp {
         self.save_state_silently();
     }
 
-    fn render_release_modal(&mut self, context: &egui::Context) {
-        self.render_modal_backdrop(context, "release_modal_backdrop");
-        let mut is_open = self.show_release_modal;
-        let modal_size = self.responsive_modal_size(context, 680.0, 560.0);
-        let scroll_height = (modal_size.y - 78.0).max(160.0);
-
-        egui::Area::new(egui::Id::new("release_modal"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(context, |ui| {
-                egui::Frame::window(ui.style()).show(ui, |ui| {
-                    ui.set_min_size(modal_size);
-                    ui.set_max_width(modal_size.x);
-
-                    ui.horizontal(|ui| {
-                        ui.heading(ui_icons::label(Icon::Download, "Updates"));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button(ui_icons::icon(Icon::X)).on_hover_text("Close").clicked() {
-                                is_open = false;
-                            }
-                        });
-                    });
-                    ui.add(egui::Label::new("Check, review, and install GitHub release updates from a separate panel.").wrap());
-                    ui.add_space(10.0);
-
-                    egui::ScrollArea::vertical()
-                        .max_height(scroll_height)
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            egui::Frame::group(ui.style()).show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                self.render_update_settings_section(ui, false);
-                            });
-                        });
-
-                });
-            });
-
-        if context.input(|input| input.key_pressed(egui::Key::Escape)) {
-            is_open = false;
-        }
-
-        self.show_release_modal = is_open;
-    }
-
     fn render_update_check_confirmation_modal(&mut self, context: &egui::Context) {
         let mut is_open = self.show_update_check_confirmation;
         let screen_rect = context.screen_rect();
@@ -4107,123 +4036,6 @@ impl AudioOrbitApp {
             });
 
         self.show_update_check_confirmation = is_open;
-    }
-
-    fn render_settings_modal(&mut self, context: &egui::Context) {
-        self.render_modal_backdrop(context, "settings_modal_backdrop");
-        let mut is_open = self.show_settings_modal;
-        let modal_size = self.responsive_modal_size(context, 900.0, 760.0);
-        let scroll_height = (modal_size.y - 86.0).max(180.0);
-
-        egui::Area::new(egui::Id::new("settings_modal"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(context, |ui| {
-                egui::Frame::window(ui.style()).show(ui, |ui| {
-                    ui.set_min_size(modal_size);
-                    ui.set_max_width(modal_size.x);
-
-                    ui.horizontal(|ui| {
-                        ui.heading("Settings");
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button(ui_icons::icon(Icon::X)).on_hover_text("Close").clicked() {
-                                is_open = false;
-                            }
-                        });
-                    });
-                    ui.add(egui::Label::new("Playback, sound profiles, backups, and links to the separate Updates and About panels.").wrap());
-                    ui.separator();
-
-                    egui::ScrollArea::vertical()
-                        .max_height(scroll_height)
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            egui::Frame::group(ui.style()).show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.heading("Panels");
-                                ui.small("Updates and About are separate panels, but they can be opened from here.");
-                                ui.horizontal_wrapped(|ui| {
-                                    if ui.button(ui_icons::label(Icon::Download, "Open Updates")).clicked() {
-                                        self.open_panel_modal(AppPanelModal::Updates);
-                                        is_open = false;
-                                    }
-                                    if ui.button(ui_icons::label(Icon::Info, "Open About")).clicked() {
-                                        self.open_panel_modal(AppPanelModal::About);
-                                        is_open = false;
-                                    }
-                                });
-                            });
-                            ui.add_space(12.0);
-
-                            egui::Frame::group(ui.style()).show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                self.render_playback_settings_section(ui);
-                            });
-                            ui.add_space(12.0);
-
-                            egui::Frame::group(ui.style()).show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                self.render_profile_panel(ui);
-                            });
-                            ui.add_space(12.0);
-
-                            egui::Frame::group(ui.style()).show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                self.render_backup_settings_section(ui);
-                            });
-                        });
-                });
-            });
-
-        if context.input(|input| input.key_pressed(egui::Key::Escape)) {
-            is_open = false;
-        }
-
-        self.show_settings_modal = is_open;
-    }
-
-    fn render_about_modal(&mut self, context: &egui::Context) {
-        self.render_modal_backdrop(context, "about_modal_backdrop");
-        let mut is_open = self.show_about_modal;
-        let modal_size = self.responsive_modal_size(context, 680.0, 560.0);
-        let scroll_height = (modal_size.y - 78.0).max(160.0);
-
-        egui::Area::new(egui::Id::new("about_modal"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(context, |ui| {
-                egui::Frame::window(ui.style()).show(ui, |ui| {
-                    ui.set_min_size(modal_size);
-                    ui.set_max_width(modal_size.x);
-
-                    ui.horizontal(|ui| {
-                        ui.heading(ui_icons::label(Icon::Info, "About"));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button(ui_icons::icon(Icon::X)).on_hover_text("Close").clicked() {
-                                is_open = false;
-                            }
-                        });
-                    });
-                    ui.add(egui::Label::new("Purpose, licensing, author information, and app shortcuts.").wrap());
-                    ui.separator();
-
-                    egui::ScrollArea::vertical()
-                        .max_height(scroll_height)
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            egui::Frame::group(ui.style()).show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                self.render_about_section(ui);
-                            });
-                        });
-                });
-            });
-
-        if context.input(|input| input.key_pressed(egui::Key::Escape)) {
-            is_open = false;
-        }
-
-        self.show_about_modal = is_open;
     }
 
     fn render_radio_add_modal(&mut self, context: &egui::Context) {
@@ -4384,10 +4196,6 @@ impl AudioOrbitApp {
         }
     }
 
-    fn render_backup_settings_section(&mut self, ui: &mut egui::Ui) {
-        self.render_backup_settings_section_inner(ui, true);
-    }
-
     fn render_backup_settings_section_inner(&mut self, ui: &mut egui::Ui, show_title: bool) {
         if show_title {
             ui.heading("Backup and data");
@@ -4505,10 +4313,6 @@ impl AudioOrbitApp {
             ui.small(format!("Repository: {}", updater::repository_label()));
             ui.small("No release check has been run in this app session.");
         }
-    }
-
-    fn render_about_section(&mut self, ui: &mut egui::Ui) {
-        self.render_about_section_inner(ui, true);
     }
 
     fn render_about_section_inner(&mut self, ui: &mut egui::Ui, show_title: bool) {
