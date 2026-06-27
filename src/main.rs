@@ -5289,7 +5289,13 @@ impl AudioOrbitApp {
     }
 
     fn modal_info_footer_reserved_height(&self) -> f32 {
-        if self.has_modal_info_message() { 58.0 } else { 0.0 }
+        if !self.has_modal_info_message() {
+            0.0
+        } else if self.error_message.is_some() {
+            112.0
+        } else {
+            58.0
+        }
     }
 
     fn render_modal_info_footer_fixed(&self, context: &egui::Context, id: &'static str, modal_rect: egui::Rect) {
@@ -5319,11 +5325,18 @@ impl AudioOrbitApp {
                             .inner_margin(egui::Margin::symmetric(10, 6))
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
-                                if let Some(error) = &self.error_message {
-                                    ui.colored_label(egui::Color32::LIGHT_RED, error.as_str());
-                                } else {
-                                    ui.label(self.status_message.as_str());
-                                }
+                                let max_text_height = if self.error_message.is_some() { 62.0 } else { 24.0 };
+                                egui::ScrollArea::vertical()
+                                    .max_height(max_text_height)
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        if let Some(error) = &self.error_message {
+                                            ui.add(egui::Label::new(egui::RichText::new(error.as_str()).color(egui::Color32::LIGHT_RED)).wrap());
+                                        } else {
+                                            ui.add(egui::Label::new(self.status_message.as_str()).wrap());
+                                        }
+                                    });
                             });
                     });
             });
@@ -5343,11 +5356,18 @@ impl AudioOrbitApp {
             .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                if let Some(error) = &self.error_message {
-                    ui.colored_label(egui::Color32::LIGHT_RED, error.as_str());
-                } else {
-                    ui.label(self.status_message.as_str());
-                }
+                let max_text_height = if self.error_message.is_some() { 86.0 } else { 24.0 };
+                egui::ScrollArea::vertical()
+                    .max_height(max_text_height)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        if let Some(error) = &self.error_message {
+                            ui.add(egui::Label::new(egui::RichText::new(error.as_str()).color(egui::Color32::LIGHT_RED)).wrap());
+                        } else {
+                            ui.add(egui::Label::new(self.status_message.as_str()).wrap());
+                        }
+                    });
             });
     }
 
@@ -5422,13 +5442,17 @@ impl AudioOrbitApp {
                 egui::Frame::new()
                     .fill(egui::Color32::from_black_alpha(238))
                     .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(150, 54, 62)))
-                    .corner_radius(egui::CornerRadius::same(8))
+                    .corner_radius(egui::CornerRadius::same(0))
                     .inner_margin(egui::Margin::symmetric(12, 7))
                     .show(ui, |ui| {
                         ui.set_width(width);
-                        ui.horizontal_wrapped(|ui| {
-                            ui.colored_label(egui::Color32::from_rgb(255, 112, 112), error_message.as_str());
-                        });
+                        egui::ScrollArea::vertical()
+                            .max_height(108.0)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.add(egui::Label::new(egui::RichText::new(error_message.as_str()).color(egui::Color32::from_rgb(255, 112, 112))).wrap());
+                            });
                     });
             });
     }
@@ -5815,11 +5839,95 @@ fn paint_sticky_folder_header(
     (rect, icon_rect)
 }
 
-fn spectral_bar_split(brightness: f32) -> (f32, f32) {
-    let brightness = brightness.clamp(0.0, 1.0);
-    let top = 0.24 + brightness * 0.80;
-    let bottom = 1.04 - brightness * 0.72;
-    (top.clamp(0.18, 1.08), bottom.clamp(0.24, 1.08))
+fn packed_spectral_bands_for_range(packed: &[f32], point_count: usize, start: usize, end: usize) -> (f32, f32, f32) {
+    if point_count > 0 && packed.len() >= point_count.saturating_mul(3) {
+        let mut low = 0.0_f32;
+        let mut mid = 0.0_f32;
+        let mut high = 0.0_f32;
+        let mut count = 0usize;
+        for index in start.min(point_count)..end.min(point_count) {
+            let base = index * 3;
+            low += packed.get(base).copied().unwrap_or(0.0);
+            mid += packed.get(base + 1).copied().unwrap_or(0.0);
+            high += packed.get(base + 2).copied().unwrap_or(0.0);
+            count += 1;
+        }
+        if count > 0 {
+            let inv = 1.0 / count as f32;
+            return ((low * inv).clamp(0.0, 1.0), (mid * inv).clamp(0.0, 1.0), (high * inv).clamp(0.0, 1.0));
+        }
+    }
+
+    // Backward-compatible fallback for waveforms cached before low/mid/high triples existed.
+    let mut brightness = 0.0_f32;
+    let mut count = 0usize;
+    for value in packed.iter().skip(start).take(end.saturating_sub(start)) {
+        brightness += value.clamp(0.0, 1.0);
+        count += 1;
+    }
+    if count > 0 {
+        brightness = (brightness / count as f32).clamp(0.0, 1.0);
+    }
+    let low = (1.0 - brightness).clamp(0.0, 1.0);
+    let high = brightness.clamp(0.0, 1.0);
+    let mid = (1.0 - (brightness - 0.5).abs() * 1.7).clamp(0.0, 1.0);
+    (low, mid, high)
+}
+
+fn spectral_bar_colors(played: bool) -> (egui::Color32, egui::Color32, egui::Color32) {
+    let low = egui::Color32::from_rgb(72, 132, 255);
+    let mid = egui::Color32::from_rgb(122, 224, 150);
+    let high = egui::Color32::from_rgb(255, 196, 76);
+    if played {
+        (low, mid, high)
+    } else {
+        (low.linear_multiply(0.48), mid.linear_multiply(0.48), high.linear_multiply(0.48))
+    }
+}
+
+fn draw_stacked_spectral_bar(
+    painter: &egui::Painter,
+    x1: f32,
+    x2: f32,
+    center_y: f32,
+    height: f32,
+    low: f32,
+    mid: f32,
+    high: f32,
+    played: bool,
+    silence_color: Option<egui::Color32>,
+) {
+    if x2 <= x1 || height <= 0.5 {
+        return;
+    }
+
+    if let Some(color) = silence_color {
+        let y1 = center_y - height * 0.5;
+        let y2 = center_y + height * 0.5;
+        painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x1, y1), egui::pos2(x2, y2)), 0.0, color);
+        return;
+    }
+
+    let low = low.clamp(0.0, 1.0);
+    let mid = mid.clamp(0.0, 1.0);
+    let high = high.clamp(0.0, 1.0);
+    let total = (low + mid + high).max(0.000_001);
+    let mut high_h = height * (high / total).clamp(0.06, 0.82);
+    let mut mid_h = height * (mid / total).clamp(0.06, 0.82);
+    let mut low_h = height * (low / total).clamp(0.06, 0.82);
+    let scale = height / (high_h + mid_h + low_h).max(0.000_001);
+    high_h *= scale;
+    mid_h *= scale;
+    low_h *= scale;
+
+    let top = center_y - height * 0.5;
+    let (low_color, mid_color, high_color) = spectral_bar_colors(played);
+    let high_rect = egui::Rect::from_min_max(egui::pos2(x1, top), egui::pos2(x2, top + high_h));
+    let mid_rect = egui::Rect::from_min_max(egui::pos2(x1, top + high_h), egui::pos2(x2, top + high_h + mid_h));
+    let low_rect = egui::Rect::from_min_max(egui::pos2(x1, top + high_h + mid_h), egui::pos2(x2, top + high_h + mid_h + low_h));
+    painter.rect_filled(high_rect, 0.0, high_color);
+    painter.rect_filled(mid_rect, 0.0, mid_color);
+    painter.rect_filled(low_rect, 0.0, low_color);
 }
 
 fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egui::Response {
@@ -5861,17 +5969,20 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
         if value <= 0.006 {
             continue;
         }
-        let normalized = value.powf(0.88);
-        let height = (rect.height() * 0.70 * normalized).clamp(2.0, rect.height() * 0.86);
-        let brightness = bar.brightness.clamp(0.0, 1.0);
-        let (top_ratio, bottom_ratio) = spectral_bar_split(brightness);
-        let y1 = (rect.center().y - height * top_ratio).max(rect.top() + 2.0);
-        let y2 = (rect.center().y + height * bottom_ratio).min(rect.bottom() - 2.0);
-
-        painter.rect_filled(
-            egui::Rect::from_min_max(egui::pos2(x1.max(rect.left()), y1), egui::pos2(x2.min(rect.right()), y2)),
-            0.0,
-            visuals.selection.bg_fill,
+        let normalized = value.powf(0.82);
+        let height = (rect.height() * 0.84 * normalized).clamp(2.0, rect.height() * 0.92);
+        let y_center = rect.center().y;
+        draw_stacked_spectral_bar(
+            painter,
+            x1.max(rect.left()),
+            x2.min(rect.right()),
+            y_center,
+            height,
+            bar.low,
+            bar.mid,
+            bar.high,
+            true,
+            None,
         );
     }
 
@@ -5888,7 +5999,6 @@ fn draw_waveform_seek(
 ) -> egui::Response {
     let desired_size = egui::vec2(ui.available_width(), 46.0);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click_and_drag());
-    let visuals = ui.visuals();
     let painter = ui.painter();
 
     painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(210));
@@ -5929,22 +6039,11 @@ fn draw_waveform_seek(
             break;
         }
 
-        let brightness_start = bar_index * step;
-        let brightness_end = ((bar_index + 1) * step).min(waveform_brightness.len());
-        let brightness = if brightness_start < brightness_end {
-            let sum = waveform_brightness[brightness_start..brightness_end]
-                .iter()
-                .copied()
-                .sum::<f32>();
-            (sum / (brightness_end - brightness_start) as f32).clamp(0.0, 1.0)
-        } else {
-            0.5
-        };
+        let band_start = bar_index * step;
+        let band_end = ((bar_index + 1) * step).min(waveform.len());
+        let (low, mid, high) = packed_spectral_bands_for_range(waveform_brightness, waveform.len(), band_start, band_end);
 
-        let height = (rect.height() * 0.68 * eased).max(4.0);
-        let (top_ratio, bottom_ratio) = spectral_bar_split(brightness);
-        let y1 = (rect.center().y - height * top_ratio).max(rect.top() + 2.0);
-        let y2 = (rect.center().y + height * bottom_ratio).min(rect.bottom() - 2.0);
+        let height = (rect.height() * 0.84 * eased).max(4.0).min(rect.height() - 4.0);
         let bar_start_seconds = if duration_seconds > 0.0 {
             (bar_index * step) as f32 / waveform.len().max(1) as f32 * duration_seconds
         } else {
@@ -5957,17 +6056,22 @@ fn draw_waveform_seek(
         };
         let is_silence = duration_seconds > 0.0
             && silence_ranges.iter().any(|(start, end)| *end > bar_start_seconds && *start < bar_end_seconds);
-        let color = if is_silence {
-            egui::Color32::from_rgb(238, 194, 74)
-        } else if x1 <= progress_x {
-            visuals.selection.bg_fill
+        let silence_color = if is_silence {
+            Some(egui::Color32::from_rgb(238, 194, 74))
         } else {
-            visuals.widgets.inactive.fg_stroke.color.linear_multiply(0.72)
+            None
         };
-        painter.rect_filled(
-            egui::Rect::from_min_max(egui::pos2(x1, y1), egui::pos2(x2, y2)),
-            0.0,
-            color,
+        draw_stacked_spectral_bar(
+            painter,
+            x1,
+            x2,
+            rect.center().y,
+            height,
+            low,
+            mid,
+            high,
+            x1 <= progress_x,
+            silence_color,
         );
     }
 

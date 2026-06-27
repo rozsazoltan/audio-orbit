@@ -171,14 +171,18 @@ impl<R> Seek for RadioStream<R> {
 struct RadioVisualizerBucket {
     at: Instant,
     peak: f32,
-    brightness: f32,
+    low: f32,
+    mid: f32,
+    high: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct RadioVisualizerBar {
     pub age_seconds: f32,
     pub peak: f32,
-    pub brightness: f32,
+    pub low: f32,
+    pub mid: f32,
+    pub high: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -325,7 +329,9 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
             state.peaks.push_back(RadioVisualizerBucket {
                 at: now,
                 peak: bucket.level.clamp(0.0, 1.0),
-                brightness: bucket.brightness.clamp(0.0, 1.0),
+                low: bucket.low.clamp(0.0, 1.0),
+                mid: bucket.mid.clamp(0.0, 1.0),
+                high: bucket.high.clamp(0.0, 1.0),
             });
 
             let history = Duration::from_secs(RADIO_VISUALIZER_HISTORY_SECONDS as u64);
@@ -637,7 +643,9 @@ impl AudioPlayer {
         }
 
         let mut slot_peaks = vec![0.0_f32; requested_points];
-        let mut slot_brightness = vec![0.5_f32; requested_points];
+        let mut slot_low = vec![0.0_f32; requested_points];
+        let mut slot_mid = vec![0.0_f32; requested_points];
+        let mut slot_high = vec![0.0_f32; requested_points];
         for bucket in &state.peaks {
             let age_seconds = now.duration_since(bucket.at).as_secs_f32();
             if age_seconds > max_age {
@@ -650,31 +658,41 @@ impl AudioPlayer {
             let slot = requested_points - 1 - slot_from_right;
             if bucket.peak >= slot_peaks[slot] {
                 slot_peaks[slot] = bucket.peak;
-                slot_brightness[slot] = bucket.brightness.clamp(0.0, 1.0);
+                slot_low[slot] = bucket.low.clamp(0.0, 1.0);
+                slot_mid[slot] = bucket.mid.clamp(0.0, 1.0);
+                slot_high[slot] = bucket.high.clamp(0.0, 1.0);
             }
         }
 
-        let mut previous = 0.0_f32;
-        let mut previous_brightness = 0.5_f32;
+        let mut previous_peak = 0.0_f32;
+        let mut previous_low = 0.0_f32;
+        let mut previous_mid = 0.0_f32;
+        let mut previous_high = 0.0_f32;
         let bars = slot_peaks
             .into_iter()
-            .zip(slot_brightness.into_iter())
+            .zip(slot_low.into_iter())
+            .zip(slot_mid.into_iter())
+            .zip(slot_high.into_iter())
             .enumerate()
-            .filter_map(|(slot, (peak, brightness))| {
-                let shaped = if peak > previous {
-                    previous * 0.25 + peak * 0.75
+            .filter_map(|(slot, (((peak, low), mid), high))| {
+                let shaped = if peak > previous_peak {
+                    previous_peak * 0.22 + peak * 0.78
                 } else {
-                    previous * 0.68 + peak * 0.32
+                    previous_peak * 0.70 + peak * 0.30
                 };
-                previous = shaped;
-                previous_brightness = previous_brightness * 0.70 + brightness * 0.30;
+                previous_peak = shaped;
+                previous_low = previous_low * 0.58 + low * 0.42;
+                previous_mid = previous_mid * 0.58 + mid * 0.42;
+                previous_high = previous_high * 0.56 + high * 0.44;
                 if shaped <= 0.003 {
                     return None;
                 }
                 Some(RadioVisualizerBar {
                     age_seconds: (requested_points - 1 - slot) as f32 * bucket_seconds,
                     peak: shaped.clamp(0.0, 1.0),
-                    brightness: previous_brightness.clamp(0.0, 1.0),
+                    low: previous_low.clamp(0.0, 1.0),
+                    mid: previous_mid.clamp(0.0, 1.0),
+                    high: previous_high.clamp(0.0, 1.0),
                 })
             })
             .collect();

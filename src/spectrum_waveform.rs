@@ -1,21 +1,27 @@
 use rustfft::{num_complex::Complex, FftPlanner};
 
 const DEFAULT_FFT_SIZE: usize = 4096;
-const MIN_FREQUENCY_HZ: f32 = 28.0;
+const LIVE_FFT_SIZE: usize = 2048;
+const MIN_FREQUENCY_HZ: f32 = 24.0;
 const MAX_FREQUENCY_HZ: f32 = 18_000.0;
-const ANALYSIS_BANDS: usize = 28;
+const LOW_SPLIT_HZ: f32 = 250.0;
+const MID_SPLIT_HZ: f32 = 4_000.0;
+const ANALYSIS_BANDS: usize = 36;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SpectrumBucket {
     pub level: f32,
-    pub brightness: f32,
+    pub low: f32,
+    pub mid: f32,
+    pub high: f32,
 }
 
-/// Build an AIMP-style perceptual waveform.
+
+/// Build a DJ-player-style overview waveform.
 ///
-/// The first vector is the visible bar level over time. The second vector is a matching
-/// low/high-frequency balance value used by the renderer to make bass-heavy and bright
-/// passages visually different instead of only showing loud/quiet changes.
+/// The visible amplitude uses min/max + RMS like classic waveform generators, while
+/// the companion vector is packed as low/mid/high triples so the renderer can draw
+/// a stacked RGB-style frequency profile instead of a single loudness-only wall.
 pub fn spectrum_waveform(samples: &[f32], sample_rate: u32, points: usize) -> (Vec<f32>, Vec<f32>) {
     if samples.is_empty() || sample_rate == 0 || points == 0 {
         return (Vec::new(), Vec::new());
@@ -24,23 +30,24 @@ pub fn spectrum_waveform(samples: &[f32], sample_rate: u32, points: usize) -> (V
     let chunk_size = (samples.len() / points).max(1);
     let mut analyzer = SpectrumAnalyzer::new(sample_rate, DEFAULT_FFT_SIZE);
     let mut levels = Vec::with_capacity(points);
-    let mut brightness = Vec::with_capacity(points);
+    let mut bands = Vec::with_capacity(points * 3);
 
     for chunk in samples.chunks(chunk_size).take(points) {
         let bucket = analyzer.analyze_chunk(chunk);
         levels.push(bucket.level);
-        brightness.push(bucket.brightness);
+        bands.extend_from_slice(&[bucket.low, bucket.mid, bucket.high]);
     }
 
     while levels.len() < points {
         levels.push(0.0);
-        brightness.push(0.5);
+        bands.extend_from_slice(&[0.0, 0.0, 0.0]);
     }
 
     normalize_waveform_levels(&mut levels);
-    smooth_brightness(&mut brightness);
+    normalize_packed_bands(&mut bands);
+    smooth_packed_bands(&mut bands);
 
-    (levels, brightness)
+    (levels, bands)
 }
 
 pub struct LiveSpectrumAnalyzer {
@@ -51,8 +58,7 @@ pub struct LiveSpectrumAnalyzer {
     filled: usize,
     samples_since_bucket: usize,
     analyzer: SpectrumAnalyzer,
-    previous_level: f32,
-    previous_brightness: f32,
+    previous_bucket: SpectrumBucket,
     adaptive_floor: f32,
     adaptive_peak: f32,
 }
@@ -60,7 +66,7 @@ pub struct LiveSpectrumAnalyzer {
 impl LiveSpectrumAnalyzer {
     pub fn new(sample_rate: u32, buckets_per_second: usize) -> Self {
         let sample_rate = sample_rate.max(1);
-        let fft_size = DEFAULT_FFT_SIZE.min(sample_rate as usize).max(512).next_power_of_two();
+        let fft_size = LIVE_FFT_SIZE.min(sample_rate as usize).max(512).next_power_of_two();
         let hop_size = (sample_rate as usize / buckets_per_second.max(1)).max(1);
         Self {
             fft_size,
@@ -70,10 +76,14 @@ impl LiveSpectrumAnalyzer {
             filled: 0,
             samples_since_bucket: 0,
             analyzer: SpectrumAnalyzer::new(sample_rate, fft_size),
-            previous_level: 0.0,
-            previous_brightness: 0.5,
-            adaptive_floor: 0.035,
-            adaptive_peak: 0.24,
+            previous_bucket: SpectrumBucket {
+                level: 0.0,
+                low: 0.0,
+                mid: 0.0,
+                high: 0.0,
+            },
+            adaptive_floor: 0.030,
+            adaptive_peak: 0.26,
         }
     }
 
@@ -91,41 +101,38 @@ impl LiveSpectrumAnalyzer {
         let mut ordered = Vec::with_capacity(self.fft_size);
         ordered.extend_from_slice(&self.ring[self.ring_pos..]);
         ordered.extend_from_slice(&self.ring[..self.ring_pos]);
+
         let target = self.analyzer.analyze_window(&ordered);
         let adaptive_level = self.normalize_live_level(target.level);
+        let level = smooth_attack_release(adaptive_level, self.previous_bucket.level, 0.62, 0.18);
 
-        // Smooth like a desktop player visualizer: fast attack, slower release, and no constant 100% wall.
-        let smoothed_level = if adaptive_level > self.previous_level {
-            self.previous_level * 0.42 + adaptive_level * 0.58
-        } else {
-            self.previous_level * 0.84 + adaptive_level * 0.16
+        let bucket = SpectrumBucket {
+            level: level.clamp(0.0, 1.0),
+            low: smooth_attack_release(target.low, self.previous_bucket.low, 0.54, 0.22),
+            mid: smooth_attack_release(target.mid, self.previous_bucket.mid, 0.54, 0.22),
+            high: smooth_attack_release(target.high, self.previous_bucket.high, 0.58, 0.24),
         };
-        self.previous_level = smoothed_level.clamp(0.0, 1.0);
-        self.previous_brightness = (self.previous_brightness * 0.62 + target.brightness * 0.38).clamp(0.0, 1.0);
-
-        Some(SpectrumBucket {
-            level: self.previous_level,
-            brightness: self.previous_brightness,
-        })
+        self.previous_bucket = bucket;
+        Some(bucket)
     }
 
     fn normalize_live_level(&mut self, level: f32) -> f32 {
         let level = level.clamp(0.0, 1.0);
         self.adaptive_floor = if level < self.adaptive_floor {
-            self.adaptive_floor * 0.94 + level * 0.06
+            self.adaptive_floor * 0.90 + level * 0.10
         } else {
-            self.adaptive_floor * 0.998 + level * 0.002
+            self.adaptive_floor * 0.9985 + level * 0.0015
         };
         self.adaptive_peak = if level > self.adaptive_peak {
-            self.adaptive_peak * 0.74 + level * 0.26
+            self.adaptive_peak * 0.70 + level * 0.30
         } else {
             self.adaptive_peak * 0.996 + level * 0.004
         };
 
-        let floor = self.adaptive_floor.min(0.22);
-        let peak = self.adaptive_peak.max(floor + 0.10);
+        let floor = self.adaptive_floor.min(0.24);
+        let peak = self.adaptive_peak.max(floor + 0.12);
         let normalized = ((level - floor) / (peak - floor)).clamp(0.0, 1.0);
-        normalized.powf(0.92) * 0.96
+        normalized.powf(0.86) * 0.94
     }
 }
 
@@ -164,16 +171,18 @@ impl SpectrumAnalyzer {
         }
 
         let step = (self.fft_size / 2).max(1);
-        let mut sum_level = 0.0_f32;
-        let mut sum_brightness = 0.0_f32;
+        let mut sum = SpectrumBucket::default();
         let mut strongest = SpectrumBucket::default();
         let mut count = 0usize;
         let mut offset = 0usize;
+
         while offset < chunk.len() {
             let end = (offset + self.fft_size).min(chunk.len());
             let bucket = self.analyze_window(&chunk[offset..end]);
-            sum_level += bucket.level;
-            sum_brightness += bucket.brightness;
+            sum.level += bucket.level;
+            sum.low += bucket.low;
+            sum.mid += bucket.mid;
+            sum.high += bucket.high;
             if bucket.level > strongest.level {
                 strongest = bucket;
             }
@@ -187,11 +196,12 @@ impl SpectrumAnalyzer {
         if count == 0 {
             SpectrumBucket::default()
         } else {
-            let average_level = sum_level / count as f32;
-            let average_brightness = sum_brightness / count as f32;
+            let inv = 1.0 / count as f32;
             SpectrumBucket {
-                level: (average_level * 0.70 + strongest.level * 0.30).clamp(0.0, 1.0),
-                brightness: (average_brightness * 0.72 + strongest.brightness * 0.28).clamp(0.0, 1.0),
+                level: (sum.level * inv * 0.62 + strongest.level * 0.38).clamp(0.0, 1.0),
+                low: (sum.low * inv * 0.70 + strongest.low * 0.30).clamp(0.0, 1.0),
+                mid: (sum.mid * inv * 0.70 + strongest.mid * 0.30).clamp(0.0, 1.0),
+                high: (sum.high * inv * 0.70 + strongest.high * 0.30).clamp(0.0, 1.0),
             }
         }
     }
@@ -207,34 +217,39 @@ impl SpectrumAnalyzer {
         }
 
         let mut time_energy = 0.0_f64;
+        let mut min_sample = 1.0_f32;
+        let mut max_sample = -1.0_f32;
         for index in 0..sample_count {
             let sample = samples[index].clamp(-1.0, 1.0);
             time_energy += (sample as f64) * (sample as f64);
+            min_sample = min_sample.min(sample);
+            max_sample = max_sample.max(sample);
             self.buffer[index].re = sample * self.window[index];
         }
 
         self.fft.process(&mut self.buffer);
 
         let rms = (time_energy / sample_count as f64).sqrt() as f32;
-        let loudness = db_to_unit(20.0 * rms.max(0.000_001).log10(), -64.0, -5.0, 1.35);
+        let peak = max_sample.abs().max(min_sample.abs()).clamp(0.0, 1.0);
+        let min_max_span = ((max_sample - min_sample).abs() * 0.5).clamp(0.0, 1.0);
+        let loudness = db_to_unit(20.0 * rms.max(0.000_001).log10(), -58.0, -4.0, 1.16);
         let profile = self.perceptual_spectral_profile();
-
-        // The visible value is deliberately spectral-first. Loudness still matters, but low/mid/high
-        // balance and motion must change the bars even when two moments have similar RMS.
+        let strongest_band = profile.low.max(profile.mid).max(profile.high);
         let contrast = (profile.strongest - profile.average).clamp(0.0, 1.0);
-        let band_presence = (profile.low * 0.30 + profile.mid * 0.28 + profile.high * 0.30 + profile.strongest * 0.12)
-            .clamp(0.0, 1.0);
-        let tilt_emphasis = ((profile.brightness - 0.5).abs() * 2.0).clamp(0.0, 1.0);
-        let level = profile.average * 0.25
-            + band_presence * 0.25
-            + loudness * 0.18
-            + profile.flux * 0.14
-            + contrast * 0.10
-            + tilt_emphasis * profile.strongest * 0.08;
+        let flux = profile.flux;
+
+        let level = min_max_span * 0.36
+            + peak.powf(0.72) * 0.20
+            + loudness * 0.20
+            + strongest_band * 0.15
+            + contrast * 0.05
+            + flux * 0.04;
 
         SpectrumBucket {
             level: level.clamp(0.0, 1.0),
-            brightness: profile.brightness.clamp(0.0, 1.0),
+            low: profile.low,
+            mid: profile.mid,
+            high: profile.high,
         }
     }
 
@@ -248,62 +263,66 @@ impl SpectrumAnalyzer {
             let end_ratio = (index + 1) as f32 / ANALYSIS_BANDS as f32;
             let low = log_lerp(MIN_FREQUENCY_HZ, max_frequency, start_ratio);
             let high = log_lerp(MIN_FREQUENCY_HZ, max_frequency, end_ratio);
-            bands.push(self.band_level(low, high));
+            bands.push((low, high, self.band_level(low, high)));
         }
 
         let mut weighted_sum = 0.0_f32;
         let mut weight_sum = 0.0_f32;
         let mut strongest = 0.0_f32;
-        let mut centroid_sum = 0.0_f32;
-        let mut low = 0.0_f32;
-        let mut mid = 0.0_f32;
-        let mut high = 0.0_f32;
+        let mut low_sum = 0.0_f32;
+        let mut low_weight = 0.0_f32;
+        let mut mid_sum = 0.0_f32;
+        let mut mid_weight = 0.0_f32;
+        let mut high_sum = 0.0_f32;
+        let mut high_weight = 0.0_f32;
 
-        for (index, band) in bands.iter().copied().enumerate() {
-            let position = index as f32 / (ANALYSIS_BANDS - 1).max(1) as f32;
-            let weight = 0.80 + (1.0 - (position - 0.46).abs()).max(0.0) * 0.34;
-            weighted_sum += band * weight;
-            weight_sum += weight;
-            strongest = strongest.max(band);
-            centroid_sum += band * position;
-            if position < 0.30 {
-                low += band;
-            } else if position < 0.70 {
-                mid += band;
+        for (low_hz, high_hz, band) in bands.iter().copied() {
+            let center_hz = (low_hz * high_hz).sqrt();
+            let music_presence_weight = if center_hz < 80.0 {
+                0.78
+            } else if center_hz < 12_000.0 {
+                1.0
             } else {
-                high += band;
+                0.84
+            };
+            weighted_sum += band * music_presence_weight;
+            weight_sum += music_presence_weight;
+            strongest = strongest.max(band);
+
+            if center_hz < LOW_SPLIT_HZ {
+                low_sum += band * music_presence_weight;
+                low_weight += music_presence_weight;
+            } else if center_hz < MID_SPLIT_HZ {
+                mid_sum += band * music_presence_weight;
+                mid_weight += music_presence_weight;
+            } else {
+                high_sum += band * music_presence_weight;
+                high_weight += music_presence_weight;
             }
         }
 
         let average = if weight_sum > 0.0 { weighted_sum / weight_sum } else { 0.0 };
-        let total = bands.iter().copied().sum::<f32>().max(0.000_001);
-        let centroid_brightness = (centroid_sum / total).clamp(0.0, 1.0);
-        let low = low / (ANALYSIS_BANDS as f32 * 0.30).max(1.0);
-        let mid = mid / (ANALYSIS_BANDS as f32 * 0.40).max(1.0);
-        let high = high / (ANALYSIS_BANDS as f32 * 0.30).max(1.0);
-        let low_mid_high_total = (low + mid + high).max(0.000_001);
-        let high_balance = ((high + mid * 0.42) / low_mid_high_total).clamp(0.0, 1.0);
-        let brightness = ((centroid_brightness * 0.58 + high_balance * 0.42 - 0.5) * 1.42 + 0.5)
-            .clamp(0.0, 1.0);
+        let low = if low_weight > 0.0 { low_sum / low_weight } else { 0.0 };
+        let mid = if mid_weight > 0.0 { mid_sum / mid_weight } else { 0.0 };
+        let high = if high_weight > 0.0 { high_sum / high_weight } else { 0.0 };
 
         let mut positive_flux = 0.0_f32;
         let mut flux_count = 0usize;
-        for (band, previous) in bands.iter().zip(self.previous_bands.iter()) {
+        for ((_, _, band), previous) in bands.iter().zip(self.previous_bands.iter()) {
             positive_flux += (*band - *previous).max(0.0);
             flux_count += 1;
         }
-        self.previous_bands = bands;
+        self.previous_bands = bands.iter().map(|(_, _, band)| *band).collect();
         let flux = if flux_count == 0 {
             0.0
         } else {
-            (positive_flux / flux_count as f32 * 2.8).clamp(0.0, 1.0)
+            (positive_flux / flux_count as f32 * 2.6).clamp(0.0, 1.0)
         };
 
         SpectralProfile {
             average,
             strongest,
             flux,
-            brightness,
             low: low.clamp(0.0, 1.0),
             mid: mid.clamp(0.0, 1.0),
             high: high.clamp(0.0, 1.0),
@@ -326,8 +345,11 @@ impl SpectrumAnalyzer {
         let mut count = 0usize;
         for bin in start..end {
             let complex = self.buffer[bin];
+            let frequency = bin as f32 * bin_hz;
             let magnitude = complex.norm() / self.fft_size as f32;
-            sum += (magnitude as f64) * (magnitude as f64);
+            let perceptual_weight = equal_loudness_visual_weight(frequency);
+            let weighted = magnitude * perceptual_weight;
+            sum += (weighted as f64) * (weighted as f64);
             count += 1;
         }
 
@@ -337,7 +359,7 @@ impl SpectrumAnalyzer {
 
         let energy = (sum / count as f64).sqrt() as f32;
         let db = 20.0 * energy.max(0.000_001).log10();
-        db_to_unit(db, -86.0, -13.0, 1.14)
+        db_to_unit(db, -82.0, -12.0, 1.02)
     }
 }
 
@@ -346,7 +368,6 @@ struct SpectralProfile {
     average: f32,
     strongest: f32,
     flux: f32,
-    brightness: f32,
     low: f32,
     mid: f32,
     high: f32,
@@ -378,26 +399,77 @@ fn normalize_waveform_levels(levels: &mut [f32]) {
 
     let mut sorted = levels.to_vec();
     sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-    let floor = sorted[((sorted.len() - 1) as f32 * 0.06) as usize].min(0.24);
-    let ceiling = sorted[((sorted.len() - 1) as f32 * 0.992) as usize].max(floor + 0.10);
+    let floor = sorted[((sorted.len() - 1) as f32 * 0.04) as usize].min(0.18);
+    let ceiling = sorted[((sorted.len() - 1) as f32 * 0.985) as usize].max(floor + 0.12);
     let range = (ceiling - floor).max(0.08);
 
     for value in levels.iter_mut() {
-        let normalized = ((*value - floor) / range).clamp(0.012, 0.985);
-        *value = normalized.powf(0.92);
+        let original = (*value).clamp(0.0, 1.0);
+        let normalized = ((original - floor) / range).clamp(0.006, 0.98).powf(0.82);
+        *value = (normalized * 0.78 + original.powf(0.78) * 0.22).clamp(0.0, 1.0);
     }
 }
 
-fn smooth_brightness(values: &mut [f32]) {
-    if values.is_empty() {
+fn normalize_packed_bands(bands: &mut [f32]) {
+    if bands.len() < 12 {
         return;
     }
 
-    let mut previous = values[0].clamp(0.0, 1.0);
-    for value in values.iter_mut() {
-        let expanded = ((*value).clamp(0.0, 1.0) - 0.5) * 1.28 + 0.5;
-        previous = previous * 0.48 + expanded.clamp(0.0, 1.0) * 0.52;
-        *value = previous;
+    for channel in 0..3 {
+        let mut values = bands
+            .chunks_exact(3)
+            .map(|chunk| chunk[channel])
+            .collect::<Vec<_>>();
+        values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+        let floor = values[((values.len() - 1) as f32 * 0.05) as usize].min(0.18);
+        let ceiling = values[((values.len() - 1) as f32 * 0.985) as usize].max(floor + 0.10);
+        let range = (ceiling - floor).max(0.08);
+        for chunk in bands.chunks_exact_mut(3) {
+            let original = chunk[channel].clamp(0.0, 1.0);
+            let normalized = ((original - floor) / range).clamp(0.0, 1.0).powf(0.88);
+            chunk[channel] = (normalized * 0.72 + original * 0.28).clamp(0.0, 1.0);
+        }
+    }
+}
+
+fn smooth_packed_bands(bands: &mut [f32]) {
+    if bands.len() < 6 {
+        return;
+    }
+
+    let mut previous = [bands[0], bands[1], bands[2]];
+    for chunk in bands.chunks_exact_mut(3) {
+        for channel in 0..3 {
+            previous[channel] = previous[channel] * 0.42 + chunk[channel].clamp(0.0, 1.0) * 0.58;
+            chunk[channel] = previous[channel].clamp(0.0, 1.0);
+        }
+    }
+}
+
+fn smooth_attack_release(target: f32, previous: f32, attack: f32, release: f32) -> f32 {
+    let target = target.clamp(0.0, 1.0);
+    let previous = previous.clamp(0.0, 1.0);
+    if target > previous {
+        previous * (1.0 - attack) + target * attack
+    } else {
+        previous * (1.0 - release) + target * release
+    }
+}
+
+fn equal_loudness_visual_weight(frequency_hz: f32) -> f32 {
+    let frequency_hz = frequency_hz.max(1.0);
+    if frequency_hz < 60.0 {
+        0.72
+    } else if frequency_hz < 120.0 {
+        0.88
+    } else if frequency_hz < 2_000.0 {
+        1.0
+    } else if frequency_hz < 7_500.0 {
+        1.08
+    } else if frequency_hz < 12_000.0 {
+        0.96
+    } else {
+        0.74
     }
 }
 

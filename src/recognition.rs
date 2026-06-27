@@ -88,7 +88,15 @@ pub fn temporary_sample_path() -> PathBuf {
 
 pub fn recognize_with_songrec(command_path: Option<PathBuf>, sample_path: &Path) -> Result<RecognitionResult> {
     let candidates = songrec_candidates(command_path, sample_path);
+    if candidates.is_empty() {
+        anyhow::bail!(
+            "SongRec executable was not found. Use Settings > Recognition > Install/update SongRec so Audio Orbit can place the helper in .audio-orbit-dll, or set a real SongRec executable path."
+        );
+    }
+
     let mut errors = Vec::new();
+    let mut elevation_error = false;
+    let mut not_found_errors = 0usize;
 
     for candidate in candidates {
         let output = Command::new(&candidate.command)
@@ -99,7 +107,13 @@ pub fn recognize_with_songrec(command_path: Option<PathBuf>, sample_path: &Path)
         let output = match output {
             Ok(output) => output,
             Err(error) => {
-                errors.push(format!("{}: {error}", candidate.source));
+                if is_elevation_error_text(&error.to_string()) || error.raw_os_error() == Some(740) {
+                    elevation_error = true;
+                }
+                if error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(2) {
+                    not_found_errors += 1;
+                }
+                errors.push(format!("{}: {}", candidate.source, compact_error_text(&error.to_string())));
                 continue;
             }
         };
@@ -109,7 +123,14 @@ pub fn recognize_with_songrec(command_path: Option<PathBuf>, sample_path: &Path)
 
         if !output.status.success() {
             let message = if stderr.is_empty() { stdout.clone() } else { stderr.clone() };
-            errors.push(format!("{}: {}", candidate.source, if message.is_empty() { "command failed".to_owned() } else { message }));
+            if is_elevation_error_text(&message) {
+                elevation_error = true;
+            }
+            errors.push(format!(
+                "{}: {}",
+                candidate.source,
+                if message.is_empty() { "command failed".to_owned() } else { compact_error_text(&message) }
+            ));
             continue;
         }
 
@@ -123,70 +144,111 @@ pub fn recognize_with_songrec(command_path: Option<PathBuf>, sample_path: &Path)
             return Ok(result);
         }
 
-        errors.push(format!("{}: could not parse response: {}", candidate.source, raw));
+        errors.push(format!("{}: could not parse response: {}", candidate.source, compact_error_text(&raw)));
     }
 
-    if errors.iter().all(|error| error.contains("No such file") || error.contains("not found") || error.contains("os error 2")) {
+    if elevation_error {
         anyhow::bail!(
-            "SongRec was not found. Put songrec.exe or songrec-cli.exe in .audio-orbit-dll, next to Audio Orbit, on PATH, or set the executable path in Settings > Recognition."
+            "The selected SongRec executable looks like a Windows installer or requires administrator elevation (os error 740). Use Settings > Recognition > Install/update SongRec so Audio Orbit installs a portable CLI executable into .audio-orbit-dll, or choose a real SongRec executable instead of the installer."
         );
     }
 
+    if not_found_errors == errors.len() {
+        anyhow::bail!(
+            "SongRec executable was not found. Use Settings > Recognition > Install/update SongRec so Audio Orbit can place the helper in .audio-orbit-dll, or set a real SongRec executable path."
+        );
+    }
+
+    let detail_limit = 5usize;
+    let mut details = errors.iter().take(detail_limit).cloned().collect::<Vec<_>>().join(" | ");
+    if errors.len() > detail_limit {
+        details.push_str(&format!(" | and {} more attempt(s)", errors.len() - detail_limit));
+    }
+
     anyhow::bail!(
-        "free SongRec recognition failed. Put SongRec in .audio-orbit-dll or set its executable path in Settings > Recognition. Details: {}",
-        errors.join(" | ")
+        "SongRec recognition failed. Details: {}",
+        details
     )
 }
 
 fn songrec_candidates(command_path: Option<PathBuf>, sample_path: &Path) -> Vec<CandidateCommand> {
-    let mut commands = Vec::new();
+    let mut candidates = Vec::new();
+
     if let Some(command_path) = command_path {
-        commands.push((command_path, "configured SongRec".to_owned()));
-    } else {
-        let tools = external_tools_dir();
-        commands.push((tools.join("songrec-cli.exe"), ".audio-orbit-dll songrec-cli.exe".to_owned()));
-        commands.push((tools.join("songrec.exe"), ".audio-orbit-dll songrec.exe".to_owned()));
-        commands.push((tools.join("audio-file-to-recognized-song.exe"), ".audio-orbit-dll audio-file-to-recognized-song.exe".to_owned()));
-        commands.push((tools.join("songrec-cli"), ".audio-orbit-dll songrec-cli".to_owned()));
-        commands.push((tools.join("songrec"), ".audio-orbit-dll songrec".to_owned()));
-        commands.push((tools.join("audio-file-to-recognized-song"), ".audio-orbit-dll audio-file-to-recognized-song".to_owned()));
-        if let Ok(current_exe) = env::current_exe() {
-            if let Some(folder) = current_exe.parent() {
-                commands.push((folder.join("songrec.exe"), "app folder songrec.exe".to_owned()));
-                commands.push((folder.join("songrec-cli.exe"), "app folder songrec-cli.exe".to_owned()));
-                commands.push((folder.join("audio-file-to-recognized-song.exe"), "app folder audio-file-to-recognized-song.exe".to_owned()));
-                commands.push((folder.join("songrec"), "app folder songrec".to_owned()));
-                commands.push((folder.join("audio-file-to-recognized-song"), "app folder audio-file-to-recognized-song".to_owned()));
-            }
-        }
-        commands.push((PathBuf::from("songrec"), "PATH songrec".to_owned()));
-        commands.push((PathBuf::from("songrec.exe"), "PATH songrec.exe".to_owned()));
-        commands.push((PathBuf::from("songrec-cli"), "PATH songrec-cli".to_owned()));
-        commands.push((PathBuf::from("songrec-cli.exe"), "PATH songrec-cli.exe".to_owned()));
-        commands.push((PathBuf::from("audio-file-to-recognized-song"), "PATH audio-file-to-recognized-song".to_owned()));
-        commands.push((PathBuf::from("audio-file-to-recognized-song.exe"), "PATH audio-file-to-recognized-song.exe".to_owned()));
+        append_songrec_command_candidates(&mut candidates, command_path, "configured SongRec".to_owned(), sample_path);
+        return candidates;
     }
 
-    let sample = sample_path.display().to_string();
-    let argument_sets = vec![
-        vec!["recognize".to_owned(), "--json".to_owned(), sample.clone()],
-        vec!["recognize".to_owned(), sample.clone(), "--json".to_owned()],
-        vec!["recognize".to_owned(), sample.clone()],
-        vec!["audio-file-to-recognized-song".to_owned(), sample.clone()],
-        vec!["audio-file-to-recognized-song".to_owned(), sample.clone(), "--json".to_owned()],
-    ];
+    if let Some(installed) = installed_songrec_executable() {
+        append_songrec_command_candidates(&mut candidates, installed, "managed SongRec".to_owned(), sample_path);
+        return candidates;
+    }
 
-    commands
-        .into_iter()
-        .flat_map(|(command, label)| {
-            let argument_sets = argument_sets.clone();
-            argument_sets.into_iter().map(move |args| CandidateCommand {
-                command: command.clone(),
-                source: format!("{label} {}", args.join(" ")),
-                args,
-            })
-        })
-        .collect()
+    if let Ok(current_exe) = env::current_exe() {
+        if let Some(folder) = current_exe.parent() {
+            for name in ["songrec-cli.exe", "audio-file-to-recognized-song.exe", "songrec.exe", "songrec-cli", "audio-file-to-recognized-song", "songrec"] {
+                let path = folder.join(name);
+                if path.is_file() {
+                    append_songrec_command_candidates(&mut candidates, path, format!("app folder {name}"), sample_path);
+                }
+            }
+        }
+    }
+
+    // Keep PATH as a fallback, but avoid the previous noisy matrix of missing paths and duplicated commands.
+    for name in ["songrec-cli", "songrec-cli.exe", "audio-file-to-recognized-song", "audio-file-to-recognized-song.exe", "songrec", "songrec.exe"] {
+        append_songrec_command_candidates(&mut candidates, PathBuf::from(name), format!("PATH {name}"), sample_path);
+    }
+
+    candidates
+}
+
+fn append_songrec_command_candidates(candidates: &mut Vec<CandidateCommand>, command: PathBuf, label: String, sample_path: &Path) {
+    let sample = sample_path.display().to_string();
+    let file_name = command
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    let argument_sets = if file_name.starts_with("audio-file-to-recognized-song") {
+        vec![vec![sample.clone()], vec![sample.clone(), "--json".to_owned()]]
+    } else {
+        vec![
+            vec!["recognize".to_owned(), "--json".to_owned(), sample.clone()],
+            vec!["recognize".to_owned(), sample.clone(), "--json".to_owned()],
+            vec!["audio-file-to-recognized-song".to_owned(), sample.clone()],
+        ]
+    };
+
+    for args in argument_sets {
+        candidates.push(CandidateCommand {
+            command: command.clone(),
+            source: format!("{label} {}", args.join(" ")),
+            args,
+        });
+    }
+}
+
+fn compact_error_text(value: &str) -> String {
+    let single_line = value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    const MAX_CHARS: usize = 280;
+    if single_line.chars().count() <= MAX_CHARS {
+        single_line
+    } else {
+        format!("{}…", single_line.chars().take(MAX_CHARS.saturating_sub(1)).collect::<String>())
+    }
+}
+
+fn is_elevation_error_text(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("os error 740")
+        || lower.contains("requires elevation")
+        || lower.contains("administrator")
+        || lower.contains("magasabb felhasználói")
 }
 
 pub fn cleanup_sample(path: &Path) {
@@ -314,7 +376,19 @@ pub fn ensure_sample_exists(path: &Path) -> Result<()> {
 pub fn installed_songrec_executable() -> Option<PathBuf> {
     managed_songrec_candidates()
         .into_iter()
-        .find(|path| path.is_file())
+        .find(|path| path.is_file() && managed_songrec_candidate_looks_usable(path))
+}
+
+fn managed_songrec_candidate_looks_usable(path: &Path) -> bool {
+    if !cfg!(windows) {
+        return true;
+    }
+
+    match Command::new(path).arg("--version").stdin(Stdio::null()).output() {
+        Ok(_) => true,
+        Err(error) if error.raw_os_error() == Some(740) || is_elevation_error_text(&error.to_string()) => false,
+        Err(_) => true,
+    }
 }
 
 pub fn installed_songrec_version() -> Option<String> {
@@ -364,6 +438,9 @@ pub fn install_or_update_songrec(download_url: &str, version: Option<&str>, asse
 
     let asset_name = asset_name.unwrap_or("songrec.exe");
     let lower_asset_name = asset_name.to_ascii_lowercase();
+    if lower_asset_name.contains("installer") || lower_asset_name.contains("setup") || lower_asset_name.ends_with(".msi") {
+        anyhow::bail!("Audio Orbit will not install the SongRec installer asset into .audio-orbit-dll. Choose a portable .zip/.exe CLI asset instead: {asset_name}");
+    }
     let executable_path = if lower_asset_name.ends_with(".zip") {
         install_songrec_from_zip(&tools_dir, &bytes)?
     } else if lower_asset_name.ends_with(".exe") {
@@ -406,6 +483,20 @@ fn validate_installed_songrec(path: &Path) -> Result<()> {
     if len < 1024 {
         anyhow::bail!("installed SongRec executable is unexpectedly small: {}", path.display());
     }
+
+    if cfg!(windows) {
+        match Command::new(path).arg("--version").stdin(Stdio::null()).output() {
+            Ok(_) => {}
+            Err(error) if error.raw_os_error() == Some(740) || is_elevation_error_text(&error.to_string()) => {
+                anyhow::bail!(
+                    "the downloaded SongRec asset requires administrator elevation and looks like an installer, not a portable CLI executable: {}",
+                    path.display()
+                );
+            }
+            Err(_) => {}
+        }
+    }
+
     Ok(())
 }
 
@@ -413,11 +504,11 @@ fn managed_songrec_candidates() -> Vec<PathBuf> {
     let tools = external_tools_dir();
     vec![
         tools.join("songrec-cli.exe"),
-        tools.join("songrec.exe"),
         tools.join("audio-file-to-recognized-song.exe"),
+        tools.join("songrec.exe"),
         tools.join("songrec-cli"),
-        tools.join("songrec"),
         tools.join("audio-file-to-recognized-song"),
+        tools.join("songrec"),
     ]
 }
 
@@ -474,6 +565,10 @@ fn parse_version(value: &str) -> Version {
 
 fn songrec_windows_asset_rank(name: &str) -> Option<u8> {
     let lower = name.to_ascii_lowercase();
+    if lower.contains("installer") || lower.contains("setup") || lower.ends_with(".msi") {
+        return None;
+    }
+
     let looks_windows = lower.contains("windows")
         || lower.contains("win64")
         || lower.contains("win32")
@@ -487,19 +582,19 @@ fn songrec_windows_asset_rank(name: &str) -> Option<u8> {
 
     let mut rank = 100u8;
     if lower.contains("cli") || lower.contains("audio-file-to-recognized-song") {
-        rank = rank.saturating_sub(30);
+        rank = rank.saturating_sub(34);
     }
     if lower.contains("portable") {
-        rank = rank.saturating_sub(16);
+        rank = rank.saturating_sub(22);
+    }
+    if lower.ends_with(".zip") {
+        rank = rank.saturating_sub(20);
     }
     if lower.contains("x86_64") || lower.contains("win64") {
         rank = rank.saturating_sub(12);
     }
     if lower.ends_with(".exe") {
-        rank = rank.saturating_sub(8);
-    }
-    if lower.ends_with(".zip") {
-        rank = rank.saturating_sub(4);
+        rank = rank.saturating_sub(2);
     }
     Some(rank)
 }
