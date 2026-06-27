@@ -732,6 +732,23 @@ impl AudioOrbitApp {
         })
     }
 
+    fn active_track_time_label(&self) -> String {
+        if self.active_radio_index.is_some() {
+            return self
+                .radio_elapsed_seconds()
+                .map(|elapsed| format!("Live stream · {}", format_duration(elapsed)))
+                .unwrap_or_else(|| "Live stream · 0:00".to_owned());
+        }
+
+        if self.active_track_path.is_some() || self.pending_track_switch.is_some() {
+            let position = self.displayed_playback_position_seconds();
+            let duration = self.displayed_playback_duration_seconds();
+            return format!("{} / {}", format_duration(position), format_duration(duration));
+        }
+
+        String::new()
+    }
+
     fn radio_elapsed_seconds(&self) -> Option<f32> {
         self.radio_started_at.map(|started_at| started_at.elapsed().as_secs_f32())
     }
@@ -2332,26 +2349,36 @@ impl AudioOrbitApp {
                 egui::Sense::hover(),
             );
             if has_now_playing {
-                let title = ellipsize_to_width(&self.active_track_title(), title_width - 10.0, 16.0);
+                let title = ellipsize_to_width(&self.active_track_title(), title_width - 10.0, 15.0);
                 let detail = self
                     .active_track_detail()
-                    .map(|value| ellipsize_to_width(&value, title_width - 10.0, 12.0))
+                    .map(|value| ellipsize_to_width(&value, title_width - 10.0, 11.5))
                     .unwrap_or_default();
+                let time_label = ellipsize_to_width(&self.active_track_time_label(), title_width - 10.0, 11.5);
                 let painter = ui.painter();
                 painter.text(
-                    egui::pos2(title_rect.left() + 2.0, title_rect.top() + 14.0),
+                    egui::pos2(title_rect.left() + 2.0, title_rect.top() + 10.0),
                     egui::Align2::LEFT_CENTER,
                     title,
-                    egui::FontId::proportional(16.0),
+                    egui::FontId::proportional(15.0),
                     ui.visuals().widgets.inactive.fg_stroke.color,
                 );
                 if !detail.is_empty() {
                     painter.text(
-                        egui::pos2(title_rect.left() + 2.0, title_rect.top() + 31.0),
+                        egui::pos2(title_rect.left() + 2.0, title_rect.top() + 25.0),
                         egui::Align2::LEFT_CENTER,
                         detail,
-                        egui::FontId::proportional(12.0),
-                        ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.78),
+                        egui::FontId::proportional(11.5),
+                        ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.76),
+                    );
+                }
+                if !time_label.is_empty() {
+                    painter.text(
+                        egui::pos2(title_rect.left() + 2.0, title_rect.top() + 40.0),
+                        egui::Align2::LEFT_CENTER,
+                        time_label,
+                        egui::FontId::proportional(11.5),
+                        ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.68),
                     );
                 }
                 title_response.on_hover_text("Mouse wheel over the top player bar adjusts volume.");
@@ -2400,15 +2427,14 @@ impl AudioOrbitApp {
         });
 
         if self.active_radio_index.is_some() {
-            let elapsed = self.radio_elapsed_seconds().unwrap_or(0.0);
-            let requested_points = (ui.available_width() / 3.0).round().clamp(96.0, 900.0) as usize;
+            let requested_points = (ui.available_width() / 3.0).round().clamp(120.0, 900.0) as usize;
             let peaks = self
                 .player
                 .as_ref()
                 .map(|player| player.radio_visualizer_peaks(requested_points))
                 .unwrap_or_default();
-            let response = draw_radio_visualizer(ui, &peaks, format!("Live stream · {}", format_duration(elapsed)));
-            response.on_hover_text("Internet radio streams are live: this follows the decoded audio and shows elapsed listening time, not a seekable timeline.");
+            let response = draw_radio_visualizer(ui, &peaks);
+            response.on_hover_text("Internet radio streams are live: this shows the last three minutes of decoded audio proportionally. Gaps stay empty instead of being stretched.");
         } else if has_now_playing {
             let position = self.displayed_playback_position_seconds();
             let duration = self.displayed_playback_duration_seconds();
@@ -2433,7 +2459,7 @@ impl AudioOrbitApp {
                 .as_ref()
                 .map(|playback| playback.original_duration_seconds)
                 .unwrap_or(duration);
-            let response = draw_waveform_seek(ui, waveform, progress, silence_ranges, marker_duration, format!("{} / {}", format_duration(position), format_duration(duration)));
+            let response = draw_waveform_seek(ui, waveform, progress, silence_ranges, marker_duration);
             if (response.clicked() || response.drag_stopped()) && duration > 0.0 {
                 if let Some(pointer) = response.interact_pointer_pos() {
                     let next_position = ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration;
@@ -2441,7 +2467,7 @@ impl AudioOrbitApp {
                 }
             }
         } else {
-            let response = draw_waveform_seek(ui, &[], 0.0, &[], 0.0, "".to_owned());
+            let response = draw_waveform_seek(ui, &[], 0.0, &[], 0.0);
             response.on_hover_text("No track is currently playing.");
         }
 
@@ -2951,11 +2977,6 @@ impl AudioOrbitApp {
                     };
 
                     let row_hovered = next_row_pointer_hovered(ui, row_width, 34.0);
-                    let context_response = ui.interact(
-                        egui::Rect::from_min_size(ui.cursor().min, egui::vec2(row_width, 34.0)).expand(2.0),
-                        ui.make_persistent_id(("radio_station_context", index)),
-                        egui::Sense::click(),
-                    );
                     let row_response = ui.allocate_ui_with_layout(
                         egui::vec2(row_width, 34.0),
                         egui::Layout::left_to_right(egui::Align::Center),
@@ -3027,6 +3048,11 @@ impl AudioOrbitApp {
                                 );
                             });
                         },
+                    );
+                    let context_response = ui.interact(
+                        row_response.response.rect.expand(2.0),
+                        ui.make_persistent_id(("radio_station_context", index)),
+                        egui::Sense::click(),
                     );
                     if context_response.clicked() {
                         self.state.selected_radio_index = Some(index);
@@ -3300,11 +3326,6 @@ impl AudioOrbitApp {
                     let repeat_selection_mode = self.state.playback.repeat_mode == RepeatMode::Selection;
 
                     let row_hovered = next_row_pointer_hovered(ui, row_width, 32.0);
-                    let context_response = ui.interact(
-                        egui::Rect::from_min_size(ui.cursor().min, egui::vec2(row_width, 32.0)).expand(2.0),
-                        ui.make_persistent_id(("track_context", index)),
-                        egui::Sense::click(),
-                    );
                     let row_response = ui.allocate_ui_with_layout(
                         egui::vec2(row_width, 32.0),
                         egui::Layout::left_to_right(egui::Align::Center),
@@ -3387,6 +3408,11 @@ impl AudioOrbitApp {
                                 );
                             });
                         },
+                    );
+                    let context_response = ui.interact(
+                        row_response.response.rect.expand(2.0),
+                        ui.make_persistent_id(("track_context", index)),
+                        egui::Sense::click(),
                     );
                     if context_response.clicked() {
                         self.selected_track_index = Some(index);
@@ -3658,7 +3684,7 @@ impl AudioOrbitApp {
             (screen_rect.width() - outer_padding.x * 2.0).max(280.0),
             (screen_rect.height() - outer_padding.y * 2.0).max(200.0),
         );
-        let scroll_height = (content_size.y - 102.0).max(180.0);
+        let scroll_height = (content_size.y - 76.0).max(180.0);
 
         egui::Area::new(egui::Id::new("panel_modal"))
             .order(egui::Order::Foreground)
@@ -3683,23 +3709,21 @@ impl AudioOrbitApp {
                                 }
                             });
                         });
-                        ui.add_space(2.0);
+                        ui.add_space(1.0);
                         ui.add(egui::Label::new(panel.description()).wrap());
                         ui.add_space(8.0);
 
-                        egui::Frame::group(ui.style())
-                            .inner_margin(egui::Margin::symmetric(16, 14))
+                        egui::ScrollArea::vertical()
+                            .max_height(scroll_height)
+                            .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
-                                egui::ScrollArea::vertical()
-                                    .max_height(scroll_height)
-                                    .auto_shrink([false, false])
-                                    .show(ui, |ui| match panel {
-                                        AppPanelModal::Settings => self.render_settings_panel_content(ui),
-                                        AppPanelModal::Updates => self.render_update_settings_section(ui, false),
-                                        AppPanelModal::Backup => self.render_backup_settings_section(ui),
-                                        AppPanelModal::About => self.render_about_section(ui),
-                                    });
+                                match panel {
+                                    AppPanelModal::Settings => self.render_settings_panel_content(ui),
+                                    AppPanelModal::Updates => self.render_update_settings_section(ui, false),
+                                    AppPanelModal::Backup => self.render_backup_settings_section_inner(ui, false),
+                                    AppPanelModal::About => self.render_about_section_inner(ui, false),
+                                }
                             });
                     });
             });
@@ -3707,20 +3731,23 @@ impl AudioOrbitApp {
 
 
     fn render_settings_panel_content(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Panels");
-        ui.small("Open a separate panel. Esc or the top-right X returns to the previous panel.");
-        ui.horizontal_wrapped(|ui| {
-            if ui.button(ui_icons::label(Icon::Download, "Updates")).clicked() {
-                self.open_panel_modal(AppPanelModal::Updates);
-            }
-            if ui.button(ui_icons::label(Icon::Archive, "Backup")).clicked() {
-                self.open_panel_modal(AppPanelModal::Backup);
-            }
-            if ui.button(ui_icons::label(Icon::Info, "About")).clicked() {
-                self.open_panel_modal(AppPanelModal::About);
-            }
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading("Panels");
+            ui.small("Open a separate panel. Esc or the top-right X returns to the previous panel.");
+            ui.horizontal_wrapped(|ui| {
+                if ui.button(ui_icons::label(Icon::Download, "Updates")).clicked() {
+                    self.open_panel_modal(AppPanelModal::Updates);
+                }
+                if ui.button(ui_icons::label(Icon::Archive, "Backup")).clicked() {
+                    self.open_panel_modal(AppPanelModal::Backup);
+                }
+                if ui.button(ui_icons::label(Icon::Info, "About")).clicked() {
+                    self.open_panel_modal(AppPanelModal::About);
+                }
+            });
         });
-        ui.add_space(14.0);
+        ui.add_space(12.0);
 
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -4281,7 +4308,13 @@ impl AudioOrbitApp {
     }
 
     fn render_backup_settings_section(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Backup and data");
+        self.render_backup_settings_section_inner(ui, true);
+    }
+
+    fn render_backup_settings_section_inner(&mut self, ui: &mut egui::Ui, show_title: bool) {
+        if show_title {
+            ui.heading("Backup and data");
+        }
         ui.small("The ZIP backup stores the full app state: music folders, playlists, Favorites, sound profiles, playback settings, and update settings.");
 
         ui.horizontal_wrapped(|ui| {
@@ -4299,7 +4332,9 @@ impl AudioOrbitApp {
     }
 
     fn render_update_settings_section(&mut self, ui: &mut egui::Ui, show_modal_button: bool) {
-        ui.heading("Updates");
+        if show_modal_button {
+            ui.heading("Updates");
+        }
         let prerelease_changed = ui
             .checkbox(
                 &mut self.state.update_settings.include_prereleases,
@@ -4396,7 +4431,13 @@ impl AudioOrbitApp {
     }
 
     fn render_about_section(&mut self, ui: &mut egui::Ui) {
-        ui.heading("About Audio Orbit");
+        self.render_about_section_inner(ui, true);
+    }
+
+    fn render_about_section_inner(&mut self, ui: &mut egui::Ui, show_title: bool) {
+        if show_title {
+            ui.heading("About Audio Orbit");
+        }
         ui.add(egui::Label::new("Audio Orbit is a lightweight Windows music player focused on local libraries, folder-based playlists, smooth crossfade playback, silence skipping, and headphone-friendly orbit-style stereo movement.").wrap());
         ui.add_space(8.0);
         ui.add(egui::Label::new(format!("Version: v{}", env!("CARGO_PKG_VERSION"))).wrap());
@@ -4747,7 +4788,7 @@ fn paint_sticky_folder_header(
     );
 }
 
-fn draw_radio_visualizer(ui: &mut egui::Ui, peaks: &[f32], label: String) -> egui::Response {
+fn draw_radio_visualizer(ui: &mut egui::Ui, peaks: &[f32]) -> egui::Response {
     let desired_size = egui::vec2(ui.available_width(), 46.0);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
     let visuals = ui.visuals();
@@ -4759,7 +4800,22 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, peaks: &[f32], label: String) -> egu
     let gap = 0.85;
     let bar_width = ((rect.width() - gap * bar_count.saturating_sub(1) as f32) / bar_count.max(1) as f32)
         .clamp(0.75, 2.4);
-    let missing = bar_count.saturating_sub(peaks.len());
+    let visible_values = if peaks.len() == bar_count {
+        peaks.to_vec()
+    } else {
+        resample_time_series(peaks, bar_count)
+    };
+
+    let mut active_values: Vec<f32> = visible_values
+        .iter()
+        .copied()
+        .filter(|value| *value > 0.0005)
+        .collect();
+    let peak = active_values.iter().copied().fold(0.0_f32, f32::max).max(0.06);
+    active_values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let floor_index = ((active_values.len().saturating_sub(1)) as f32 * 0.12) as usize;
+    let noise_floor = active_values.get(floor_index).copied().unwrap_or(0.0).min(peak * 0.55);
+    let dynamic_range = (peak - noise_floor).max(0.035);
 
     for index in 0..bar_count {
         let x1 = rect.left() + index as f32 * (bar_width + gap);
@@ -4768,32 +4824,69 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, peaks: &[f32], label: String) -> egu
             break;
         }
 
-        let value = if index < missing {
-            0.0
+        let value = visible_values.get(index).copied().unwrap_or(0.0);
+        let has_signal = value > 0.0005;
+        let normalized = if has_signal {
+            ((value - noise_floor) / dynamic_range).clamp(0.018, 1.0).powf(0.68)
         } else {
-            peaks.get(index - missing).copied().unwrap_or(0.0)
+            0.0
         };
-        let level = value.powf(0.55).clamp(0.02, 1.0);
-        let height = (rect.height() * 0.82 * level).max(3.0);
+        let height = if has_signal {
+            (rect.height() * 0.84 * normalized).max(3.0)
+        } else {
+            0.0
+        };
         let y1 = rect.center().y - height / 2.0;
         let y2 = rect.center().y + height / 2.0;
-        let color = if index >= missing {
+        let color = if has_signal {
             visuals.selection.bg_fill
         } else {
-            visuals.widgets.inactive.fg_stroke.color.linear_multiply(0.42)
+            visuals.widgets.inactive.fg_stroke.color.linear_multiply(0.18)
         };
-        painter.rect_filled(
-            egui::Rect::from_min_max(egui::pos2(x1, y1), egui::pos2(x2, y2)),
-            bar_width / 2.0,
-            color,
-        );
+
+        if has_signal {
+            painter.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(x1, y1), egui::pos2(x2, y2)),
+                bar_width / 2.0,
+                color,
+            );
+        } else {
+            let center_y = rect.center().y;
+            painter.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(x1, center_y - 0.5), egui::pos2(x2, center_y + 0.5)),
+                bar_width / 2.0,
+                color,
+            );
+        }
     }
 
-    paint_seek_label(painter, rect, &label);
     response
 }
 
-fn draw_waveform_seek(ui: &mut egui::Ui, waveform: &[f32], progress: f32, silence_ranges: &[(f32, f32)], duration_seconds: f32, label: String) -> egui::Response {
+fn resample_time_series(values: &[f32], requested_points: usize) -> Vec<f32> {
+    if requested_points == 0 {
+        return Vec::new();
+    }
+    if values.is_empty() {
+        return vec![0.0; requested_points];
+    }
+    if values.len() == requested_points {
+        return values.to_vec();
+    }
+
+    let mut rendered = Vec::with_capacity(requested_points);
+    let bucket_width = values.len() as f32 / requested_points as f32;
+    for index in 0..requested_points {
+        let start = ((index as f32 * bucket_width).floor() as usize).min(values.len() - 1);
+        let end = (((index + 1) as f32 * bucket_width).ceil() as usize)
+            .max(start + 1)
+            .min(values.len());
+        rendered.push(values[start..end].iter().copied().fold(0.0_f32, f32::max));
+    }
+    rendered
+}
+
+fn draw_waveform_seek(ui: &mut egui::Ui, waveform: &[f32], progress: f32, silence_ranges: &[(f32, f32)], duration_seconds: f32) -> egui::Response {
     let desired_size = egui::vec2(ui.available_width(), 46.0);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click_and_drag());
     let visuals = ui.visuals();
@@ -4802,7 +4895,6 @@ fn draw_waveform_seek(ui: &mut egui::Ui, waveform: &[f32], progress: f32, silenc
     painter.rect_filled(rect, 8.0, egui::Color32::from_black_alpha(210));
 
     if waveform.is_empty() {
-        paint_seek_label(painter, rect, &label);
         return response;
     }
 
@@ -4873,22 +4965,7 @@ fn draw_waveform_seek(ui: &mut egui::Ui, waveform: &[f32], progress: f32, silenc
     );
     painter.rect_filled(playhead, 1.0, egui::Color32::WHITE.linear_multiply(0.85));
 
-    paint_seek_label(painter, rect, &label);
     response
-}
-
-fn paint_seek_label(painter: &egui::Painter, rect: egui::Rect, label: &str) {
-    let font = egui::FontId::proportional(14.0);
-    let label_width = (label.chars().count() as f32 * 8.0 + 22.0).clamp(88.0, 190.0);
-    let label_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(label_width, 24.0));
-    painter.rect_filled(label_rect, 6.0, egui::Color32::from_black_alpha(185));
-    painter.text(
-        label_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        label,
-        font,
-        egui::Color32::WHITE,
-    );
 }
 
 
@@ -5027,16 +5104,23 @@ fn display_parent(path: &Path) -> String {
 
 
 fn detail_row(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.horizontal_wrapped(|ui| {
-        ui.add_sized(
-            egui::vec2(140.0, 20.0),
-            egui::Label::new(
-                egui::RichText::new(label)
-                    .strong()
-                    .color(ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.72)),
-            ),
-        );
-        ui.add(egui::Label::new(value).wrap());
+    let available_width = ui.available_width();
+    ui.horizontal(|ui| {
+        ui.set_width(available_width);
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+            ui.add_sized(
+                egui::vec2(150.0, 20.0),
+                egui::Label::new(
+                    egui::RichText::new(label)
+                        .strong()
+                        .color(ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.72)),
+                ),
+            );
+            ui.add_sized(
+                egui::vec2((available_width - 158.0).max(120.0), 20.0),
+                egui::Label::new(value).wrap(),
+            );
+        });
     });
     ui.add_space(4.0);
 }

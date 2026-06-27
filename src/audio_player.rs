@@ -14,8 +14,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 15;
-const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 8;
+const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 180;
+const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 10;
 const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
 
 #[derive(Clone, Debug)]
@@ -78,9 +78,15 @@ impl<R> Seek for RadioStream<R> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct RadioVisualizerBucket {
+    at: Instant,
+    peak: f32,
+}
+
 #[derive(Default)]
 struct RadioVisualizerState {
-    peaks: VecDeque<f32>,
+    peaks: VecDeque<RadioVisualizerBucket>,
     current_peak: f32,
     smoothed_peak: f32,
     bucket_energy: f64,
@@ -237,18 +243,31 @@ fn record_radio_peak(visualizer: &RadioVisualizerHandle, sample_rate: u32, peak:
         } else {
             (state.bucket_energy / state.bucket_sample_count as f64).sqrt() as f32
         };
-        let envelope = (rms * 2.15).max(state.current_peak * 0.68).powf(0.72).clamp(0.0, 1.0);
-        let previous = state.peaks.back().copied().unwrap_or(state.smoothed_peak);
+        let envelope = (rms * 2.75).max(state.current_peak * 0.72).clamp(0.0, 1.0);
+        let previous = state.peaks.back().map(|bucket| bucket.peak).unwrap_or(state.smoothed_peak);
         state.smoothed_peak = if envelope > previous {
-            previous * 0.48 + envelope * 0.52
+            previous * 0.38 + envelope * 0.62
         } else {
-            previous * 0.84 + envelope * 0.16
+            previous * 0.88 + envelope * 0.12
         };
-        let display_peak = (state.smoothed_peak * 1.12).clamp(0.012, 1.0);
-        state.peaks.push_back(display_peak);
-        while state.peaks.len() > RADIO_VISUALIZER_MAX_BUCKETS {
+        let display_peak = state.smoothed_peak.clamp(0.0, 1.0);
+        let now = Instant::now();
+        state.peaks.push_back(RadioVisualizerBucket {
+            at: now,
+            peak: display_peak,
+        });
+
+        let history = Duration::from_secs(RADIO_VISUALIZER_HISTORY_SECONDS as u64);
+        while state.peaks.len() > RADIO_VISUALIZER_MAX_BUCKETS
+            || state
+                .peaks
+                .front()
+                .map(|bucket| now.duration_since(bucket.at) > history)
+                .unwrap_or(false)
+        {
             state.peaks.pop_front();
         }
+
         state.current_peak = 0.0;
         state.bucket_energy = 0.0;
         state.bucket_sample_count = 0;
@@ -272,6 +291,7 @@ pub struct AudioPlayer {
     current_start_offset_seconds: f32,
     current_path: Option<PathBuf>,
     current_settings: Option<DspSettings>,
+    current_radio_url: Option<String>,
     volume_percent: u8,
     radio_visualizer: RadioVisualizerHandle,
 }
@@ -294,6 +314,7 @@ impl AudioPlayer {
             current_start_offset_seconds: 0.0,
             current_path: None,
             current_settings: None,
+            current_radio_url: None,
             volume_percent: 100,
             radio_visualizer: Arc::new(Mutex::new(RadioVisualizerState::default())),
         })
@@ -328,8 +349,11 @@ impl AudioPlayer {
         let decoder = Decoder::new(BufReader::new(stream))
             .with_context(|| format!("failed to decode internet radio stream: {url}"))?;
 
+        let keep_visualizer_history = self.current_radio_url.as_deref() == Some(url);
         self.stop();
-        self.radio_visualizer = Arc::new(Mutex::new(RadioVisualizerState::default()));
+        if !keep_visualizer_history {
+            self.radio_visualizer = Arc::new(Mutex::new(RadioVisualizerState::default()));
+        }
         let visualizer = Arc::clone(&self.radio_visualizer);
         let radio_source = LiveRadioSource::new(decoder.convert_samples::<f32>(), settings, visualizer);
         let sink = Sink::try_new(&self.stream_handle)
@@ -346,6 +370,7 @@ impl AudioPlayer {
         self.current_start_offset_seconds = 0.0;
         self.current_path = None;
         self.current_settings = None;
+        self.current_radio_url = Some(url.to_owned());
 
         Ok(())
     }
@@ -358,50 +383,22 @@ impl AudioPlayer {
             return Vec::new();
         }
 
-        let peaks: Vec<f32> = state.peaks.iter().copied().collect();
-        if peaks.len() <= requested_points {
-            if peaks.len() == RADIO_VISUALIZER_MAX_BUCKETS && peaks.len() > 1 {
-                return Self::resample_radio_peaks(&peaks, requested_points);
+        let mut rendered = vec![0.0_f32; requested_points];
+        let now = Instant::now();
+        let history_seconds = RADIO_VISUALIZER_HISTORY_SECONDS as f32;
+        let history = Duration::from_secs(RADIO_VISUALIZER_HISTORY_SECONDS as u64);
+        let window_start = now.checked_sub(history).unwrap_or(now);
+
+        for bucket in state.peaks.iter() {
+            if bucket.at < window_start {
+                continue;
             }
-            return peaks;
-        }
-
-        let mut rendered = Vec::with_capacity(requested_points);
-        let bucket_width = peaks.len() as f32 / requested_points as f32;
-        for index in 0..requested_points {
-            let start = ((index as f32 * bucket_width).floor() as usize).min(peaks.len() - 1);
-            let end = (((index + 1) as f32 * bucket_width).ceil() as usize)
-                .max(start + 1)
-                .min(peaks.len());
-            let peak = peaks[start..end]
-                .iter()
-                .copied()
-                .fold(0.0_f32, f32::max);
-            rendered.push(peak);
-        }
-        rendered
-    }
-
-    fn resample_radio_peaks(peaks: &[f32], requested_points: usize) -> Vec<f32> {
-        if requested_points == 0 || peaks.is_empty() {
-            return Vec::new();
-        }
-        if requested_points == peaks.len() {
-            return peaks.to_vec();
-        }
-
-        let mut rendered = Vec::with_capacity(requested_points);
-        let last_index = peaks.len().saturating_sub(1) as f32;
-        let output_last_index = requested_points.saturating_sub(1).max(1) as f32;
-
-        for index in 0..requested_points {
-            let source_position = index as f32 / output_last_index * last_index;
-            let left_index = source_position.floor() as usize;
-            let right_index = source_position.ceil() as usize;
-            let mix = source_position - left_index as f32;
-            let left = peaks.get(left_index).copied().unwrap_or(0.0);
-            let right = peaks.get(right_index).copied().unwrap_or(left);
-            rendered.push(left + (right - left) * mix);
+            let age_from_start = bucket.at.duration_since(window_start).as_secs_f32();
+            let position = (age_from_start / history_seconds).clamp(0.0, 0.999_999);
+            let index = (position * requested_points as f32).floor() as usize;
+            if let Some(slot) = rendered.get_mut(index) {
+                *slot = slot.max(bucket.peak);
+            }
         }
 
         rendered
@@ -562,6 +559,7 @@ impl AudioPlayer {
         self.current_start_offset_seconds = 0.0;
         self.current_path = None;
         self.current_settings = None;
+        self.current_radio_url = None;
     }
 
     pub fn pause_or_resume(&mut self) {
@@ -649,6 +647,7 @@ impl AudioPlayer {
         self.current_start_offset_seconds = start_seconds.max(0.0);
         self.current_path = Some(path.to_path_buf());
         self.current_settings = Some(settings);
+        self.current_radio_url = None;
 
         Ok(())
     }
