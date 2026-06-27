@@ -238,6 +238,7 @@ struct AudioOrbitApp {
     focus_radio_search: bool,
     scroll_to_active_track_requested: bool,
     scroll_to_active_radio_requested: bool,
+    scroll_to_folder_group_requested: Option<String>,
     active_tab: MainContentTab,
     track_search_query: String,
     search_cursor: usize,
@@ -313,6 +314,7 @@ impl AudioOrbitApp {
                     focus_radio_search: false,
                     scroll_to_active_track_requested: false,
                     scroll_to_active_radio_requested: false,
+                    scroll_to_folder_group_requested: None,
                     active_tab: MainContentTab::Music,
                     track_search_query: String::new(),
                     search_cursor: 0,
@@ -376,6 +378,7 @@ impl AudioOrbitApp {
                 focus_radio_search: false,
                 scroll_to_active_track_requested: false,
                 scroll_to_active_radio_requested: false,
+                scroll_to_folder_group_requested: None,
                 active_tab: MainContentTab::Music,
                 track_search_query: String::new(),
                 search_cursor: 0,
@@ -3124,6 +3127,19 @@ impl AudioOrbitApp {
         }
     }
 
+    fn request_folder_group_top(&mut self, group: &str) {
+        self.scroll_to_folder_group_requested = Some(group.to_owned());
+    }
+
+    fn toggle_folder_group_collapsed_and_focus(&mut self, group: &str) {
+        if self.collapsed_groups.contains(group) {
+            self.collapsed_groups.remove(group);
+        } else {
+            self.collapsed_groups.insert(group.to_owned());
+        }
+        self.request_folder_group_top(group);
+    }
+
     fn render_track_panel(&mut self, ui: &mut egui::Ui) {
         let Some(playlist) = self.current_playlist() else {
             ui.heading("No playlist");
@@ -3283,7 +3299,7 @@ impl AudioOrbitApp {
             .show_viewport(ui, |ui, _viewport| {
                 ui.set_width(row_width);
                 let visible_rect = ui.clip_rect();
-                let sticky_top = visible_rect.top() + 4.0;
+                let sticky_top = visible_rect.top();
                 let mut viewport_group: Option<String> = None;
                 let mut next_group_header_top: Option<f32> = None;
                 for (index, track) in visible_tracks {
@@ -3291,17 +3307,23 @@ impl AudioOrbitApp {
                         ui.add_space(6.0);
                         let group = track.group.clone();
                         let collapsed = self.collapsed_groups.contains(&group);
+                        let mut toggle_group = false;
                         let header_response = ui.horizontal(|ui| {
                             let icon = if collapsed { Icon::ChevronRight } else { Icon::ChevronDown };
                             if ui.small_button(ui_icons::icon(icon)).on_hover_text("Collapse/expand folder").clicked() {
-                                if collapsed {
-                                    self.collapsed_groups.remove(&group);
-                                } else {
-                                    self.collapsed_groups.insert(group.clone());
-                                }
+                                toggle_group = true;
                             }
                             ui.label(egui::RichText::new(group.as_str()).size(13.0).strong());
                         });
+                        if toggle_group {
+                            self.toggle_folder_group_collapsed_and_focus(&group);
+                        } else if header_response.response.double_clicked() {
+                            self.request_folder_group_top(&group);
+                        }
+                        if self.scroll_to_folder_group_requested.as_deref() == Some(group.as_str()) {
+                            header_response.response.scroll_to_me(Some(egui::Align::Min));
+                            self.scroll_to_folder_group_requested = None;
+                        }
                         let header_rect = header_response.response.rect;
                         if header_rect.top() <= sticky_top {
                             viewport_group = Some(group.clone());
@@ -3476,11 +3498,33 @@ impl AudioOrbitApp {
 
                 if show_group_headers {
                     if let Some(group) = viewport_group {
-                        let sticky_height = 26.0;
+                        let sticky_height = 24.0;
                         let push_offset_y = next_group_header_top
                             .map(|next_top| (next_top - sticky_top - sticky_height).min(0.0))
                             .unwrap_or(0.0);
-                        paint_sticky_folder_header(ui.painter(), visible_rect, row_width, &group, push_offset_y);
+                        let collapsed = self.collapsed_groups.contains(&group);
+                        let (sticky_rect, sticky_icon_rect) = paint_sticky_folder_header(
+                            ui,
+                            visible_rect,
+                            &group,
+                            collapsed,
+                            push_offset_y,
+                        );
+                        let sticky_response = ui.interact(
+                            sticky_rect,
+                            ui.make_persistent_id(("sticky_folder_header", group.as_str())),
+                            egui::Sense::click(),
+                        );
+                        let clicked_icon = sticky_response.clicked()
+                            && ui
+                                .input(|input| input.pointer.interact_pos())
+                                .map(|position| sticky_icon_rect.contains(position))
+                                .unwrap_or(false);
+                        if clicked_icon {
+                            self.toggle_folder_group_collapsed_and_focus(&group);
+                        } else if sticky_response.double_clicked() {
+                            self.request_folder_group_top(&group);
+                        }
                     }
                 }
             });
@@ -4698,26 +4742,49 @@ fn next_valid_track_index(previous_index: usize, remaining_len: usize) -> Option
 
 
 fn paint_sticky_folder_header(
-    painter: &egui::Painter,
+    ui: &egui::Ui,
     visible_rect: egui::Rect,
-    row_width: f32,
     group: &str,
+    collapsed: bool,
     push_offset_y: f32,
-) {
-    let header_width = (row_width - 14.0).max(120.0).min(visible_rect.width().max(120.0));
-    let rect = egui::Rect::from_min_size(
-        egui::pos2(visible_rect.left() + 6.0, visible_rect.top() + 4.0 + push_offset_y),
-        egui::vec2(header_width, 22.0),
+) -> (egui::Rect, egui::Rect) {
+    let header_height = 24.0;
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(visible_rect.left(), visible_rect.top() + push_offset_y),
+        egui::pos2(visible_rect.right(), visible_rect.top() + push_offset_y + header_height),
     );
-    let painter = painter.with_clip_rect(visible_rect);
-    painter.rect_filled(rect, 7.0, egui::Color32::from_black_alpha(215));
+    let painter = ui.painter().with_clip_rect(visible_rect);
+    let visuals = ui.visuals();
+    let background = visuals.widgets.noninteractive.bg_fill;
+    let stroke = visuals.widgets.noninteractive.bg_stroke;
+    painter.rect_filled(rect, 0.0, background);
+    painter.line_segment([rect.left_bottom(), rect.right_bottom()], stroke);
+
+    let icon = if collapsed { Icon::ChevronRight } else { Icon::ChevronDown };
+    let icon_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.left() + 8.0, rect.top() + 3.0),
+        egui::vec2(18.0, header_height - 6.0),
+    );
+    let text_left = icon_rect.right() + 4.0;
+    let text_width = (rect.right() - text_left - 10.0).max(24.0);
+    let text_color = visuals.widgets.inactive.fg_stroke.color.linear_multiply(0.92);
+
     painter.text(
-        egui::pos2(rect.left() + 10.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        ellipsize_to_width(group, header_width - 20.0, 12.0),
-        egui::FontId::proportional(12.0),
-        egui::Color32::WHITE.linear_multiply(0.94),
+        icon_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        ui_icons::icon(icon),
+        egui::FontId::proportional(11.0),
+        text_color,
     );
+    painter.text(
+        egui::pos2(text_left, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        ellipsize_to_width(group, text_width, 12.0),
+        egui::FontId::proportional(12.0),
+        text_color,
+    );
+
+    (rect, icon_rect)
 }
 
 fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egui::Response {
@@ -4949,17 +5016,11 @@ fn format_track_metadata_compact(track: &Track) -> String {
 
 
 fn format_track_metadata_player_only(track: &Track) -> String {
-    let duration = track
+    track
         .metadata
         .duration_seconds
         .map(format_duration)
-        .unwrap_or_else(|| "?:??".to_owned());
-    let size = track
-        .metadata
-        .size_bytes
-        .map(format_file_size)
-        .unwrap_or_else(|| "? MB".to_owned());
-    format!("{duration} · {size}")
+        .unwrap_or_else(|| "?:??".to_owned())
 }
 
 fn next_row_pointer_hovered(ui: &egui::Ui, width: f32, height: f32) -> bool {
