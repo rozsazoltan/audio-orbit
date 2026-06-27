@@ -2347,41 +2347,56 @@ impl AudioOrbitApp {
                 egui::vec2(title_width, 54.0),
                 egui::Sense::hover(),
             );
-            if has_now_playing {
-                let title = ellipsize_to_width(&self.active_track_title(), title_width - 10.0, 15.0);
-                let detail = self
-                    .active_track_detail()
-                    .map(|value| ellipsize_to_width(&value, title_width - 10.0, 11.5))
-                    .unwrap_or_default();
-                let time_label = ellipsize_to_width(&self.active_track_time_label(), title_width - 10.0, 11.5);
-                let painter = ui.painter();
-                painter.text(
-                    egui::pos2(title_rect.left() + 2.0, title_rect.top() + 10.0),
-                    egui::Align2::LEFT_CENTER,
-                    title,
-                    egui::FontId::proportional(15.0),
+            let title_available_width = title_width - 10.0;
+            let (title, detail, time_label, title_color, detail_color, time_color) = if has_now_playing {
+                (
+                    ellipsize_to_width(&self.active_track_title(), title_available_width, 15.0),
+                    self.active_track_detail()
+                        .map(|value| ellipsize_to_width(&value, title_available_width, 11.5))
+                        .unwrap_or_default(),
+                    ellipsize_to_width(&self.active_track_time_label(), title_available_width, 11.5),
                     ui.visuals().widgets.inactive.fg_stroke.color,
+                    ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.76),
+                    ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.68),
+                )
+            } else {
+                (
+                    ellipsize_to_width("Audio Orbit is ready", title_available_width, 15.0),
+                    ellipsize_to_width("Choose a song, start a playlist, or tune in to internet radio.", title_available_width, 11.5),
+                    ellipsize_to_width("Local music · Live radio · Sound profiles", title_available_width, 11.5),
+                    ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.82),
+                    ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.62),
+                    ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.52),
+                )
+            };
+
+            let painter = ui.painter();
+            painter.text(
+                egui::pos2(title_rect.left() + 2.0, title_rect.top() + 10.0),
+                egui::Align2::LEFT_CENTER,
+                title,
+                egui::FontId::proportional(15.0),
+                title_color,
+            );
+            if !detail.is_empty() {
+                painter.text(
+                    egui::pos2(title_rect.left() + 2.0, title_rect.top() + 25.0),
+                    egui::Align2::LEFT_CENTER,
+                    detail,
+                    egui::FontId::proportional(11.5),
+                    detail_color,
                 );
-                if !detail.is_empty() {
-                    painter.text(
-                        egui::pos2(title_rect.left() + 2.0, title_rect.top() + 25.0),
-                        egui::Align2::LEFT_CENTER,
-                        detail,
-                        egui::FontId::proportional(11.5),
-                        ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.76),
-                    );
-                }
-                if !time_label.is_empty() {
-                    painter.text(
-                        egui::pos2(title_rect.left() + 2.0, title_rect.top() + 40.0),
-                        egui::Align2::LEFT_CENTER,
-                        time_label,
-                        egui::FontId::proportional(11.5),
-                        ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.68),
-                    );
-                }
-                title_response.on_hover_text("Mouse wheel over the top player bar adjusts volume.");
             }
+            if !time_label.is_empty() {
+                painter.text(
+                    egui::pos2(title_rect.left() + 2.0, title_rect.top() + 40.0),
+                    egui::Align2::LEFT_CENTER,
+                    time_label,
+                    egui::FontId::proportional(11.5),
+                    time_color,
+                );
+            }
+            title_response.on_hover_text("Mouse wheel over the top player bar adjusts volume.");
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let settings_label = self.control_label(Icon::Settings2, "Settings");
