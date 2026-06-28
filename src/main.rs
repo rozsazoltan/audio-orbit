@@ -466,7 +466,6 @@ impl AudioOrbitApp {
         app.state.selected_radio_index = None;
         app.radio_selection_was_user_set = false;
         app.start_automatic_update_check_if_due();
-        app.start_automatic_songrec_check_if_due();
         app
     }
 
@@ -710,11 +709,7 @@ impl AudioOrbitApp {
     fn active_track_title(&self) -> String {
         if let Some(radio_index) = self.active_radio_index {
             if let Some(station) = self.state.radio_stations.get(radio_index) {
-                let stream_title = self
-                    .active_radio_title
-                    .clone()
-                    .or_else(|| station.last_stream_title.clone())
-                    .filter(|title| !title.trim().is_empty() && !title.eq_ignore_ascii_case(&station.name));
+                let stream_title = self.active_radio_stream_title_to_copy();
                 let station_name = self
                     .active_radio_station_name
                     .clone()
@@ -730,6 +725,31 @@ impl AudioOrbitApp {
             .as_ref()
             .map(|path| display_file_name(path))
             .unwrap_or_else(|| "No track playing".to_owned())
+    }
+
+    fn active_radio_stream_title_to_copy(&self) -> Option<String> {
+        let radio_index = self.active_radio_index?;
+        let station = self.state.radio_stations.get(radio_index)?;
+        self.active_radio_title
+            .clone()
+            .or_else(|| station.last_stream_title.clone())
+            .map(|title| title.trim().to_owned())
+            .filter(|title| !title.is_empty() && !title.eq_ignore_ascii_case(&station.name))
+    }
+
+    fn copy_active_radio_title(&mut self) {
+        if let Some(title) = self.active_radio_stream_title_to_copy() {
+            self.pending_clipboard_text = Some(title.clone());
+            self.status_message = format!("Radio stream title copied: {title}.");
+            self.error_message = None;
+        } else if let Some(index) = self.active_radio_index {
+            if let Some(station) = self.state.radio_stations.get(index) {
+                self.start_radio_title_lookup(index, station.url.clone());
+                self.status_message = "No stream title is available yet. Refreshing radio metadata...".to_owned();
+            }
+        } else {
+            self.status_message = "Start an internet radio station before copying the current title.".to_owned();
+        }
     }
 
     fn active_track_detail(&self) -> Option<String> {
@@ -2930,30 +2950,26 @@ impl AudioOrbitApp {
         }
     }
 
-    fn render_recognition_and_volume_controls(&mut self, ui: &mut egui::Ui, has_now_playing: bool, icon_button_size: egui::Vec2) {
-        let recognition_running = self.recognition_receiver.is_some();
-        if self.state.recognition.enabled {
-            let can_recognize = has_now_playing && !recognition_running;
-            let recognition_icon = if recognition_running { Icon::RefreshCw } else { Icon::Search };
-            let recognition_color = if recognition_running {
-                ui.visuals().selection.bg_fill
-            } else {
-                ui.visuals().widgets.inactive.fg_stroke.color
-            };
+    fn render_radio_title_copy_and_volume_controls(&mut self, ui: &mut egui::Ui, _has_now_playing: bool, icon_button_size: egui::Vec2) {
+        if self.active_tab == MainContentTab::Radio {
+            let has_active_radio = self.active_radio_index.is_some();
+            let has_radio_title = self.active_radio_stream_title_to_copy().is_some();
             if ui
                 .add_enabled(
-                    can_recognize,
-                    egui::Button::new(
-                        egui::RichText::new(ui_icons::icon(recognition_icon))
-                            .size(14.0)
-                            .color(recognition_color),
-                    )
-                    .min_size(icon_button_size),
+                    has_active_radio,
+                    egui::Button::new(egui::RichText::new(ui_icons::icon(Icon::Copy)).size(14.0))
+                        .min_size(icon_button_size),
                 )
-                .on_hover_text("Identify the current song with free SongRec-compatible recognition")
+                .on_hover_text(if has_radio_title {
+                    "Copy the current radio song title"
+                } else if has_active_radio {
+                    "Refresh metadata if needed, then copy the current radio song title when available"
+                } else {
+                    "Start an internet radio station before copying the current title"
+                })
                 .clicked()
             {
-                self.recognize_current_audio();
+                self.copy_active_radio_title();
             }
         }
 
@@ -3189,7 +3205,7 @@ impl AudioOrbitApp {
                     self.render_playback_mode_or_recording_controls(ui, radio_controls_active, icon_button_size);
                 });
                 ui.horizontal(|ui| {
-                    self.render_recognition_and_volume_controls(ui, has_now_playing, icon_button_size);
+                    self.render_radio_title_copy_and_volume_controls(ui, has_now_playing, icon_button_size);
                 });
             });
         } else if control_width < 620.0 {
@@ -3207,7 +3223,7 @@ impl AudioOrbitApp {
                     self.render_playback_mode_or_recording_controls(ui, radio_controls_active, icon_button_size);
                 });
                 ui.horizontal(|ui| {
-                    self.render_recognition_and_volume_controls(ui, has_now_playing, icon_button_size);
+                    self.render_radio_title_copy_and_volume_controls(ui, has_now_playing, icon_button_size);
                 });
             });
         } else {
@@ -3222,7 +3238,7 @@ impl AudioOrbitApp {
                     stop_button_size,
                 );
                 self.render_playback_mode_or_recording_controls(ui, radio_controls_active, icon_button_size);
-                self.render_recognition_and_volume_controls(ui, has_now_playing, icon_button_size);
+                self.render_radio_title_copy_and_volume_controls(ui, has_now_playing, icon_button_size);
             });
         }
 
@@ -4526,12 +4542,6 @@ impl AudioOrbitApp {
 
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            self.render_recognition_settings_section(ui);
-        });
-        ui.add_space(12.0);
-
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_width(ui.available_width());
             self.render_profile_panel(ui);
         });
     }
@@ -5264,11 +5274,6 @@ impl AudioOrbitApp {
         ui.add_space(10.0);
         ui.heading("External components");
         ui.add(egui::Label::new("RustFFT — high-performance pure Rust FFT used for Audio Orbit waveform/spectrum analysis. License: MIT OR Apache-2.0. GitHub: https://github.com/ejmahler/RustFFT").wrap());
-        ui.add(egui::Label::new("SongRec — optional free/open-source Shazam-compatible recognizer executable. License: GPL-3.0. GitHub: https://github.com/marin-m/SongRec").wrap());
-        ui.add(egui::Label::new(format!("Managed optional helpers are installed by Audio Orbit into {} when enabled.", external_tools_dir().display())).wrap());
-        if let Some(path) = recognition::installed_songrec_executable() {
-            ui.add(egui::Label::new(format!("Managed SongRec executable: {}", path.display())).wrap());
-        }
 
         ui.add_space(10.0);
         ui.heading("Keyboard shortcuts");
@@ -5770,6 +5775,11 @@ fn ensure_state_is_valid(state: &mut SavedState) {
     if state.selected_profile_index >= state.profiles.len() {
         state.selected_profile_index = 0;
     }
+
+    // Song recognition is no longer exposed in the app UI. Keep legacy saved-state fields
+    // readable for compatibility, but prevent background SongRec checks from older configs.
+    state.recognition.enabled = false;
+    state.recognition.auto_update_songrec = false;
 
     if let Some(index) = state.selected_radio_index {
         if index >= state.radio_stations.len() {
