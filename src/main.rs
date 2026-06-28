@@ -4456,12 +4456,11 @@ impl AudioOrbitApp {
         self.render_modal_backdrop(context, "panel_modal_backdrop");
         let screen_rect = context.screen_rect();
         let outer_padding = egui::vec2(28.0, 22.0);
-        let footer_height = self.modal_info_footer_reserved_height();
         let content_size = egui::vec2(
             (screen_rect.width() - outer_padding.x * 2.0).max(280.0),
-            (screen_rect.height() - outer_padding.y * 2.0 - footer_height).max(200.0),
+            (screen_rect.height() - outer_padding.y * 2.0).max(200.0),
         );
-        let scroll_height = (content_size.y - 88.0).max(120.0);
+        let scroll_height = (content_size.y - 112.0).max(120.0);
 
         egui::Area::new(egui::Id::new("panel_modal"))
             .order(egui::Order::Foreground)
@@ -4489,6 +4488,7 @@ impl AudioOrbitApp {
                         });
                         ui.add_space(1.0);
                         ui.add(egui::Label::new(panel.description()).wrap());
+                        self.render_modal_status_banner(ui);
                         ui.add_space(8.0);
 
                         egui::ScrollArea::vertical()
@@ -4505,7 +4505,6 @@ impl AudioOrbitApp {
                             });
                     });
             });
-        self.render_modal_info_footer_fixed(context, "panel_modal_info_footer", screen_rect);
     }
 
 
@@ -4562,7 +4561,7 @@ impl AudioOrbitApp {
             egui::Order::Middle,
             egui::Id::new(id),
         ));
-        painter.rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(230));
+        painter.rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(232));
     }
 
 
@@ -4572,12 +4571,11 @@ impl AudioOrbitApp {
         let mut is_open = details.is_some();
         let screen_rect = context.screen_rect();
         let outer_padding = egui::vec2(28.0, 22.0);
-        let footer_height = self.modal_info_footer_reserved_height();
         let content_size = egui::vec2(
             (screen_rect.width() - outer_padding.x * 2.0).max(280.0),
-            (screen_rect.height() - outer_padding.y * 2.0 - footer_height).max(200.0),
+            (screen_rect.height() - outer_padding.y * 2.0).max(200.0),
         );
-        let scroll_height = (content_size.y - 64.0).max(120.0);
+        let scroll_height = (content_size.y - 92.0).max(120.0);
 
         egui::Area::new(egui::Id::new("details_modal"))
             .order(egui::Order::Foreground)
@@ -4603,7 +4601,8 @@ impl AudioOrbitApp {
                                 }
                             });
                         });
-                        ui.separator();
+                        self.render_modal_status_banner(ui);
+                        ui.add_space(8.0);
 
                         egui::ScrollArea::vertical()
                             .max_height(scroll_height)
@@ -4649,8 +4648,6 @@ impl AudioOrbitApp {
                             });
                     });
             });
-        self.render_modal_info_footer_fixed(context, "details_modal_info_footer", screen_rect);
-
         if context.input(|input| input.key_pressed(egui::Key::Escape)) {
             is_open = false;
         }
@@ -4806,10 +4803,9 @@ impl AudioOrbitApp {
         let mut is_open = self.show_radio_add_modal;
         let screen_rect = context.screen_rect();
         let outer_padding = egui::vec2(28.0, 22.0);
-        let footer_height = self.modal_info_footer_reserved_height();
         let content_size = egui::vec2(
             (screen_rect.width() - outer_padding.x * 2.0).max(280.0),
-            (screen_rect.height() - outer_padding.y * 2.0 - footer_height).max(200.0),
+            (screen_rect.height() - outer_padding.y * 2.0).max(200.0),
         );
 
         egui::Area::new(egui::Id::new("radio_add_modal"))
@@ -4837,7 +4833,8 @@ impl AudioOrbitApp {
                             });
                         });
                         ui.add(egui::Label::new("Add a stream URL. If the name is empty, Audio Orbit tries to read the station name from stream headers and falls back to the stream host.").wrap());
-                        ui.separator();
+                        self.render_modal_status_banner(ui);
+                        ui.add_space(10.0);
 
                         let form_width = ui.available_width().min(620.0);
                         ui.allocate_ui_with_layout(
@@ -4868,8 +4865,6 @@ impl AudioOrbitApp {
                         );
                     });
             });
-        self.render_modal_info_footer_fixed(context, "radio_add_modal_info_footer", screen_rect);
-
         if context.input(|input| input.key_pressed(egui::Key::Escape)) {
             is_open = false;
         }
@@ -5289,146 +5284,34 @@ impl AudioOrbitApp {
         ui.label("Ctrl + P — Show or hide Sound profiles panel");
     }
 
-    fn has_modal_info_message(&self) -> bool {
-        !self.status_message.is_empty() || self.error_message.is_some()
-    }
-
-    fn modal_info_footer_reserved_height(&self) -> f32 {
+    fn render_modal_status_banner(&self, ui: &mut egui::Ui) {
         if !self.has_modal_info_message() {
-            0.0
-        } else if self.error_message.is_some() {
-            112.0
+            return;
+        }
+
+        ui.add_space(10.0);
+        let (icon, message, color) = if let Some(error) = &self.error_message {
+            (Icon::Info, error.as_str(), egui::Color32::LIGHT_RED)
         } else {
-            58.0
-        }
-    }
+            (Icon::Info, self.status_message.as_str(), ui.visuals().text_color())
+        };
 
-    fn render_modal_info_footer_fixed(&self, context: &egui::Context, id: &'static str, modal_rect: egui::Rect) {
-        if !self.has_modal_info_message() {
-            return;
-        }
-
-        let footer_height = self.modal_info_footer_reserved_height();
-        let top_left = egui::pos2(modal_rect.left(), modal_rect.bottom() - footer_height);
-        egui::Area::new(egui::Id::new(id))
-            .order(egui::Order::Foreground)
-            .fixed_pos(top_left)
-            .show(context, |ui| {
-                egui::Frame::new()
-                    .fill(egui::Color32::from_black_alpha(244))
-                    .corner_radius(egui::CornerRadius::same(0))
-                    .inner_margin(egui::Margin::symmetric(28, 8))
-                    .show(ui, |ui| {
-                        ui.set_min_size(egui::vec2((modal_rect.width() - 56.0).max(220.0), footer_height));
-                        let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
-                        let rect = ui.max_rect();
-                        ui.painter().line_segment([rect.left_top(), rect.right_top()], stroke);
-                        ui.add_space(4.0);
-                        egui::Frame::new()
-                            .fill(egui::Color32::from_black_alpha(92))
-                            .corner_radius(egui::CornerRadius::same(0))
-                            .inner_margin(egui::Margin::symmetric(10, 6))
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                let max_text_height = if self.error_message.is_some() { 62.0 } else { 24.0 };
-                                egui::ScrollArea::vertical()
-                                    .max_height(max_text_height)
-                                    .auto_shrink([false, false])
-                                    .show(ui, |ui| {
-                                        ui.set_width(ui.available_width());
-                                        if let Some(error) = &self.error_message {
-                                            ui.add(egui::Label::new(egui::RichText::new(error.as_str()).color(egui::Color32::LIGHT_RED)).wrap());
-                                        } else {
-                                            ui.add(egui::Label::new(self.status_message.as_str()).wrap());
-                                        }
-                                    });
-                            });
-                    });
-            });
-    }
-
-    fn render_modal_info_footer(&mut self, ui: &mut egui::Ui) {
-        if self.status_message.is_empty() && self.error_message.is_none() {
-            return;
-        }
-
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(6.0);
         egui::Frame::new()
-            .fill(egui::Color32::from_black_alpha(92))
-            .corner_radius(egui::CornerRadius::same(0))
-            .inner_margin(egui::Margin::symmetric(10, 6))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                let max_text_height = if self.error_message.is_some() { 86.0 } else { 24.0 };
-                egui::ScrollArea::vertical()
-                    .max_height(max_text_height)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        if let Some(error) = &self.error_message {
-                            ui.add(egui::Label::new(egui::RichText::new(error.as_str()).color(egui::Color32::LIGHT_RED)).wrap());
-                        } else {
-                            ui.add(egui::Label::new(self.status_message.as_str()).wrap());
-                        }
-                    });
-            });
-    }
-
-    fn render_inline_status_strip(&mut self, ui: &mut egui::Ui) {
-        if self.status_message.is_empty() {
-            return;
-        }
-        ui.add_space(6.0);
-        egui::Frame::new()
-            .fill(egui::Color32::from_black_alpha(92))
-            .corner_radius(egui::CornerRadius::same(6))
-            .inner_margin(egui::Margin::symmetric(10, 6))
+            .fill(egui::Color32::from_black_alpha(96))
+            .corner_radius(egui::CornerRadius::same(12))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(24)))
+            .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(self.status_message.as_str());
+                    ui.label(egui::RichText::new(ui_icons::icon(icon)).color(color));
+                    ui.add(egui::Label::new(egui::RichText::new(message).color(color)).wrap());
                 });
             });
-        ui.add_space(4.0);
     }
 
-    fn playlist_count_label(&self) -> Option<String> {
-        if self.active_tab != MainContentTab::Music {
-            return None;
-        }
-        let playlist = self.current_playlist()?;
-        let total = playlist.tracks.len();
-        if total == 0 {
-            return None;
-        }
-        let visible = self.visible_track_indexes().len();
-        if self.show_track_search && !self.track_search_query.trim().is_empty() && visible != total {
-            Some(format!("{visible}/{total} tracks"))
-        } else {
-            Some(format!("{total} tracks"))
-        }
-    }
-
-    fn render_status_panel(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if !self.status_message.is_empty() {
-                ui.label(self.status_message.as_str());
-                if !self.media_key_status.is_empty() {
-                    ui.separator();
-                }
-            }
-            if !self.media_key_status.is_empty() {
-                ui.small(self.media_key_status.as_str());
-            }
-
-            if let Some(count_label) = self.playlist_count_label() {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.small(count_label);
-                });
-            }
-        });
+    fn has_modal_info_message(&self) -> bool {
+        !self.status_message.is_empty() || self.error_message.is_some()
     }
 
     fn render_error_toast(&mut self, context: &egui::Context) {
@@ -5466,63 +5349,83 @@ impl AudioOrbitApp {
         self.render_modal_backdrop(context, "folder_import_modal_backdrop");
         let mut is_open = self.show_folder_import_modal;
         let mut close_after_import = false;
-        let modal_size = self.responsive_modal_size(context, 640.0, 520.0);
-        let scroll_height = (modal_size.y - 112.0).max(160.0);
+        let screen_rect = context.screen_rect();
+        let outer_padding = egui::vec2(28.0, 22.0);
+        let content_size = egui::vec2(
+            (screen_rect.width() - outer_padding.x * 2.0).max(280.0),
+            (screen_rect.height() - outer_padding.y * 2.0).max(200.0),
+        );
+        let scroll_height = (content_size.y - 96.0).max(160.0);
 
         egui::Area::new(egui::Id::new("folder_import_modal"))
             .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .fixed_pos(screen_rect.left_top())
             .show(context, |ui| {
-                egui::Frame::window(ui.style()).show(ui, |ui| {
-                    ui.set_min_size(modal_size);
-                    ui.set_max_width(modal_size.x);
+                egui::Frame::new()
+                    .fill(egui::Color32::from_black_alpha(244))
+                    .corner_radius(egui::CornerRadius::same(0))
+                    .inner_margin(egui::Margin::symmetric(outer_padding.x as i8, outer_padding.y as i8))
+                    .show(ui, |ui| {
+                        ui.set_min_size(content_size);
+                        ui.set_max_width(content_size.x);
 
-                    ui.horizontal(|ui| {
-                        ui.heading("Add music folder");
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button(ui_icons::icon(Icon::X)).on_hover_text("Close").clicked() {
-                                close_after_import = true;
-                            }
+                        ui.horizontal(|ui| {
+                            ui.heading(ui_icons::label(Icon::FolderInput, "Add music folder"));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui
+                                    .add_sized(egui::vec2(42.0, 34.0), egui::Button::new(egui::RichText::new(ui_icons::icon(Icon::X)).size(18.0)))
+                                    .on_hover_text("Close")
+                                    .clicked()
+                                {
+                                    close_after_import = true;
+                                }
+                            });
                         });
+                        ui.add(egui::Label::new("Create a scanner-owned playlist from a folder and group tracks by the first N subfolder levels.").wrap());
+                        self.render_modal_status_banner(ui);
+                        ui.add_space(8.0);
+
+                        egui::ScrollArea::vertical()
+                            .max_height(scroll_height)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                egui::Frame::group(ui.style()).show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.label("Folder");
+                                    let folder_label = self
+                                        .pending_folder_path
+                                        .as_ref()
+                                        .map(|path| path.display().to_string())
+                                        .unwrap_or_else(|| "No folder selected".to_owned());
+                                    ui.add(egui::Label::new(folder_label).wrap());
+                                    ui.add_space(8.0);
+                                    if ui.button(ui_icons::label(Icon::FolderOpen, "Choose folder...")).clicked() {
+                                        self.pick_music_folder();
+                                    }
+                                });
+
+                                ui.add_space(12.0);
+                                egui::Frame::group(ui.style()).show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.label("Playlist name");
+                                    ui.text_edit_singleline(&mut self.pending_playlist_name);
+                                    ui.add_space(8.0);
+                                    ui.add(
+                                        egui::Slider::new(&mut self.pending_folder_depth, 0usize..=5usize)
+                                            .text("Group by folder levels"),
+                                    );
+                                    ui.add(egui::Label::new("Example: depth 2 groups D:\\mp3\\Artist\\Album\\song.mp3 as Artist / Album.").wrap());
+                                });
+
+                                ui.add_space(14.0);
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.button(ui_icons::label(Icon::FolderInput, "Import folder")).clicked() {
+                                        close_after_import = self.import_folder_playlist();
+                                    }
+                                });
+                            });
                     });
-
-                    egui::ScrollArea::vertical()
-                        .max_height(scroll_height)
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            ui.add(egui::Label::new("Create a scanner-owned playlist from a folder and group tracks by the first N subfolder levels.").wrap());
-                            ui.add_space(8.0);
-
-                            ui.label("Folder");
-                            let folder_label = self
-                                .pending_folder_path
-                                .as_ref()
-                                .map(|path| path.display().to_string())
-                                .unwrap_or_else(|| "No folder selected".to_owned());
-                            ui.add(egui::Label::new(folder_label).wrap());
-
-                            if ui.button(ui_icons::label(Icon::FolderOpen, "Choose folder...")).clicked() {
-                                self.pick_music_folder();
-                            }
-
-                            ui.add_space(8.0);
-                            ui.label("Playlist name");
-                            ui.text_edit_singleline(&mut self.pending_playlist_name);
-
-                            ui.add(
-                                egui::Slider::new(&mut self.pending_folder_depth, 0usize..=5usize)
-                                    .text("Group by folder levels"),
-                            );
-                            ui.add(egui::Label::new("Example: depth 2 groups D:\\mp3\\Artist\\Album\\song.mp3 as Artist / Album.").wrap());
-                        });
-
-                    ui.separator();
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(ui_icons::label(Icon::FolderInput, "Import folder")).clicked() {
-                            close_after_import = self.import_folder_playlist();
-                        }
-                    });
-                });
             });
 
         if context.input(|input| input.key_pressed(egui::Key::Escape)) {
