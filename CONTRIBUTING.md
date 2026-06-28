@@ -25,6 +25,26 @@ cargo build
 cargo build --release
 ```
 
+For day-to-day development, use the Cargo alias:
+
+```sh
+cargo dev
+```
+
+The repository Cargo config writes build artifacts to `.cache/cargo-target` and runs the app with development state in `.cache/app-data`. Debug builds show a development version label in the app, for example `v0.0.0-abc123def456`, derived from the current Git commit. Release builds keep the normal `v<package-version>` label.
+
+If you also want Cargo registry and Git dependency caches inside the repository cache, use the wrapper scripts instead of calling Cargo directly:
+
+```sh
+./scripts/dev.sh
+```
+
+```powershell
+./scripts/dev.ps1
+```
+
+Those wrappers set `CARGO_HOME`, `CARGO_TARGET_DIR`, and Audio Orbit development data paths under `.cache` before starting Cargo. This keeps local development artifacts, downloaded Cargo dependencies, target files, and dev app state out of the project root and out of the user-level Cargo cache.
+
 On Windows, test the release executable because the app uses Windows-specific behavior such as executable resources, manifest metadata, self-update replacement, and global media keys.
 
 ## Project structure

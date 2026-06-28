@@ -1,0 +1,9 @@
+[build]
+target-dir = ".cache/cargo-target"
+
+[env]
+AUDIO_ORBIT_CACHE_ROOT = { value = ".cache", relative = true }
+AUDIO_ORBIT_APP_DATA_DIR = { value = ".cache/app-data", relative = true }
+
+[alias]
+dev = "run --bin audio-orbit"

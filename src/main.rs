@@ -37,6 +37,11 @@ use std::{
 const UPDATE_CHECKS_BEFORE_CONFIRMATION: u8 = 2;
 const AUTOMATIC_UPDATE_CHECK_INTERVAL_SECONDS: u64 = 60 * 60;
 const AUTOMATIC_SONGREC_CHECK_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
+const APP_VERSION_LABEL: &str = env!("AUDIO_ORBIT_DISPLAY_VERSION");
+
+fn app_version_label() -> &'static str {
+    APP_VERSION_LABEL
+}
 
 fn min_window_size_for_mode(player_only_mode: bool) -> egui::Vec2 {
     if player_only_mode {
@@ -98,7 +103,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        &format!("Audio Orbit v{}", env!("CARGO_PKG_VERSION")),
+        &format!("Audio Orbit {}", app_version_label()),
         options,
         Box::new(move |creation_context| {
             ui_icons::install(&creation_context.egui_ctx);
@@ -5223,7 +5228,8 @@ impl AudioOrbitApp {
         }
 
         if let Some(check) = self.last_update_check.clone() {
-            ui.label(format!("Current version: v{}", check.current_version));
+            ui.label(format!("Running build: {}", app_version_label()));
+            ui.label(format!("Current release version: v{}", check.current_version));
             ui.label(format!(
                 "Latest version: v{}{}",
                 check.latest_version,
@@ -5250,6 +5256,7 @@ impl AudioOrbitApp {
                 self.install_update();
             }
         } else {
+            ui.small(format!("Running build: {}", app_version_label()));
             ui.small(format!("Repository: {}", updater::repository_label()));
             ui.small("No release check has been run in this app session.");
         }
@@ -5261,10 +5268,12 @@ impl AudioOrbitApp {
         }
         ui.add(egui::Label::new("Audio Orbit is a lightweight Windows music player focused on local libraries, folder-based playlists, smooth crossfade playback, silence skipping, and headphone-friendly orbit-style stereo movement.").wrap());
         ui.add_space(8.0);
-        ui.add(egui::Label::new(format!("Version: v{}", env!("CARGO_PKG_VERSION"))).wrap());
+        ui.add(egui::Label::new(format!("Version: {}", app_version_label())).wrap());
         ui.add(egui::Label::new("Creator: Zoltán Rózsa").wrap());
         ui.add(egui::Label::new("License: GNU Affero General Public License v3.0 (AGPL-3.0)").wrap());
-        ui.add(egui::Label::new("This app stores its portable state next to the executable in .audio-orbit-data.").wrap());
+        if let Some(path) = app_data_dir() {
+            ui.add(egui::Label::new(format!("Data folder: {}", path.display())).wrap());
+        }
 
         ui.add_space(10.0);
         ui.heading("External components");

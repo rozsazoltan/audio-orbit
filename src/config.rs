@@ -611,6 +611,13 @@ impl Default for SavedState {
 }
 
 pub fn app_data_dir() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("AUDIO_ORBIT_APP_DATA_DIR")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return Some(path);
+    }
+
     std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join(".audio-orbit-data")))
@@ -664,6 +671,7 @@ pub fn export_state_zip(state: &SavedState, path: &Path) -> Result<()> {
     let meta = serde_json::json!({
         "app": "Audio Orbit",
         "version": env!("CARGO_PKG_VERSION"),
+        "display_version": env!("AUDIO_ORBIT_DISPLAY_VERSION"),
         "type": "full-app-state-backup"
     });
     zip.start_file(BACKUP_META_ENTRY, options)?;
