@@ -47,6 +47,69 @@ Those wrappers set `CARGO_HOME`, `CARGO_TARGET_DIR`, and Audio Orbit development
 
 On Windows, test the release executable because the app uses Windows-specific behavior such as executable resources, manifest metadata, self-update replacement, and global media keys.
 
+
+## Windows development from a WSL-hosted repository
+
+For the best Windows development experience, keep the Git repository on the WSL filesystem and run the app from a native Windows mirror synchronized with Mutagen. Do not run the Windows executable directly from `\\wsl$\...`, because Rust builds and the app runtime perform many small file operations.
+
+Recommended local layout:
+
+```text
+WSL Git repository: /path/to/audio-orbit
+Windows dev mirror: D:\path\to\audio-orbit
+Windows app runtime: D:\path\to\audio-orbit
+```
+
+Install `mutagen.exe` on Windows and make sure it is available on `PATH`. For the first setup, run the helper from Windows PowerShell through the WSL UNC path of your repository. The helper treats its own repository root as the source workspace and asks where the Windows mirror should be created.
+
+```powershell
+& "\\wsl$\<Distribution>\<path-to-repository>\scripts\setup-mutagen-wsl-dev.ps1"
+```
+
+When prompted, enter the Windows mirror directory, for example:
+
+```text
+D:\path\to\audio-orbit
+```
+
+The script creates or reuses this synchronization session by default:
+
+```text
+audio-orbit-win-dev
+```
+
+The source is always the workspace root that contains the running `.ps1` file. The target is the Windows mirror path entered during setup. The session uses Mutagen VCS ignores and also ignores `.cache`, `target`, and ZIP artifacts. Keep Git operations on the source workspace side:
+
+```sh
+cd /path/to/audio-orbit
+git status
+git add .
+git commit -m "..."
+```
+
+Run the Windows app from the Windows mirror:
+
+```powershell
+cd D:\path\to\audio-orbit
+cargo dev
+```
+
+Use these commands when needed:
+
+```powershell
+mutagen sync list
+mutagen sync monitor audio-orbit-win-dev
+mutagen sync flush audio-orbit-win-dev
+mutagen sync terminate audio-orbit-win-dev
+```
+
+If you want to pass the mirror path without an interactive prompt, use:
+
+```powershell
+& "\\wsl$\<Distribution>\<path-to-repository>\scripts\setup-mutagen-wsl-dev.ps1" `
+  -WindowsProjectPath "D:\path\to\audio-orbit"
+```
+
 ## Project structure
 
 ```text
@@ -106,3 +169,10 @@ Before merging, check:
 ## License
 
 By contributing, you agree that your contribution is licensed under the GNU Affero General Public License v3.0 or later.
+
+
+## Non-Windows development builds
+
+Audio Orbit is released as a Windows audio player. On Linux and macOS, `cargo dev` builds a UI-only development preview and uses an audio-player stub. This keeps local development and CI checks independent from native audio backend packages such as ALSA.
+
+Use `scripts/dev.sh` or `scripts/dev.ps1` when you want Cargo registry, git dependencies, build artifacts, and app state to stay under `.cache`.

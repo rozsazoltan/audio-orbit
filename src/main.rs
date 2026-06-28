@@ -1,5 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod audio_player;
+#[cfg(not(windows))]
+#[path = "audio_player_stub.rs"]
 mod audio_player;
 mod config;
 mod dsp;

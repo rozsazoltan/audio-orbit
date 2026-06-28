@@ -22,5 +22,11 @@ export AUDIO_ORBIT_DEV_VERSION="v0.0.0-$COMMIT"
 echo "Audio Orbit dev cache: $CACHE_ROOT"
 echo "Audio Orbit dev version: $AUDIO_ORBIT_DEV_VERSION"
 
+case "$(uname -s 2>/dev/null || printf unknown)" in
+    Linux*)
+        echo "Audio Orbit dev note: non-Windows builds use a UI-only audio stub, so ALSA development packages are not required."
+        ;;
+esac
+
 cd "$REPO_ROOT"
 exec cargo run --bin audio-orbit -- "$@"
