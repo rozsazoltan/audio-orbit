@@ -1079,7 +1079,7 @@ impl AudioOrbitApp {
     fn export_app_backup(&mut self) {
         let Some(path) = FileDialog::new()
             .add_filter("Audio Orbit backup", &["zip"])
-            .set_file_name("audio-orbit-backup.zip")
+            .set_file_name(backup_default_file_name())
             .save_file()
         else {
             return;
@@ -4793,7 +4793,8 @@ impl AudioOrbitApp {
 
         ui.add_space(10.0);
         ui.heading("External components");
-        ui.add(egui::Label::new("RustFFT — high-performance pure Rust FFT used for Audio Orbit waveform/spectrum analysis. License: MIT OR Apache-2.0. GitHub: https://github.com/ejmahler/RustFFT").wrap());
+        ui.add(egui::Label::new("Rodio + Symphonia — Rust audio playback and decoding stack used for local music and decoded radio playback. Licenses: MIT OR Apache-2.0. GitHub: https://github.com/RustAudio/rodio and https://github.com/pdeljanov/Symphonia").wrap());
+        ui.add(egui::Label::new("Lofty — Rust audio metadata reader used for duration, bitrate, sample rate, and tags. License: MIT OR Apache-2.0. GitHub: https://github.com/Serial-ATA/lofty-rs").wrap());
 
         ui.add_space(10.0);
         ui.heading("Keyboard shortcuts");
@@ -5012,6 +5013,35 @@ impl AudioOrbitApp {
 
 }
 
+
+
+fn backup_default_file_name() -> String {
+    let (year, month, day, hour, minute, second) = utc_timestamp_parts(current_unix_seconds());
+    format!("audio-orbit-backup-{year:04}-{month:02}-{day:02}-{hour:02}-{minute:02}-{second:02}.zip")
+}
+
+fn utc_timestamp_parts(seconds: u64) -> (i32, u32, u32, u32, u32, u32) {
+    let days = (seconds / 86_400) as i64;
+    let seconds_of_day = seconds % 86_400;
+    let hour = (seconds_of_day / 3_600) as u32;
+    let minute = ((seconds_of_day % 3_600) / 60) as u32;
+    let second = (seconds_of_day % 60) as u32;
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe as i32 + era as i32 * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = (mp + if mp < 10 { 3 } else { -9 }) as u32;
+    if month <= 2 {
+        year += 1;
+    }
+
+    (year, month, day, hour, minute, second)
+}
 
 fn current_unix_seconds() -> u64 {
     SystemTime::now()
@@ -5317,101 +5347,68 @@ fn paint_sticky_folder_header(
     (rect, icon_rect)
 }
 
-fn packed_spectral_bands_for_range(packed: &[f32], point_count: usize, start: usize, end: usize) -> (f32, f32, f32) {
-    if point_count > 0 && packed.len() >= point_count.saturating_mul(3) {
-        let mut low = 0.0_f32;
-        let mut mid = 0.0_f32;
-        let mut high = 0.0_f32;
-        let mut count = 0usize;
-        for index in start.min(point_count)..end.min(point_count) {
-            let base = index * 3;
-            low += packed.get(base).copied().unwrap_or(0.0);
-            mid += packed.get(base + 1).copied().unwrap_or(0.0);
-            high += packed.get(base + 2).copied().unwrap_or(0.0);
-            count += 1;
-        }
-        if count > 0 {
-            let inv = 1.0 / count as f32;
-            return ((low * inv).clamp(0.0, 1.0), (mid * inv).clamp(0.0, 1.0), (high * inv).clamp(0.0, 1.0));
-        }
-    }
-
-    // Backward-compatible fallback for waveforms cached before low/mid/high triples existed.
-    let mut brightness = 0.0_f32;
-    let mut count = 0usize;
-    for value in packed.iter().skip(start).take(end.saturating_sub(start)) {
-        brightness += value.clamp(0.0, 1.0);
-        count += 1;
-    }
-    if count > 0 {
-        brightness = (brightness / count as f32).clamp(0.0, 1.0);
-    }
-    let low = (1.0 - brightness).clamp(0.0, 1.0);
-    let high = brightness.clamp(0.0, 1.0);
-    let mid = (1.0 - (brightness - 0.5).abs() * 1.7).clamp(0.0, 1.0);
-    (low, mid, high)
-}
-
-fn spectral_bar_colors(played: bool) -> (egui::Color32, egui::Color32, egui::Color32) {
-    let low = egui::Color32::from_rgb(72, 132, 255);
-    let mid = egui::Color32::from_rgb(122, 224, 150);
-    let high = egui::Color32::from_rgb(255, 196, 76);
-    if played {
-        (low, mid, high)
+fn waveform_bar_color(ui: &egui::Ui, played: bool, silence: bool) -> egui::Color32 {
+    if silence {
+        egui::Color32::from_rgb(238, 194, 74)
+    } else if played {
+        egui::Color32::from_rgb(58, 132, 245)
     } else {
-        (low.linear_multiply(0.48), mid.linear_multiply(0.48), high.linear_multiply(0.48))
+        ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.36)
     }
 }
 
-fn draw_stacked_spectral_bar(
+fn draw_waveform_bar(
     painter: &egui::Painter,
     x1: f32,
     x2: f32,
     center_y: f32,
     height: f32,
-    low: f32,
-    mid: f32,
-    high: f32,
-    played: bool,
-    silence_color: Option<egui::Color32>,
+    color: egui::Color32,
 ) {
     if x2 <= x1 || height <= 0.5 {
         return;
     }
 
-    if let Some(color) = silence_color {
-        let y1 = center_y - height * 0.5;
-        let y2 = center_y + height * 0.5;
-        painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x1, y1), egui::pos2(x2, y2)), 0.0, color);
-        return;
+    let half_height = height * 0.5;
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(x1, center_y - half_height),
+        egui::pos2(x2, center_y + half_height),
+    );
+    painter.rect_filled(rect, 0.0, color);
+}
+
+fn waveform_dynamic_range(values: &[f32]) -> (f32, f32) {
+    if values.is_empty() {
+        return (0.0, 1.0);
     }
 
-    let low = low.clamp(0.0, 1.0);
-    let mid = mid.clamp(0.0, 1.0);
-    let high = high.clamp(0.0, 1.0);
-    let total = (low + mid + high).max(0.000_001);
-    let mut high_h = height * (high / total).clamp(0.06, 0.82);
-    let mut mid_h = height * (mid / total).clamp(0.06, 0.82);
-    let mut low_h = height * (low / total).clamp(0.06, 0.82);
-    let scale = height / (high_h + mid_h + low_h).max(0.000_001);
-    high_h *= scale;
-    mid_h *= scale;
-    low_h *= scale;
+    let mut sorted = values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .map(|value| value.clamp(0.0, 1.0))
+        .collect::<Vec<_>>();
+    if sorted.is_empty() {
+        return (0.0, 1.0);
+    }
 
-    let top = center_y - height * 0.5;
-    let (low_color, mid_color, high_color) = spectral_bar_colors(played);
-    let high_rect = egui::Rect::from_min_max(egui::pos2(x1, top), egui::pos2(x2, top + high_h));
-    let mid_rect = egui::Rect::from_min_max(egui::pos2(x1, top + high_h), egui::pos2(x2, top + high_h + mid_h));
-    let low_rect = egui::Rect::from_min_max(egui::pos2(x1, top + high_h + mid_h), egui::pos2(x2, top + high_h + mid_h + low_h));
-    painter.rect_filled(high_rect, 0.0, high_color);
-    painter.rect_filled(mid_rect, 0.0, mid_color);
-    painter.rect_filled(low_rect, 0.0, low_color);
+    sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let floor = sorted[((sorted.len() - 1) as f32 * 0.08) as usize].min(0.20);
+    let ceiling = sorted[((sorted.len() - 1) as f32 * 0.965) as usize].max(floor + 0.16);
+    (floor, (ceiling - floor).max(0.08))
+}
+
+fn shaped_waveform_height(value: f32, floor: f32, range: f32, rect_height: f32) -> f32 {
+    let normalized = ((value.clamp(0.0, 1.0) - floor) / range.max(0.001)).clamp(0.0, 1.0);
+    let shaped = normalized.powf(0.92);
+    let min_height = rect_height * 0.08;
+    let max_height = rect_height * 0.86;
+    (min_height + shaped * (max_height - min_height)).clamp(2.0, rect_height - 4.0)
 }
 
 fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egui::Response {
     let desired_size = egui::vec2(ui.available_width(), 46.0);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
-    let visuals = ui.visuals();
     let painter = ui.painter();
 
     painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(210));
@@ -5421,19 +5418,19 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
     let bar_width = ((rect.width() - gap * bar_count.saturating_sub(1) as f32) / bar_count.max(1) as f32)
         .clamp(0.65, 2.2);
     let pitch = bar_width + gap;
-    let bucket_seconds = if frame.bucket_seconds > 0.0 { frame.bucket_seconds } else { 1.0 / 24.0 };
+    let bucket_seconds = if frame.bucket_seconds > 0.0 { frame.bucket_seconds } else { 1.0 / 18.0 };
 
-    let zero_color = visuals.widgets.inactive.fg_stroke.color.linear_multiply(0.14);
     let center_y = rect.center().y;
+    let base_color = waveform_bar_color(ui, false, false).linear_multiply(0.72);
     for index in 0..bar_count {
         let x1 = rect.left() + index as f32 * pitch;
         let x2 = (x1 + bar_width).min(rect.right());
-        painter.rect_filled(
-            egui::Rect::from_min_max(egui::pos2(x1, center_y - 0.35), egui::pos2(x2, center_y + 0.35)),
-            0.0,
-            zero_color,
-        );
+        draw_waveform_bar(painter, x1, x2, center_y, 1.1, base_color);
     }
+
+    let visible_values = frame.bars.iter().map(|bar| bar.peak).collect::<Vec<_>>();
+    let (floor, range) = waveform_dynamic_range(&visible_values);
+    let active_color = waveform_bar_color(ui, true, false);
 
     for bar in &frame.bars {
         let offset = bar.age_seconds.max(0.0) / bucket_seconds;
@@ -5444,23 +5441,17 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
         }
 
         let value = bar.peak.clamp(0.0, 1.0);
-        if value <= 0.006 {
+        if value <= 0.004 {
             continue;
         }
-        let normalized = value.powf(0.82);
-        let height = (rect.height() * 0.84 * normalized).clamp(2.0, rect.height() * 0.92);
-        let y_center = rect.center().y;
-        draw_stacked_spectral_bar(
+        let height = shaped_waveform_height(value, floor, range, rect.height());
+        draw_waveform_bar(
             painter,
             x1.max(rect.left()),
             x2.min(rect.right()),
-            y_center,
+            center_y,
             height,
-            bar.low,
-            bar.mid,
-            bar.high,
-            true,
-            None,
+            active_color,
         );
     }
 
@@ -5470,7 +5461,7 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
 fn draw_waveform_seek(
     ui: &mut egui::Ui,
     waveform: &[f32],
-    waveform_brightness: &[f32],
+    _waveform_brightness: &[f32],
     progress: f32,
     silence_ranges: &[(f32, f32)],
     duration_seconds: f32,
@@ -5481,7 +5472,10 @@ fn draw_waveform_seek(
 
     painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(210));
 
+    let base_color = waveform_bar_color(ui, false, false).linear_multiply(0.72);
+    let center_y = rect.center().y;
     if waveform.is_empty() {
+        draw_waveform_bar(painter, rect.left(), rect.right(), center_y, 1.1, base_color);
         return response;
     }
 
@@ -5493,35 +5487,22 @@ fn draw_waveform_seek(
     let gap = 0.85;
     let bar_width = ((rect.width() - gap * rendered_points.saturating_sub(1) as f32) / rendered_points.max(1) as f32)
         .clamp(0.75, 2.2);
-    let peak = waveform
-        .iter()
-        .copied()
-        .fold(0.0_f32, f32::max)
-        .max(0.08);
-    let mut sorted = waveform.to_vec();
-    sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-    let floor_index = ((sorted.len().saturating_sub(1)) as f32 * 0.10) as usize;
-    let noise_floor = sorted.get(floor_index).copied().unwrap_or(0.0).min(peak * 0.58);
-    let dynamic_range = (peak - noise_floor).max(0.04);
+
+    let (floor, range) = waveform_dynamic_range(waveform);
 
     for (bar_index, chunk) in waveform.chunks(step).enumerate() {
         let value = chunk
             .iter()
             .copied()
+            .filter(|value| value.is_finite())
             .fold(0.0_f32, f32::max);
-        let normalized = ((value - noise_floor) / dynamic_range).clamp(0.018, 1.0);
-        let eased = normalized.powf(0.68);
         let x1 = rect.left() + bar_index as f32 * (bar_width + gap);
         let x2 = (x1 + bar_width).min(rect.right());
         if x1 >= rect.right() {
             break;
         }
 
-        let band_start = bar_index * step;
-        let band_end = ((bar_index + 1) * step).min(waveform.len());
-        let (low, mid, high) = packed_spectral_bands_for_range(waveform_brightness, waveform.len(), band_start, band_end);
-
-        let height = (rect.height() * 0.84 * eased).max(4.0).min(rect.height() - 4.0);
+        let height = shaped_waveform_height(value, floor, range, rect.height());
         let bar_start_seconds = if duration_seconds > 0.0 {
             (bar_index * step) as f32 / waveform.len().max(1) as f32 * duration_seconds
         } else {
@@ -5534,23 +5515,9 @@ fn draw_waveform_seek(
         };
         let is_silence = duration_seconds > 0.0
             && silence_ranges.iter().any(|(start, end)| *end > bar_start_seconds && *start < bar_end_seconds);
-        let silence_color = if is_silence {
-            Some(egui::Color32::from_rgb(238, 194, 74))
-        } else {
-            None
-        };
-        draw_stacked_spectral_bar(
-            painter,
-            x1,
-            x2,
-            rect.center().y,
-            height,
-            low,
-            mid,
-            high,
-            x1 <= progress_x,
-            silence_color,
-        );
+        let color = waveform_bar_color(ui, x1 <= progress_x, is_silence);
+
+        draw_waveform_bar(painter, x1, x2, center_y, height, color);
     }
 
     let playhead = egui::Rect::from_min_max(

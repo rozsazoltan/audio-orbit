@@ -10,7 +10,7 @@ use std::{
     f32::consts::PI,
     fs,
     fs::File,
-    io::{self, BufReader, Read, Seek, SeekFrom},
+    io::{self, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
@@ -19,8 +19,11 @@ use std::{
 
 const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 20;
 const RADIO_VISUALIZER_VISIBLE_SECONDS: f32 = 15.0;
-const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 24;
+const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 18;
 const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
+const MAX_DECODED_SOURCE_SAMPLES: usize = 96_000_000;
+const MAX_RENDERED_STEREO_SAMPLES: usize = 96_000_000;
+const DECODE_RESERVE_CHUNK: usize = 262_144;
 
 #[derive(Clone, Debug)]
 pub struct PlaybackInfo {
@@ -893,15 +896,27 @@ fn render_file_data(
     let decoder = Decoder::new(BufReader::new(file))
         .with_context(|| format!("failed to decode audio file: {}", path.display()))?;
 
-    let input_channels = decoder.channels();
+    let input_channels = decoder.channels().max(1);
     let sample_rate = decoder.sample_rate();
     if sample_rate == 0 {
         anyhow::bail!("the selected audio file reported an invalid sample rate");
     }
 
-    let input_samples: Vec<f32> = decoder.convert_samples::<f32>().collect();
+    let input_samples = decode_samples_with_memory_guard(decoder, path)?;
     if input_samples.is_empty() {
         anyhow::bail!("the selected audio file did not contain any decoded samples");
+    }
+
+    let channels = input_channels.max(1) as usize;
+    let frame_count = input_samples.len() / channels;
+    let start_frame = ((start_seconds.max(0.0) * sample_rate as f32) as usize).min(frame_count);
+    let requested_rendered_samples = frame_count.saturating_sub(start_frame).saturating_mul(2);
+    if requested_rendered_samples > MAX_RENDERED_STEREO_SAMPLES {
+        anyhow::bail!(
+            "the selected audio range is too large for the current in-memory renderer ({} stereo samples requested, limit is {}). Split the file or use a shorter seek range until the streaming engine lands.",
+            requested_rendered_samples,
+            MAX_RENDERED_STEREO_SAMPLES
+        );
     }
 
     let (processed_samples, render_info) =
@@ -912,6 +927,38 @@ fn render_file_data(
     }
 
     Ok((processed_samples, render_info, sample_rate))
+}
+
+fn decode_samples_with_memory_guard(
+    decoder: Decoder<BufReader<File>>,
+    path: &Path,
+) -> Result<Vec<f32>> {
+    let mut samples = Vec::new();
+
+    for sample in decoder.convert_samples::<f32>() {
+        if samples.len() >= MAX_DECODED_SOURCE_SAMPLES {
+            anyhow::bail!(
+                "the selected audio file is too large for the current in-memory decoder ({} decoded samples limit): {}",
+                MAX_DECODED_SOURCE_SAMPLES,
+                path.display()
+            );
+        }
+
+        if samples.len() == samples.capacity() {
+            let remaining = MAX_DECODED_SOURCE_SAMPLES.saturating_sub(samples.len());
+            let reserve = remaining.min(DECODE_RESERVE_CHUNK).max(1);
+            samples.try_reserve(reserve).map_err(|_| {
+                anyhow::anyhow!(
+                    "not enough memory to decode audio safely without risking an allocator abort: {}",
+                    path.display()
+                )
+            })?;
+        }
+
+        samples.push(sample.clamp(-1.0, 1.0));
+    }
+
+    Ok(samples)
 }
 
 fn playback_info(path: &Path, render_info: RenderInfo) -> PlaybackInfo {

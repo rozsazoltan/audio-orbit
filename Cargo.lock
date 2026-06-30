@@ -514,7 +514,6 @@ dependencies = [
  "reqwest",
  "rfd",
  "rodio",
- "rustfft",
  "semver",
  "serde",
  "serde_json",
