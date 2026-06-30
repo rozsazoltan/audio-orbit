@@ -392,7 +392,6 @@ impl AudioPlayer {
         let response = reqwest::blocking::Client::builder()
             .user_agent("Audio-Orbit-Radio")
             .connect_timeout(Duration::from_secs(6))
-            .read_timeout(Duration::from_secs(12))
             .build()?
             .get(&url)
             .send()
