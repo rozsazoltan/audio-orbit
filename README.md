@@ -178,7 +178,7 @@ Use the search button in the track list header to reveal search. Search filters 
 
 ### Waveform and silence skip
 
-Local track waveforms mark long quiet sections that silence skipping will bypass. Local tracks and internet radio use the same AIMP-style amplitude analyzer: unplayed audio is gray, played audio is blue, and silence-skip ranges are yellow. The analyzer combines peak, RMS, crest, and transient energy so the bars follow the musical rhythm without turning every loud section into a constant full-height wall.
+Local track waveforms mark long quiet sections that silence skipping will bypass. Local tracks and internet radio use the same AIMP-style amplitude envelope approach rather than an RGB frequency spectrum. Local tracks use gray for unplayed audio, blue for played audio, and yellow for silence-skip ranges. Live radio uses a subdued gray-blue live waveform because there is no seekable played/unplayed region. The analyzer combines dB-scaled RMS, peak, crest, and transient energy without full-height per-frame normalization, so mastered radio streams do not turn into a constant barcode.
 
 ### Manage Favorites
 
@@ -238,7 +238,7 @@ Copyright (C) 2020–present [Zoltán Rózsa](https://github.com/rozsazoltan)
 
 ### Notes on waveform analysis
 
-Audio Orbit intentionally uses a clean one-color waveform lane instead of RGB/spectrum bars. The UI layer is simple and readable: gray for unplayed waveform, blue for played waveform, and yellow for silence ranges that will be skipped. The local-file and live-radio analyzers share the same peak/RMS/transient shaping rules so both views stay visually consistent.
+Audio Orbit intentionally uses a clean amplitude waveform lane instead of RGB/spectrum bars. The UI layer is simple and readable: gray for unplayed local audio, blue for played local audio, and yellow for silence ranges that will be skipped. Live radio is rendered as a subdued moving waveform rather than a full-height visualizer. The local-file and live-radio analyzers share the same dB-scaled RMS/peak/transient shaping rules so both views stay visually consistent without saturating every loud section.
 
 
 ### Performance and safety

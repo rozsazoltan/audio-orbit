@@ -22,7 +22,7 @@ use std::{
 
 const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 20;
 const RADIO_VISUALIZER_VISIBLE_SECONDS: f32 = 15.0;
-const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 18;
+const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 12;
 const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
 const MAX_DECODED_SOURCE_SAMPLES: usize = 48_000_000;
 const MAX_RENDERED_STEREO_SAMPLES: usize = 48_000_000;
@@ -692,23 +692,26 @@ impl AudioPlayer {
             slot_peaks[slot] = slot_peaks[slot].max(bucket.peak);
         }
 
-        let mut previous_peak = 0.0_f32;
+        let mut release_tail = 0.0_f32;
         let bars = slot_peaks
             .into_iter()
             .enumerate()
             .filter_map(|(slot, peak)| {
-                let shaped = if peak > previous_peak {
-                    previous_peak * 0.10 + peak * 0.90
+                // Keep motion smooth like AIMP, but avoid turning every bucket
+                // into the same full-height value. The raw peak keeps rhythm,
+                // the short release tail only softens the visual decay.
+                release_tail = if peak > release_tail {
+                    peak
                 } else {
-                    previous_peak * 0.48 + peak * 0.52
+                    (release_tail * 0.84).max(peak)
                 };
-                previous_peak = shaped;
+                let shaped = (peak * 0.76 + release_tail * 0.24).clamp(0.0, 0.72);
                 if shaped <= 0.003 {
                     return None;
                 }
                 Some(RadioVisualizerBar {
                     age_seconds: (requested_points - 1 - slot) as f32 * bucket_seconds,
-                    peak: shaped.clamp(0.0, 1.0),
+                    peak: shaped,
                 })
             })
             .collect();

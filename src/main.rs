@@ -3035,7 +3035,7 @@ impl AudioOrbitApp {
         });
 
         if self.active_radio_index.is_some() {
-            let requested_points = (ui.available_width() / 2.8).round().clamp(80.0, 900.0) as usize;
+            let requested_points = (ui.available_width() / 3.4).round().clamp(64.0, 520.0) as usize;
             let frame = self
                 .player
                 .as_ref()
@@ -5641,33 +5641,19 @@ fn draw_waveform_bar(
     painter.rect_filled(rect, 0.0, color);
 }
 
-fn waveform_dynamic_range(values: &[f32]) -> (f32, f32) {
-    if values.is_empty() {
-        return (0.0, 1.0);
+fn shaped_waveform_height(value: f32, rect_height: f32, live: bool) -> f32 {
+    let value = value.clamp(0.0, 1.0);
+    if value <= 0.003 {
+        return 1.1;
     }
 
-    let mut sorted = values
-        .iter()
-        .copied()
-        .filter(|value| value.is_finite())
-        .map(|value| value.clamp(0.0, 1.0))
-        .collect::<Vec<_>>();
-    if sorted.is_empty() {
-        return (0.0, 1.0);
-    }
-
-    sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-    let floor = sorted[((sorted.len() - 1) as f32 * 0.08) as usize].min(0.20);
-    let ceiling = sorted[((sorted.len() - 1) as f32 * 0.965) as usize].max(floor + 0.16);
-    (floor, (ceiling - floor).max(0.08))
-}
-
-fn shaped_waveform_height(value: f32, floor: f32, range: f32, rect_height: f32) -> f32 {
-    let normalized = ((value.clamp(0.0, 1.0) - floor) / range.max(0.001)).clamp(0.0, 1.0);
-    let shaped = normalized.powf(0.70);
-    let min_height = rect_height * 0.045;
-    let max_height = rect_height * 0.94;
-    (min_height + shaped * (max_height - min_height)).clamp(2.0, rect_height - 4.0)
+    // AIMP-style seek waveforms are an amplitude envelope, not a full-height VU
+    // meter. Keep the ceiling below the full rectangle so mastered radio streams
+    // still show musical movement instead of a saturated barcode.
+    let shaped = value.powf(if live { 1.18 } else { 1.08 });
+    let min_height = rect_height * 0.035;
+    let max_height = rect_height * if live { 0.64 } else { 0.78 };
+    (min_height + shaped * (max_height - min_height)).clamp(1.1, rect_height - 6.0)
 }
 
 fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egui::Response {
@@ -5677,12 +5663,12 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
 
     painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(210));
 
-    let bar_count = (rect.width() / 2.8).round().clamp(80.0, 900.0) as usize;
+    let bar_count = (rect.width() / 3.4).round().clamp(64.0, 520.0) as usize;
     let gap = 0.75;
     let bar_width = ((rect.width() - gap * bar_count.saturating_sub(1) as f32) / bar_count.max(1) as f32)
         .clamp(0.65, 2.2);
     let pitch = bar_width + gap;
-    let bucket_seconds = if frame.bucket_seconds > 0.0 { frame.bucket_seconds } else { 1.0 / 18.0 };
+    let bucket_seconds = if frame.bucket_seconds > 0.0 { frame.bucket_seconds } else { 1.0 / 12.0 };
 
     let center_y = rect.center().y;
     let base_color = waveform_bar_color(ui, false, false).linear_multiply(0.72);
@@ -5692,9 +5678,7 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
         draw_waveform_bar(painter, x1, x2, center_y, 1.1, base_color);
     }
 
-    let visible_values = frame.bars.iter().map(|bar| bar.peak).collect::<Vec<_>>();
-    let (floor, range) = waveform_dynamic_range(&visible_values);
-    let active_color = waveform_bar_color(ui, true, false);
+    let active_color = ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.88);
 
     for bar in &frame.bars {
         let offset = bar.age_seconds.max(0.0) / bucket_seconds;
@@ -5708,7 +5692,7 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
         if value <= 0.004 {
             continue;
         }
-        let height = shaped_waveform_height(value, floor, range, rect.height());
+        let height = shaped_waveform_height(value, rect.height(), true);
         draw_waveform_bar(
             painter,
             x1.max(rect.left()),
@@ -5752,8 +5736,6 @@ fn draw_waveform_seek(
     let bar_width = ((rect.width() - gap * rendered_points.saturating_sub(1) as f32) / rendered_points.max(1) as f32)
         .clamp(0.75, 2.2);
 
-    let (floor, range) = waveform_dynamic_range(waveform);
-
     for (bar_index, chunk) in waveform.chunks(step).enumerate() {
         let value = chunk
             .iter()
@@ -5766,7 +5748,7 @@ fn draw_waveform_seek(
             break;
         }
 
-        let height = shaped_waveform_height(value, floor, range, rect.height());
+        let height = shaped_waveform_height(value, rect.height(), false);
         let bar_start_seconds = if duration_seconds > 0.0 {
             (bar_index * step) as f32 / waveform.len().max(1) as f32 * duration_seconds
         } else {
