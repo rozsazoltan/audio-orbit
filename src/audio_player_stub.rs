@@ -2,6 +2,7 @@ use crate::dsp::DspSettings;
 use anyhow::Result;
 use std::{
     path::{Path, PathBuf},
+    sync::{atomic::AtomicBool, Arc},
     time::Instant,
 };
 
@@ -20,6 +21,11 @@ pub struct PlaybackInfo {
 
 pub struct PreparedPlayback;
 
+#[derive(Clone)]
+pub struct RadioRecorderHandle;
+
+pub struct PreparedRadioPlayback;
+
 #[derive(Clone, Debug)]
 pub struct RadioRecordingInfo {
     pub path: PathBuf,
@@ -31,9 +37,6 @@ pub struct RadioRecordingInfo {
 pub struct RadioVisualizerBar {
     pub age_seconds: f32,
     pub peak: f32,
-    pub low: f32,
-    pub mid: f32,
-    pub high: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -63,9 +66,23 @@ impl AudioPlayer {
         self.volume_percent = volume_percent.clamp(0, 100);
     }
 
-    pub fn play_radio_stream(&mut self, _url: &str, _settings: DspSettings) -> Result<()> {
+    pub fn radio_recorder_handle(&self) -> RadioRecorderHandle {
+        RadioRecorderHandle
+    }
+
+    pub fn prepare_radio_stream(
+        _url: String,
+        _settings: DspSettings,
+        _recorder: RadioRecorderHandle,
+    ) -> Result<PreparedRadioPlayback> {
         anyhow::bail!(unsupported_audio_message())
     }
+
+    pub fn play_prepared_radio_stream(&mut self, _prepared: PreparedRadioPlayback) -> Result<()> {
+        anyhow::bail!(unsupported_audio_message())
+    }
+
+
 
     pub fn is_radio_recording(&self) -> bool {
         false
@@ -94,9 +111,18 @@ impl AudioPlayer {
 
 
     pub fn prepare_file(
+        path: PathBuf,
+        settings: DspSettings,
+        start_seconds: f32,
+    ) -> Result<PreparedPlayback> {
+        Self::prepare_file_with_cancel(path, settings, start_seconds, None)
+    }
+
+    pub fn prepare_file_with_cancel(
         _path: PathBuf,
         _settings: DspSettings,
         _start_seconds: f32,
+        _cancel: Option<Arc<AtomicBool>>,
     ) -> Result<PreparedPlayback> {
         anyhow::bail!(unsupported_audio_message())
     }

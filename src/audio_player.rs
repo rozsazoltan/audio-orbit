@@ -12,7 +12,10 @@ use std::{
     fs::File,
     io::{self, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -21,8 +24,8 @@ const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 20;
 const RADIO_VISUALIZER_VISIBLE_SECONDS: f32 = 15.0;
 const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 18;
 const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
-const MAX_DECODED_SOURCE_SAMPLES: usize = 96_000_000;
-const MAX_RENDERED_STEREO_SAMPLES: usize = 96_000_000;
+const MAX_DECODED_SOURCE_SAMPLES: usize = 48_000_000;
+const MAX_RENDERED_STEREO_SAMPLES: usize = 48_000_000;
 const DECODE_RESERVE_CHUNK: usize = 262_144;
 
 #[derive(Clone, Debug)]
@@ -62,6 +65,15 @@ struct ActiveRadioRecording {
 }
 
 type RadioRecordingHandle = Arc<Mutex<Option<ActiveRadioRecording>>>;
+
+#[derive(Clone)]
+pub struct RadioRecorderHandle(RadioRecordingHandle);
+
+pub struct PreparedRadioPlayback {
+    url: String,
+    settings: DspSettings,
+    decoder: Decoder<BufReader<RadioStream<reqwest::blocking::Response>>>,
+}
 
 struct RadioStream<R> {
     inner: Mutex<R>,
@@ -117,18 +129,12 @@ impl<R> Seek for RadioStream<R> {
 struct RadioVisualizerBucket {
     at: Instant,
     peak: f32,
-    low: f32,
-    mid: f32,
-    high: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct RadioVisualizerBar {
     pub age_seconds: f32,
     pub peak: f32,
-    pub low: f32,
-    pub mid: f32,
-    pub high: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -227,9 +233,6 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
             state.peaks.push_back(RadioVisualizerBucket {
                 at: now,
                 peak: bucket.level.clamp(0.0, 1.0),
-                low: bucket.low.clamp(0.0, 1.0),
-                mid: bucket.mid.clamp(0.0, 1.0),
-                high: bucket.high.clamp(0.0, 1.0),
             });
 
             let history = Duration::from_secs(RADIO_VISUALIZER_HISTORY_SECONDS as u64);
@@ -376,20 +379,40 @@ impl AudioPlayer {
         self.volume_percent as f32 / 100.0
     }
 
-    pub fn play_radio_stream(&mut self, url: &str, settings: DspSettings) -> Result<()> {
+
+    pub fn radio_recorder_handle(&self) -> RadioRecorderHandle {
+        RadioRecorderHandle(Arc::clone(&self.radio_recorder))
+    }
+
+    pub fn prepare_radio_stream(
+        url: String,
+        settings: DspSettings,
+        recorder: RadioRecorderHandle,
+    ) -> Result<PreparedRadioPlayback> {
         let response = reqwest::blocking::Client::builder()
             .user_agent("Audio-Orbit-Radio")
+            .connect_timeout(Duration::from_secs(6))
+            .read_timeout(Duration::from_secs(12))
             .build()?
-            .get(url)
+            .get(&url)
             .send()
             .with_context(|| format!("failed to open internet radio stream: {url}"))?
             .error_for_status()
             .with_context(|| format!("internet radio stream returned an error: {url}"))?;
-        let stream = RadioStream::new(response, Arc::clone(&self.radio_recorder));
+        let stream = RadioStream::new(response, recorder.0);
         let decoder = Decoder::new(BufReader::new(stream))
             .with_context(|| format!("failed to decode internet radio stream: {url}"))?;
 
-        let keep_visualizer_history = self.current_radio_url.as_deref() == Some(url);
+        Ok(PreparedRadioPlayback {
+            url,
+            settings,
+            decoder,
+        })
+    }
+
+    pub fn play_prepared_radio_stream(&mut self, prepared: PreparedRadioPlayback) -> Result<()> {
+        let PreparedRadioPlayback { url, settings, decoder } = prepared;
+        let keep_visualizer_history = self.current_radio_url.as_deref() == Some(url.as_str());
         self.stop();
         if !keep_visualizer_history {
             self.radio_visualizer = Arc::new(Mutex::new(RadioVisualizerState::default()));
@@ -410,10 +433,12 @@ impl AudioPlayer {
         self.current_start_offset_seconds = 0.0;
         self.current_path = None;
         self.current_settings = None;
-        self.current_radio_url = Some(url.to_owned());
+        self.current_radio_url = Some(url);
 
         Ok(())
     }
+
+
 
     pub fn is_radio_recording(&self) -> bool {
         self.radio_recorder
@@ -523,9 +548,6 @@ impl AudioPlayer {
         }
 
         let mut slot_peaks = vec![0.0_f32; requested_points];
-        let mut slot_low = vec![0.0_f32; requested_points];
-        let mut slot_mid = vec![0.0_f32; requested_points];
-        let mut slot_high = vec![0.0_f32; requested_points];
         for bucket in &state.peaks {
             let age_seconds = now.duration_since(bucket.at).as_secs_f32();
             if age_seconds > max_age {
@@ -536,43 +558,26 @@ impl AudioPlayer {
                 continue;
             }
             let slot = requested_points - 1 - slot_from_right;
-            if bucket.peak >= slot_peaks[slot] {
-                slot_peaks[slot] = bucket.peak;
-                slot_low[slot] = bucket.low.clamp(0.0, 1.0);
-                slot_mid[slot] = bucket.mid.clamp(0.0, 1.0);
-                slot_high[slot] = bucket.high.clamp(0.0, 1.0);
-            }
+            slot_peaks[slot] = slot_peaks[slot].max(bucket.peak);
         }
 
         let mut previous_peak = 0.0_f32;
-        let mut previous_low = 0.0_f32;
-        let mut previous_mid = 0.0_f32;
-        let mut previous_high = 0.0_f32;
         let bars = slot_peaks
             .into_iter()
-            .zip(slot_low.into_iter())
-            .zip(slot_mid.into_iter())
-            .zip(slot_high.into_iter())
             .enumerate()
-            .filter_map(|(slot, (((peak, low), mid), high))| {
+            .filter_map(|(slot, peak)| {
                 let shaped = if peak > previous_peak {
                     previous_peak * 0.22 + peak * 0.78
                 } else {
                     previous_peak * 0.70 + peak * 0.30
                 };
                 previous_peak = shaped;
-                previous_low = previous_low * 0.58 + low * 0.42;
-                previous_mid = previous_mid * 0.58 + mid * 0.42;
-                previous_high = previous_high * 0.56 + high * 0.44;
                 if shaped <= 0.003 {
                     return None;
                 }
                 Some(RadioVisualizerBar {
                     age_seconds: (requested_points - 1 - slot) as f32 * bucket_seconds,
                     peak: shaped.clamp(0.0, 1.0),
-                    low: previous_low.clamp(0.0, 1.0),
-                    mid: previous_mid.clamp(0.0, 1.0),
-                    high: previous_high.clamp(0.0, 1.0),
                 })
             })
             .collect();
@@ -584,7 +589,17 @@ impl AudioPlayer {
     }
 
     pub fn prepare_file(path: PathBuf, settings: DspSettings, start_seconds: f32) -> Result<PreparedPlayback> {
-        let (processed_samples, render_info, sample_rate) = render_file_data(&path, settings, start_seconds)?;
+        Self::prepare_file_with_cancel(path, settings, start_seconds, None)
+    }
+
+    pub fn prepare_file_with_cancel(
+        path: PathBuf,
+        settings: DspSettings,
+        start_seconds: f32,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<PreparedPlayback> {
+        let cancel_ref = cancel.as_deref();
+        let (processed_samples, render_info, sample_rate) = render_file_data(&path, settings, start_seconds, cancel_ref)?;
         Ok(PreparedPlayback {
             path,
             settings,
@@ -890,6 +905,7 @@ fn render_file_data(
     path: &Path,
     settings: DspSettings,
     start_seconds: f32,
+    cancel: Option<&AtomicBool>,
 ) -> Result<(Vec<f32>, RenderInfo, u32)> {
     let file = File::open(path)
         .with_context(|| format!("failed to open audio file: {}", path.display()))?;
@@ -902,7 +918,7 @@ fn render_file_data(
         anyhow::bail!("the selected audio file reported an invalid sample rate");
     }
 
-    let input_samples = decode_samples_with_memory_guard(decoder, path)?;
+    let input_samples = decode_samples_with_memory_guard(decoder, path, cancel)?;
     if input_samples.is_empty() {
         anyhow::bail!("the selected audio file did not contain any decoded samples");
     }
@@ -919,8 +935,12 @@ fn render_file_data(
         );
     }
 
+    if is_cancelled(cancel) {
+        anyhow::bail!("playback preparation was cancelled");
+    }
+
     let (processed_samples, render_info) =
-        render_orbit_to_stereo(&input_samples, input_channels, sample_rate, settings, start_seconds);
+        render_orbit_to_stereo(&input_samples, input_channels, sample_rate, settings, start_seconds, cancel)?;
 
     if processed_samples.is_empty() {
         anyhow::bail!("the rendered audio was empty after processing; disable silence skip or seek earlier in the track");
@@ -929,13 +949,24 @@ fn render_file_data(
     Ok((processed_samples, render_info, sample_rate))
 }
 
+fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel
+        .map(|flag| flag.load(Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
 fn decode_samples_with_memory_guard(
     decoder: Decoder<BufReader<File>>,
     path: &Path,
+    cancel: Option<&AtomicBool>,
 ) -> Result<Vec<f32>> {
     let mut samples = Vec::new();
 
     for sample in decoder.convert_samples::<f32>() {
+        if (samples.len() & 16_383) == 0 && is_cancelled(cancel) {
+            anyhow::bail!("playback preparation was cancelled");
+        }
+
         if samples.len() >= MAX_DECODED_SOURCE_SAMPLES {
             anyhow::bail!(
                 "the selected audio file is too large for the current in-memory decoder ({} decoded samples limit): {}",

@@ -240,3 +240,11 @@ Copyright (C) 2020–present [Zoltán Rózsa](https://github.com/rozsazoltan)
 
 Audio Orbit intentionally uses a clean one-color waveform lane instead of RGB/spectrum bars. The UI layer is simple and readable: gray for unplayed waveform, blue for played waveform, and yellow for silence ranges that will be skipped. The local-file and live-radio analyzers share the same peak/RMS/transient shaping rules so both views stay visually consistent.
 
+
+### Performance and safety
+
+Audio Orbit keeps the UI responsive by running expensive track preparation outside the UI thread. Starting another track cancels the previous preparation request so multiple large decodes do not compete for memory. Internet radio startup also runs off the UI thread, with connection/read timeouts so a broken stream cannot freeze the window.
+
+Waveform cache data is runtime-only and is not written into the app state or backup ZIP. This keeps large libraries and backups small and avoids slow JSON saves when thousands of tracks are present.
+
+The current Windows engine still prepares local files in memory before processed playback starts. It has strict allocation guards and cancellation checks, but a future breaking core engine should move playback to a streaming/segment pipeline for instant start, bounded waveform analysis, and lower memory use.

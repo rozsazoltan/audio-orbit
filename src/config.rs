@@ -73,9 +73,11 @@ pub struct Track {
     pub group: String,
     #[serde(default)]
     pub metadata: TrackMetadata,
-    #[serde(default)]
+    // Runtime waveform cache. This is intentionally not serialized because thousands of tracks can
+    // turn the app state into a huge JSON file and make save/backup/update operations feel frozen.
+    #[serde(skip)]
     pub waveform: Vec<f32>,
-    #[serde(default)]
+    #[serde(skip)]
     pub waveform_brightness: Vec<f32>,
 }
 

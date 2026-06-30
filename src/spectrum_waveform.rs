@@ -5,9 +5,6 @@ const MAX_ANALYSIS_WINDOW: usize = 4096;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SpectrumBucket {
     pub level: f32,
-    pub low: f32,
-    pub mid: f32,
-    pub high: f32,
 }
 
 /// Build an AIMP-style overview waveform from decoded PCM samples.
@@ -39,15 +36,9 @@ pub fn spectrum_waveform(samples: &[f32], sample_rate: u32, points: usize) -> (V
     normalize_waveform_levels(&mut levels);
     smooth_waveform_levels(&mut levels);
 
-    // Kept for backwards compatibility with the cached track metadata schema.
-    // The current renderer ignores these packed values because Audio Orbit now
-    // uses a clean one-color AIMP-style lane.
-    let mut packed = Vec::with_capacity(levels.len() * 3);
-    for level in &levels {
-        packed.extend_from_slice(&[*level, *level, *level]);
-    }
-
-    (levels, packed)
+    // The renderer no longer uses a secondary RGB/spectrum lane. Keep the vector
+    // empty so track metadata stays lightweight at runtime.
+    (levels, Vec::new())
 }
 
 pub struct LiveSpectrumAnalyzer {
@@ -100,12 +91,7 @@ impl LiveSpectrumAnalyzer {
         let raw = analyze_amplitude_bucket(&ordered, self.previous_bucket.level);
         let normalized = self.normalize_live_level(raw.level);
         let level = smooth_attack_release(normalized, self.previous_bucket.level, 0.38, 0.12);
-        let bucket = SpectrumBucket {
-            level,
-            low: level,
-            mid: level,
-            high: level,
-        };
+        let bucket = SpectrumBucket { level };
         self.previous_bucket = bucket;
         Some(bucket)
     }
@@ -165,12 +151,7 @@ fn analyze_amplitude_bucket(samples: &[f32], previous_level: f32) -> SpectrumBuc
         + crest.clamp(0.0, 1.0) * 0.04;
     let level = smooth_attack_release(raw_level.clamp(0.0, 1.0), previous_level, 0.58, 0.24);
 
-    SpectrumBucket {
-        level,
-        low: level,
-        mid: level,
-        high: level,
-    }
+    SpectrumBucket { level }
 }
 
 fn normalize_waveform_levels(levels: &mut [f32]) {

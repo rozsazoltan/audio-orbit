@@ -15,7 +15,7 @@ mod ui_icons;
 mod updater;
 
 use crate::{
-    audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo, PreparedPlayback, RadioVisualizerFrame},
+    audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo, PreparedPlayback, PreparedRadioPlayback, RadioVisualizerFrame},
     config::{
         app_data_dir, collect_audio_files_from_folder, display_file_name, export_state_zip,
         import_state_zip, load_state, same_path, save_state, LastPlayedTrack, Playlist, PlaylistKind, RadioStation, RepeatMode, SavedState,
@@ -32,7 +32,10 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::Command,
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -151,6 +154,7 @@ struct PendingTrackSwitch {
 }
 
 struct PreparedTrackPlayback {
+    request_id: u64,
     playlist_index: usize,
     index: Option<usize>,
     crossfade_seconds: f32,
@@ -159,6 +163,13 @@ struct PreparedTrackPlayback {
     previous_duration: Option<f32>,
     prepared: PreparedPlayback,
     requested_at: Instant,
+}
+
+struct PreparedRadioPlaybackMessage {
+    request_id: u64,
+    index: usize,
+    station: RadioStation,
+    prepared: PreparedRadioPlayback,
 }
 
 #[derive(Clone, Debug)]
@@ -234,6 +245,10 @@ struct AudioOrbitApp {
     crossfade_started_for_path: Option<PathBuf>,
     pending_track_switch: Option<PendingTrackSwitch>,
     pending_prepared_track_receiver: Option<mpsc::Receiver<Result<PreparedTrackPlayback, String>>>,
+    pending_prepare_cancel: Option<Arc<AtomicBool>>,
+    prepare_request_id: u64,
+    pending_radio_playback_receiver: Option<mpsc::Receiver<Result<PreparedRadioPlaybackMessage, String>>>,
+    radio_playback_request_id: u64,
     pending_profile_apply_at: Option<Instant>,
     suppress_window_geometry_save_until: Option<Instant>,
     show_folder_import_modal: bool,
@@ -315,6 +330,10 @@ impl AudioOrbitApp {
                     crossfade_started_for_path: None,
                     pending_track_switch: None,
                     pending_prepared_track_receiver: None,
+                    pending_prepare_cancel: None,
+                    prepare_request_id: 0,
+                    pending_radio_playback_receiver: None,
+                    radio_playback_request_id: 0,
                     pending_profile_apply_at: None,
                     suppress_window_geometry_save_until: None,
                     show_folder_import_modal: false,
@@ -383,6 +402,10 @@ impl AudioOrbitApp {
                 crossfade_started_for_path: None,
                 pending_track_switch: None,
                 pending_prepared_track_receiver: None,
+                pending_prepare_cancel: None,
+                prepare_request_id: 0,
+                pending_radio_playback_receiver: None,
+                radio_playback_request_id: 0,
                 pending_profile_apply_at: None,
                 suppress_window_geometry_save_until: None,
                 show_folder_import_modal: false,
@@ -854,19 +877,78 @@ impl AudioOrbitApp {
             return;
         };
         let settings = self.current_settings();
+        let Some(player) = &self.player else {
+            self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+            return;
+        };
+
+        self.radio_playback_request_id = self.radio_playback_request_id.wrapping_add(1);
+        let request_id = self.radio_playback_request_id;
+        let recorder = player.radio_recorder_handle();
+        let (sender, receiver) = mpsc::channel();
+        let url = station.url.clone();
+        let station_for_thread = station.clone();
+
+        self.pending_radio_playback_receiver = Some(receiver);
+        self.active_tab = MainContentTab::Radio;
+        self.state.selected_radio_index = Some(index);
+        self.radio_selection_was_user_set = true;
+        self.status_message = format!("Opening internet radio: {}...", station.name);
+        self.error_message = None;
+
+        thread::spawn(move || {
+            let result = AudioPlayer::prepare_radio_stream(url, settings, recorder)
+                .map(|prepared| PreparedRadioPlaybackMessage {
+                    request_id,
+                    index,
+                    station: station_for_thread,
+                    prepared,
+                })
+                .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+    }
+
+    fn process_radio_playback_events(&mut self) {
+        let Some(receiver) = &self.pending_radio_playback_receiver else {
+            return;
+        };
+
+        let message = match receiver.try_recv() {
+            Ok(message) => message,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.pending_radio_playback_receiver = None;
+                return;
+            }
+        };
+
+        self.pending_radio_playback_receiver = None;
+        let prepared = match message {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.error_message = Some(error);
+                self.status_message = "Internet radio playback failed.".to_owned();
+                return;
+            }
+        };
+
+        if prepared.request_id != self.radio_playback_request_id {
+            self.status_message = "Ignored stale internet radio startup result.".to_owned();
+            return;
+        }
+
         let Some(player) = &mut self.player else {
             self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
             return;
         };
 
-        self.status_message = format!("Opening internet radio: {}...", station.name);
-        self.error_message = None;
-        match player.play_radio_stream(&station.url, settings) {
+        match player.play_prepared_radio_stream(prepared.prepared) {
             Ok(()) => {
                 self.active_tab = MainContentTab::Radio;
-                self.active_radio_index = Some(index);
-                self.active_radio_station_name = station.last_station_name.clone();
-                self.active_radio_title = station.last_stream_title.clone();
+                self.active_radio_index = Some(prepared.index);
+                self.active_radio_station_name = prepared.station.last_station_name.clone();
+                self.active_radio_title = prepared.station.last_stream_title.clone();
                 self.radio_started_at = Some(Instant::now());
                 self.last_radio_title_lookup_at = Some(Instant::now());
                 self.active_track_index = None;
@@ -874,11 +956,11 @@ impl AudioOrbitApp {
                 self.active_track_path = None;
                 self.last_playback = None;
                 self.pending_track_switch = None;
-                self.state.selected_radio_index = Some(index);
+                self.state.selected_radio_index = Some(prepared.index);
                 self.radio_selection_was_user_set = true;
-                self.status_message = format!("Playing internet radio: {}.", station.name);
+                self.status_message = format!("Playing internet radio: {}.", prepared.station.name);
                 self.save_state_silently();
-                self.start_radio_title_lookup(index, station.url);
+                self.start_radio_title_lookup(prepared.index, prepared.station.url);
             }
             Err(error) => {
                 self.error_message = Some(error.to_string());
@@ -1274,10 +1356,19 @@ impl AudioOrbitApp {
         } else {
             None
         };
+        if let Some(cancel) = self.pending_prepare_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+
+        self.prepare_request_id = self.prepare_request_id.wrapping_add(1);
+        let request_id = self.prepare_request_id;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_thread = Arc::clone(&cancel);
         let requested_at = Instant::now();
         let (sender, receiver) = mpsc::channel();
         let path_for_thread = path.clone();
 
+        self.pending_prepare_cancel = Some(cancel);
         self.pending_prepared_track_receiver = Some(receiver);
         self.status_message = if live_position_compensation {
             "Preparing updated playback without stopping the current audio...".to_owned()
@@ -1289,8 +1380,9 @@ impl AudioOrbitApp {
         self.error_message = None;
 
         thread::spawn(move || {
-            let result = AudioPlayer::prepare_file(path_for_thread, settings, start_seconds)
+            let result = AudioPlayer::prepare_file_with_cancel(path_for_thread, settings, start_seconds, Some(cancel_for_thread))
                 .map(|prepared| PreparedTrackPlayback {
+                    request_id,
                     playlist_index,
                     index,
                     crossfade_seconds,
@@ -1315,14 +1407,20 @@ impl AudioOrbitApp {
             Err(mpsc::TryRecvError::Empty) => return,
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.pending_prepared_track_receiver = None;
+                self.pending_prepare_cancel = None;
                 return;
             }
         };
 
         self.pending_prepared_track_receiver = None;
+        self.pending_prepare_cancel = None;
         let prepared = match message {
             Ok(prepared) => prepared,
             Err(error) => {
+                if error.contains("cancelled") {
+                    self.status_message = "Playback preparation was replaced by a newer request.".to_owned();
+                    return;
+                }
                 self.error_message = Some(error);
                 self.status_message = "Playback preparation failed.".to_owned();
                 return;
@@ -1330,6 +1428,7 @@ impl AudioOrbitApp {
         };
 
         let PreparedTrackPlayback {
+            request_id,
             playlist_index,
             index,
             crossfade_seconds,
@@ -1339,6 +1438,11 @@ impl AudioOrbitApp {
             prepared: prepared_audio,
             requested_at,
         } = prepared;
+
+        if request_id != self.prepare_request_id {
+            self.status_message = "Ignored stale playback preparation result.".to_owned();
+            return;
+        }
 
         let Some(player) = &mut self.player else {
             self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
@@ -1750,6 +1854,14 @@ impl AudioOrbitApp {
     }
 
     fn stop(&mut self) {
+        if let Some(cancel) = self.pending_prepare_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.pending_prepared_track_receiver = None;
+        self.prepare_request_id = self.prepare_request_id.wrapping_add(1);
+        self.pending_radio_playback_receiver = None;
+        self.radio_playback_request_id = self.radio_playback_request_id.wrapping_add(1);
+
         if let Some(player) = &mut self.player {
             player.stop();
         }
@@ -2383,6 +2495,11 @@ impl Drop for AudioOrbitApp {
             });
             self.selected_track_index = Some(index);
         }
+        if let Some(cancel) = self.pending_prepare_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.pending_prepared_track_receiver = None;
+        self.pending_radio_playback_receiver = None;
         if let Some(player) = &mut self.player {
             player.stop();
         }
@@ -2405,6 +2522,7 @@ impl eframe::App for AudioOrbitApp {
         self.process_update_check_events();
         self.process_escape_navigation(context);
         self.process_keyboard_shortcuts(context);
+        self.process_radio_playback_events();
         self.process_radio_title_events();
         self.refresh_radio_title_periodically();
         self.process_pending_profile_apply();
