@@ -1027,7 +1027,7 @@ impl AudioOrbitApp {
     fn export_app_backup(&mut self) {
         let Some(path) = FileDialog::new()
             .add_filter("Audio Orbit backup", &["zip"])
-            .set_file_name("audio-orbit-backup.zip")
+            .set_file_name(default_backup_file_name())
             .save_file()
         else {
             return;
@@ -1868,6 +1868,107 @@ impl AudioOrbitApp {
         }
     }
 
+    fn current_radio_recording_name(&self) -> String {
+        if let Some(index) = self.active_radio_index {
+            if let Some(station) = self.state.radio_stations.get(index) {
+                return self
+                    .active_radio_station_name
+                    .clone()
+                    .or_else(|| station.last_station_name.clone())
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| station.name.clone());
+            }
+        }
+        "internet-radio".to_owned()
+    }
+
+    fn toggle_radio_recording(&mut self) {
+        let is_recording = match self.player.as_ref() {
+            Some(player) => player.is_radio_recording(),
+            None => {
+                self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+                return;
+            }
+        };
+
+        if is_recording {
+            let result = self.player.as_mut().map(|player| player.stop_radio_recording());
+            match result {
+                Some(Ok(Some(info))) => {
+                    self.status_message = format!(
+                        "Saved radio recording: {} ({}).",
+                        info.path.display(),
+                        format_file_size(info.bytes_written)
+                    );
+                    self.error_message = None;
+                }
+                Some(Ok(None)) => {
+                    self.status_message = "No active radio recording.".to_owned();
+                }
+                Some(Err(error)) => {
+                    self.error_message = Some(error.to_string());
+                }
+                None => {
+                    self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+                }
+            }
+            return;
+        }
+
+        if self.active_radio_index.is_none() {
+            self.error_message = Some("Start an internet radio station before recording.".to_owned());
+            return;
+        }
+
+        let folder = self.state.recording.resolved_output_folder();
+        let station_name = self.current_radio_recording_name();
+        let stream_title = self.active_radio_title.clone();
+        let result = self
+            .player
+            .as_mut()
+            .map(|player| player.start_radio_recording(&folder, &station_name, stream_title.as_deref()));
+        match result {
+            Some(Ok(path)) => {
+                self.status_message = format!("Recording internet radio to {}.", path.display());
+                self.error_message = None;
+            }
+            Some(Err(error)) => {
+                self.error_message = Some(error.to_string());
+            }
+            None => {
+                self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+            }
+        }
+    }
+
+    fn choose_recording_folder(&mut self) {
+        let initial_dir = self.state.recording.resolved_output_folder();
+        let mut dialog = FileDialog::new();
+        if initial_dir.exists() {
+            dialog = dialog.set_directory(initial_dir);
+        }
+        if let Some(path) = dialog.pick_folder() {
+            self.state.recording.output_folder = Some(path.clone());
+            self.status_message = format!("Radio recordings folder set to {}.", path.display());
+            self.error_message = None;
+            self.save_state_silently();
+        }
+    }
+
+    fn open_recording_folder(&mut self) {
+        let folder = self.state.recording.resolved_output_folder();
+        let result = fs::create_dir_all(&folder).and_then(|_| {
+            reveal_in_file_manager(&folder)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.to_string()))
+        });
+        if let Err(error) = result {
+            self.error_message = Some(format!("Failed to open recording folder: {error}"));
+        } else {
+            self.status_message = format!("Opened radio recordings folder: {}.", folder.display());
+            self.error_message = None;
+        }
+    }
+
     fn save_state_silently(&mut self) {
         if let Err(error) = save_state(&self.state) {
             self.error_message = Some(error.to_string());
@@ -2535,6 +2636,31 @@ impl AudioOrbitApp {
                 .clicked()
             {
                 self.stop();
+            }
+
+            if radio_controls_active {
+                let is_recording = self.player.as_ref().map(|player| player.is_radio_recording()).unwrap_or(false);
+                let record_color = if is_recording {
+                    egui::Color32::from_rgb(255, 84, 84)
+                } else {
+                    ui.visuals().widgets.inactive.fg_stroke.color
+                };
+                let record_button = egui::Button::new(
+                    egui::RichText::new(ui_icons::icon(Icon::Mic)).size(16.0).color(record_color)
+                );
+                let record_response = ui
+                    .add_enabled(self.player.is_some(), record_button)
+                    .on_hover_text(if is_recording {
+                        "Stop and save radio recording · Right-click to open the recordings folder"
+                    } else {
+                        "Record original internet radio stream · Right-click to open the recordings folder"
+                    });
+                if record_response.clicked() {
+                    self.toggle_radio_recording();
+                }
+                if record_response.secondary_clicked() {
+                    self.open_recording_folder();
+                }
             }
 
             if !radio_controls_active {
@@ -3858,6 +3984,12 @@ impl AudioOrbitApp {
 
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
+            self.render_recording_settings_section(ui);
+        });
+        ui.add_space(12.0);
+
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
             self.render_profile_panel(ui);
         });
     }
@@ -4261,11 +4393,47 @@ impl AudioOrbitApp {
         }
     }
 
+    fn render_recording_settings_section(&mut self, ui: &mut egui::Ui) {
+        ui.heading(ui_icons::label(Icon::Mic, "Recording"));
+        ui.small("Internet radio recordings are saved from the original stream bytes before volume, orbit, silence skip, or any other playback processing.");
+        let folder = self.state.recording.resolved_output_folder();
+        ui.add_space(6.0);
+        ui.label("Radio recording folder");
+        ui.horizontal_wrapped(|ui| {
+            ui.monospace(folder.display().to_string());
+            if ui.button(ui_icons::label(Icon::FolderOpen, "Choose folder..." )).clicked() {
+                self.choose_recording_folder();
+            }
+            if ui.button(ui_icons::label(Icon::ExternalLink, "Open folder" )).clicked() {
+                self.open_recording_folder();
+            }
+            if ui.button("Reset default").clicked() {
+                self.state.recording.output_folder = None;
+                self.status_message = "Radio recording folder reset to .audio-orbit-records next to the executable.".to_owned();
+                self.error_message = None;
+                self.save_state_silently();
+            }
+        });
+
+        if let Some(info) = self.player.as_ref().and_then(|player| player.radio_recording_info()) {
+            ui.add_space(6.0);
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 96, 96),
+                format!(
+                    "Recording: {} · {} · {}",
+                    info.path.display(),
+                    format_duration(info.started_at.elapsed().as_secs_f32()),
+                    format_file_size(info.bytes_written)
+                ),
+            );
+        }
+    }
+
     fn render_backup_settings_section_inner(&mut self, ui: &mut egui::Ui, show_title: bool) {
         if show_title {
             ui.heading("Backup and data");
         }
-        ui.small("The ZIP backup stores the full app state: music folders, playlists, Favorites, sound profiles, playback settings, and update settings.");
+        ui.small("The ZIP backup stores the full app state: music folders, playlists, Favorites, sound profiles, playback settings, and update settings, recording folder settings, and UI settings.");
 
         ui.horizontal_wrapped(|ui| {
             if ui.button(ui_icons::label(Icon::Download, "Export full backup ZIP")).clicked() {
@@ -4816,38 +4984,18 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
         .clamp(0.65, 2.2);
     let pitch = bar_width + gap;
     let bucket_seconds = frame.bucket_seconds.max(0.001);
-
-    let mut active_values: Vec<f32> = frame
-        .points
-        .iter()
-        .map(|point| point.peak)
-        .filter(|value| *value > 0.0008)
-        .collect();
-    active_values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-
-    let percentile = |values: &[f32], pct: f32| -> f32 {
-        if values.is_empty() {
-            return 0.0;
-        }
-        let index = ((values.len().saturating_sub(1)) as f32 * pct.clamp(0.0, 1.0)).round() as usize;
-        values.get(index).copied().unwrap_or(0.0)
-    };
-
-    let noise_floor = percentile(&active_values, 0.08);
-    let body_peak = percentile(&active_values, 0.92).max(0.035);
-    let hard_peak = active_values.last().copied().unwrap_or(body_peak).max(body_peak);
-    let dynamic_range = (body_peak - noise_floor).max(0.025);
     let center_y = rect.center().y;
+    let idle_color = visuals.widgets.inactive.fg_stroke.color.linear_multiply(0.16);
+    let waveform_color = visuals.widgets.inactive.fg_stroke.color.linear_multiply(0.74);
 
     if frame.points.is_empty() {
-        let muted = visuals.widgets.inactive.fg_stroke.color.linear_multiply(0.16);
         for index in 0..bar_count {
             let x1 = rect.left() + index as f32 * pitch;
             let x2 = (x1 + bar_width).min(rect.right());
             painter.rect_filled(
                 egui::Rect::from_min_max(egui::pos2(x1, center_y - 0.45), egui::pos2(x2, center_y + 0.45)),
                 bar_width / 2.0,
-                muted,
+                idle_color,
             );
         }
         return response;
@@ -4856,77 +5004,22 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
     for point in &frame.points {
         let x2 = rect.right() - (point.age_seconds / bucket_seconds) * pitch;
         let x1 = x2 - bar_width;
-        if x1 >= rect.right() {
-            continue;
-        }
-        if x2 <= rect.left() {
+        if x1 >= rect.right() || x2 <= rect.left() {
             continue;
         }
 
-        let value = point.peak;
-        let has_signal = value > 0.0008;
-        let normalized = if has_signal {
-            let main_body = ((value - noise_floor) / dynamic_range).clamp(0.0, 1.0);
-            let transient = (value / hard_peak.max(0.04)).clamp(0.0, 1.0);
-            (main_body * 0.78 + transient * 0.22).clamp(0.0, 1.0).powf(0.82)
-        } else {
-            0.0
-        };
-        let height = if has_signal {
-            (rect.height() * 0.86 * normalized).clamp(2.0, rect.height() * 0.90)
-        } else {
-            0.0
-        };
-        let color = if has_signal {
-            visuals.selection.bg_fill
-        } else {
-            visuals.widgets.inactive.fg_stroke.color.linear_multiply(0.16)
-        };
-
-        if has_signal {
-            let y1 = center_y - height / 2.0;
-            let y2 = center_y + height / 2.0;
-            painter.rect_filled(
-                egui::Rect::from_min_max(egui::pos2(x1.max(rect.left()), y1), egui::pos2(x2.min(rect.right()), y2)),
-                bar_width / 2.0,
-                color,
-            );
-        } else {
-            painter.rect_filled(
-                egui::Rect::from_min_max(
-                    egui::pos2(x1.max(rect.left()), center_y - 0.45),
-                    egui::pos2(x2.min(rect.right()), center_y + 0.45),
-                ),
-                bar_width / 2.0,
-                color,
-            );
-        }
+        let value = point.peak.clamp(0.0, 0.92);
+        let height = (rect.height() * 0.74 * value).clamp(1.0, rect.height() * 0.78);
+        let y1 = center_y - height / 2.0;
+        let y2 = center_y + height / 2.0;
+        painter.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(x1.max(rect.left()), y1), egui::pos2(x2.min(rect.right()), y2)),
+            bar_width / 2.0,
+            waveform_color,
+        );
     }
 
     response
-}
-
-fn resample_time_series(values: &[f32], requested_points: usize) -> Vec<f32> {
-    if requested_points == 0 {
-        return Vec::new();
-    }
-    if values.is_empty() {
-        return vec![0.0; requested_points];
-    }
-    if values.len() == requested_points {
-        return values.to_vec();
-    }
-
-    let mut rendered = Vec::with_capacity(requested_points);
-    let bucket_width = values.len() as f32 / requested_points as f32;
-    for index in 0..requested_points {
-        let start = ((index as f32 * bucket_width).floor() as usize).min(values.len() - 1);
-        let end = (((index + 1) as f32 * bucket_width).ceil() as usize)
-            .max(start + 1)
-            .min(values.len());
-        rendered.push(values[start..end].iter().copied().fold(0.0_f32, f32::max));
-    }
-    rendered
 }
 
 fn draw_waveform_seek(ui: &mut egui::Ui, waveform: &[f32], progress: f32, silence_ranges: &[(f32, f32)], duration_seconds: f32) -> egui::Response {
@@ -4949,31 +5042,20 @@ fn draw_waveform_seek(ui: &mut egui::Ui, waveform: &[f32], progress: f32, silenc
     let gap = 0.85;
     let bar_width = ((rect.width() - gap * rendered_points.saturating_sub(1) as f32) / rendered_points.max(1) as f32)
         .clamp(0.75, 2.2);
-    let peak = waveform
-        .iter()
-        .copied()
-        .fold(0.0_f32, f32::max)
-        .max(0.08);
-    let mut sorted = waveform.to_vec();
-    sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-    let floor_index = ((sorted.len().saturating_sub(1)) as f32 * 0.18) as usize;
-    let noise_floor = sorted.get(floor_index).copied().unwrap_or(0.0).min(peak * 0.65);
-    let dynamic_range = (peak - noise_floor).max(0.04);
 
     for (bar_index, chunk) in waveform.chunks(step).enumerate() {
         let value = chunk
             .iter()
             .copied()
-            .fold(0.0_f32, f32::max);
-        let normalized = ((value - noise_floor) / dynamic_range).clamp(0.025, 1.0);
-        let eased = normalized.powf(0.72);
+            .fold(0.0_f32, f32::max)
+            .clamp(0.0, 0.92);
         let x1 = rect.left() + bar_index as f32 * (bar_width + gap);
         let x2 = (x1 + bar_width).min(rect.right());
         if x1 >= rect.right() {
             break;
         }
 
-        let height = (rect.height() * 0.82 * eased).max(4.0);
+        let height = (rect.height() * 0.76 * value).clamp(1.0, rect.height() * 0.80);
         let y1 = rect.center().y - height / 2.0;
         let y2 = rect.center().y + height / 2.0;
         let bar_start_seconds = if duration_seconds > 0.0 {
@@ -5114,6 +5196,41 @@ fn format_duration(seconds: f32) -> String {
     } else {
         format!("{minutes}:{seconds:02}")
     }
+}
+
+fn default_backup_file_name() -> String {
+    let timestamp = timestamp_for_filename(SystemTime::now());
+    format!("audio-orbit-backup-{timestamp}.zip")
+}
+
+fn timestamp_for_filename(time: SystemTime) -> String {
+    let seconds = time
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let days = (seconds / 86_400) as i64;
+    let seconds_of_day = seconds % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}-{hour:02}-{minute:02}-{second:02}",
+        hour = seconds_of_day / 3_600,
+        minute = (seconds_of_day % 3_600) / 60,
+        second = seconds_of_day % 60,
+    )
+}
+
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += if month <= 2 { 1 } else { 0 };
+    (year as i32, month as u32, day as u32)
 }
 
 fn format_file_size(bytes: u64) -> String {

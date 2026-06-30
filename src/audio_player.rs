@@ -7,15 +7,15 @@ use std::{
     f32::consts::PI,
     fs,
     fs::File,
-    io::{self, BufReader, Read, Seek, SeekFrom},
+    io::{self, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
 
-const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 180;
-const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 6;
+const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 20;
+const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 12;
 const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
 
 #[derive(Clone, Debug)]
@@ -39,16 +39,35 @@ pub struct PreparedPlayback {
     sample_rate: u32,
 }
 
+type RadioRecordingHandle = Arc<Mutex<Option<ActiveRadioRecording>>>;
+
+#[derive(Clone, Debug)]
+pub struct RadioRecordingInfo {
+    pub path: PathBuf,
+    pub started_at: Instant,
+    pub bytes_written: u64,
+}
+
+struct ActiveRadioRecording {
+    path: PathBuf,
+    file: File,
+    started_at: Instant,
+    bytes_written: u64,
+    final_extension: String,
+}
+
 struct RadioStream<R> {
     inner: Mutex<R>,
     position: u64,
+    recorder: RadioRecordingHandle,
 }
 
 impl<R> RadioStream<R> {
-    fn new(inner: R) -> Self {
+    fn new(inner: R, recorder: RadioRecordingHandle) -> Self {
         Self {
             inner: Mutex::new(inner),
             position: 0,
+            recorder,
         }
     }
 }
@@ -61,6 +80,17 @@ impl<R: Read + Send> Read for RadioStream<R> {
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "radio stream lock poisoned"))?;
         let read = inner.read(buffer)?;
         self.position += read as u64;
+
+        if read > 0 {
+            if let Ok(mut recording) = self.recorder.lock() {
+                if let Some(recording) = recording.as_mut() {
+                    if recording.file.write_all(&buffer[..read]).is_ok() {
+                        recording.bytes_written = recording.bytes_written.saturating_add(read as u64);
+                    }
+                }
+            }
+        }
+
         Ok(read)
     }
 }
@@ -189,17 +219,17 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
         } else {
             (self.visualizer_bucket_energy / self.visualizer_bucket_sample_count as f64).sqrt() as f32
         };
-        let envelope = (rms * 1.65 + self.visualizer_current_peak * 0.28).clamp(0.0, 1.0);
+        let envelope = aimp_waveform_envelope(self.visualizer_current_peak, rms);
         let now = Instant::now();
 
         if let Ok(mut state) = self.visualizer.lock() {
             let previous = state.peaks.back().map(|bucket| bucket.peak).unwrap_or(state.smoothed_peak);
             state.smoothed_peak = if envelope > previous {
-                previous * 0.30 + envelope * 0.70
+                previous * 0.42 + envelope * 0.58
             } else {
-                previous * 0.82 + envelope * 0.18
+                previous * 0.88 + envelope * 0.12
             };
-            let display_peak = state.smoothed_peak.clamp(0.0, 1.0);
+            let display_peak = state.smoothed_peak.clamp(0.0, 0.92);
             state.peaks.push_back(RadioVisualizerBucket {
                 at: now,
                 peak: display_peak,
@@ -292,6 +322,15 @@ impl<S: Source<Item = f32>> Source for LiveRadioSource<S> {
     }
 }
 
+fn aimp_waveform_envelope(peak: f32, rms: f32) -> f32 {
+    let peak = peak.abs().max(0.000_01).min(1.0);
+    let rms = rms.abs().max(0.000_01).min(1.0);
+    let db = 20.0 * (rms * 0.82 + peak * 0.18).log10();
+    let body = ((db + 54.0) / 54.0).clamp(0.0, 1.0);
+    let transient = (peak / (rms + 0.020)).clamp(0.0, 5.0) / 5.0;
+    (body.powf(1.34) * 0.82 + transient.powf(1.8) * 0.18).clamp(0.0, 0.92)
+}
+
 fn soft_limit_radio(value: f32) -> f32 {
     (value / (1.0 + value.abs() * 0.12)).clamp(-1.0, 1.0)
 }
@@ -311,6 +350,7 @@ pub struct AudioPlayer {
     current_radio_url: Option<String>,
     volume_percent: u8,
     radio_visualizer: RadioVisualizerHandle,
+    radio_recorder: RadioRecordingHandle,
 }
 
 impl AudioPlayer {
@@ -334,6 +374,7 @@ impl AudioPlayer {
             current_radio_url: None,
             volume_percent: 100,
             radio_visualizer: Arc::new(Mutex::new(RadioVisualizerState::default())),
+            radio_recorder: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -362,7 +403,7 @@ impl AudioPlayer {
             .error_for_status()
             .with_context(|| format!("internet radio stream returned an error: {url}"))?;
 
-        let stream = RadioStream::new(response);
+        let stream = RadioStream::new(response, Arc::clone(&self.radio_recorder));
         let decoder = Decoder::new(BufReader::new(stream))
             .with_context(|| format!("failed to decode internet radio stream: {url}"))?;
 
@@ -390,6 +431,102 @@ impl AudioPlayer {
         self.current_radio_url = Some(url.to_owned());
 
         Ok(())
+    }
+
+    pub fn is_radio_recording(&self) -> bool {
+        self.radio_recorder
+            .lock()
+            .ok()
+            .and_then(|recording| recording.as_ref().map(|_| ()))
+            .is_some()
+    }
+
+    pub fn radio_recording_info(&self) -> Option<RadioRecordingInfo> {
+        self.radio_recorder.lock().ok().and_then(|recording| {
+            recording.as_ref().map(|recording| RadioRecordingInfo {
+                path: recording.path.clone(),
+                started_at: recording.started_at,
+                bytes_written: recording.bytes_written,
+            })
+        })
+    }
+
+    pub fn start_radio_recording(
+        &mut self,
+        output_folder: &Path,
+        station_name: &str,
+        stream_title: Option<&str>,
+    ) -> Result<PathBuf> {
+        if self.current_radio_url.is_none() {
+            anyhow::bail!("start an internet radio station before recording");
+        }
+        if self.is_radio_recording() {
+            if let Some(info) = self.radio_recording_info() {
+                return Ok(info.path);
+            }
+        }
+
+        fs::create_dir_all(output_folder)
+            .with_context(|| format!("failed to create recording folder: {}", output_folder.display()))?;
+
+        let extension = self
+            .current_radio_url
+            .as_deref()
+            .and_then(recording_extension_from_url)
+            .unwrap_or("mp3")
+            .to_owned();
+        let stem = recording_start_stem(station_name, stream_title);
+        let path = unique_recording_path(output_folder, &stem, "part");
+        let file = File::create(&path)
+            .with_context(|| format!("failed to create recording file: {}", path.display()))?;
+
+        let mut recorder = self
+            .radio_recorder
+            .lock()
+            .map_err(|_| anyhow::anyhow!("radio recorder lock poisoned"))?;
+        *recorder = Some(ActiveRadioRecording {
+            path: path.clone(),
+            file,
+            started_at: Instant::now(),
+            bytes_written: 0,
+            final_extension: extension,
+        });
+
+        Ok(path)
+    }
+
+    pub fn stop_radio_recording(&mut self) -> Result<Option<RadioRecordingInfo>> {
+        let mut recorder = self
+            .radio_recorder
+            .lock()
+            .map_err(|_| anyhow::anyhow!("radio recorder lock poisoned"))?;
+        let Some(mut recording) = recorder.take() else {
+            return Ok(None);
+        };
+
+        recording.file.flush()?;
+        drop(recording.file);
+
+        let output_folder = recording
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let stem = recording.path.file_stem().and_then(|value| value.to_str()).unwrap_or("audio-orbit-radio-recording");
+        let final_path = unique_recording_path(&output_folder, stem, &recording.final_extension);
+        fs::rename(&recording.path, &final_path).with_context(|| {
+            format!(
+                "failed to finalize recording from {} to {}",
+                recording.path.display(),
+                final_path.display()
+            )
+        })?;
+
+        Ok(Some(RadioRecordingInfo {
+            path: final_path,
+            started_at: recording.started_at,
+            bytes_written: recording.bytes_written,
+        }))
     }
 
     pub fn radio_visualizer_frame(&self, requested_points: usize) -> RadioVisualizerFrame {
@@ -564,6 +701,7 @@ impl AudioPlayer {
         self.current_path = None;
         self.current_settings = None;
         self.current_radio_url = None;
+        let _ = self.stop_radio_recording();
     }
 
     pub fn pause_or_resume(&mut self) {
@@ -689,6 +827,103 @@ fn fade_out_and_stop(sink: Sink, fade_seconds: f32, base_volume: f32) {
         }
         sink.stop();
     });
+}
+
+
+fn recording_start_stem(station_name: &str, stream_title: Option<&str>) -> String {
+    let mut parts = vec!["audio-orbit-radio".to_owned(), timestamp_for_filename()];
+    let station = sanitize_file_stem(station_name);
+    if !station.is_empty() {
+        parts.push(station);
+    }
+    if let Some(title) = stream_title.map(sanitize_file_stem).filter(|title| !title.is_empty()) {
+        parts.push(title);
+    }
+    parts.join("-")
+}
+
+fn recording_extension_from_url(url: &str) -> Option<&'static str> {
+    let clean = url.split('?').next().unwrap_or(url).split('#').next().unwrap_or(url);
+    let extension = Path::new(clean).extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "mp3" => Some("mp3"),
+        "aac" => Some("aac"),
+        "m4a" => Some("m4a"),
+        "ogg" | "oga" => Some("ogg"),
+        "opus" => Some("opus"),
+        _ => None,
+    }
+}
+
+fn unique_recording_path(folder: &Path, stem: &str, extension: &str) -> PathBuf {
+    let safe_stem = sanitize_file_stem(stem);
+    let stem = if safe_stem.is_empty() {
+        "audio-orbit-radio".to_owned()
+    } else {
+        safe_stem
+    };
+    let extension = extension.trim_start_matches('.');
+    let mut candidate = folder.join(format!("{stem}.{extension}"));
+    for copy_index in 1..10_000 {
+        if !candidate.exists() {
+            return candidate;
+        }
+        candidate = folder.join(format!("{stem}-{copy_index:03}.{extension}"));
+    }
+    candidate
+}
+
+fn sanitize_file_stem(value: &str) -> String {
+    let mut output = String::with_capacity(value.len().min(96));
+    for character in value.trim().chars() {
+        let replacement = match character {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
+            '\u{0000}'..='\u{001f}' => '-',
+            _ => character,
+        };
+        output.push(replacement);
+        if output.len() >= 96 {
+            break;
+        }
+    }
+    output.trim_matches(|ch| ch == ' ' || ch == '.' || ch == '-').to_owned()
+}
+
+fn timestamp_for_filename() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let (year, month, day, hour, minute, second) = utc_components(seconds);
+    format!("{year:04}-{month:02}-{day:02}-{hour:02}-{minute:02}-{second:02}")
+}
+
+fn utc_components(seconds: u64) -> (i32, u32, u32, u32, u32, u32) {
+    let days = (seconds / 86_400) as i64;
+    let seconds_of_day = seconds % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    (
+        year,
+        month,
+        day,
+        (seconds_of_day / 3_600) as u32,
+        ((seconds_of_day % 3_600) / 60) as u32,
+        (seconds_of_day % 60) as u32,
+    )
+}
+
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += if month <= 2 { 1 } else { 0 };
+    (year as i32, month as u32, day as u32)
 }
 
 pub fn current_default_output_device_name() -> String {

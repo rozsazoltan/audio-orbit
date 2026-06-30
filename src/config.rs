@@ -313,6 +313,28 @@ impl DspProfile {
     }
 }
 
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RecordingSettings {
+    #[serde(default)]
+    pub output_folder: Option<PathBuf>,
+}
+
+impl RecordingSettings {
+    pub fn resolved_output_folder(&self) -> PathBuf {
+        self.output_folder
+            .clone()
+            .or_else(default_recording_output_folder)
+            .unwrap_or_else(|| PathBuf::from(".audio-orbit-records"))
+    }
+}
+
+pub fn default_recording_output_folder() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(".audio-orbit-records")))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UpdateSettings {
     #[serde(default)]
@@ -483,6 +505,8 @@ pub struct SavedState {
     #[serde(default)]
     pub playback: PlaybackSettings,
     #[serde(default)]
+    pub recording: RecordingSettings,
+    #[serde(default)]
     pub ui: UiSettings,
 }
 
@@ -508,6 +532,7 @@ impl Default for SavedState {
             last_played_track: None,
             update_settings: UpdateSettings::default(),
             playback: PlaybackSettings::default(),
+            recording: RecordingSettings::default(),
             ui: UiSettings::default(),
         }
     }

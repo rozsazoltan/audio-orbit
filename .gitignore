@@ -4,3 +4,7 @@
 *.rs.bk
 *.pdb
 .DS_Store
+/.cache
+/.audio-orbit-data
+/.audio-orbit-records
+*.zip

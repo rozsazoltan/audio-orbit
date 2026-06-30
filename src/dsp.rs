@@ -609,14 +609,32 @@ fn waveform_peaks(samples: &[f32], points: usize) -> Vec<f32> {
 
     let chunk_size = (samples.len() / points).max(1);
     let mut peaks = Vec::with_capacity(points);
+    let mut previous = 0.0_f32;
 
     for chunk in samples.chunks(chunk_size).take(points) {
-        let peak = chunk
-            .iter()
-            .map(|sample| sample.abs())
-            .fold(0.0_f32, f32::max)
-            .min(1.0);
-        peaks.push(peak);
+        let mut peak = 0.0_f32;
+        let mut energy = 0.0_f64;
+        let mut count = 0usize;
+
+        for sample in chunk {
+            let level = sample.abs().min(1.0);
+            peak = peak.max(level);
+            energy += (level as f64) * (level as f64);
+            count += 1;
+        }
+
+        let rms = if count == 0 {
+            0.0
+        } else {
+            (energy / count as f64).sqrt() as f32
+        };
+        let envelope = aimp_waveform_envelope(peak, rms);
+        previous = if envelope > previous {
+            previous * 0.35 + envelope * 0.65
+        } else {
+            previous * 0.76 + envelope * 0.24
+        };
+        peaks.push(previous.clamp(0.0, 0.92));
     }
 
     while peaks.len() < points {
@@ -624,6 +642,15 @@ fn waveform_peaks(samples: &[f32], points: usize) -> Vec<f32> {
     }
 
     peaks
+}
+
+fn aimp_waveform_envelope(peak: f32, rms: f32) -> f32 {
+    let peak = peak.abs().max(0.000_01).min(1.0);
+    let rms = rms.abs().max(0.000_01).min(1.0);
+    let db = 20.0 * (rms * 0.82 + peak * 0.18).log10();
+    let body = ((db + 54.0) / 54.0).clamp(0.0, 1.0);
+    let transient = (peak / (rms + 0.020)).clamp(0.0, 5.0) / 5.0;
+    (body.powf(1.34) * 0.82 + transient.powf(1.8) * 0.18).clamp(0.0, 0.92)
 }
 
 fn smooth_value(previous: f32, target: f32, smoothing_coeff: f32) -> f32 {
