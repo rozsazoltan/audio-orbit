@@ -1,40 +1,50 @@
 param(
-    [string]$Distro = "CentOS-Stream-9",
-    [string]$WslProjectPath = "/github/rozsazoltan/audio-orbit",
-    [string]$WindowsProjectPath = "D:\github\rozsazoltan\audio-orbit",
-    [string]$SessionName = "audio-orbit-win-dev"
+    [string]$SessionName = "audio-orbit-win-dev",
+    [string]$WindowsProjectPath
 )
 
 $ErrorActionPreference = "Stop"
 
-function Convert-WslPathToUnc {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$DistroName,
-        [Parameter(Mandatory = $true)]
-        [string]$LinuxPath
-    )
-
-    $Normalized = $LinuxPath.Trim()
-    if (-not $Normalized.StartsWith("/")) {
-        throw "WSL project path must be an absolute Linux path, for example /github/rozsazoltan/audio-orbit."
+function Get-WorkspaceRoot {
+    if (-not $PSScriptRoot) {
+        throw "This script must be run from a saved .ps1 file inside the repository scripts directory."
     }
 
-    $Relative = $Normalized.TrimStart([char]"/").Replace("/", "\")
-    return "\\wsl$\$DistroName\$Relative"
+    return (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 }
 
 if (-not (Get-Command mutagen -ErrorAction SilentlyContinue)) {
     throw "Mutagen was not found on PATH. Install mutagen.exe on Windows first, then reopen PowerShell."
 }
 
-$WslProjectUnc = Convert-WslPathToUnc -DistroName $Distro -LinuxPath $WslProjectPath
+$SourceWorkspace = Get-WorkspaceRoot
 
-if (-not (Test-Path $WslProjectUnc)) {
-    throw "WSL project path was not found from Windows: $WslProjectUnc"
+if (-not (Test-Path $SourceWorkspace)) {
+    throw "Workspace root was not found: $SourceWorkspace"
 }
 
-New-Item -ItemType Directory -Force -Path $WindowsProjectPath | Out-Null
+Write-Host "Audio Orbit Mutagen Windows development setup"
+Write-Host ""
+Write-Host "Source workspace: $SourceWorkspace"
+Write-Host ""
+
+if ([string]::IsNullOrWhiteSpace($WindowsProjectPath)) {
+    $WindowsProjectPath = Read-Host "Windows mirror path, for example D:\github\<owner>\audio-orbit"
+}
+
+$WindowsProjectPath = $WindowsProjectPath.Trim().Trim('"')
+if ([string]::IsNullOrWhiteSpace($WindowsProjectPath)) {
+    throw "Windows mirror path is required."
+}
+
+$SourceFullPath = [System.IO.Path]::GetFullPath($SourceWorkspace)
+$TargetFullPath = [System.IO.Path]::GetFullPath($WindowsProjectPath)
+
+if ($SourceFullPath.TrimEnd('\') -ieq $TargetFullPath.TrimEnd('\')) {
+    throw "The source workspace and Windows mirror path must be different."
+}
+
+New-Item -ItemType Directory -Force -Path $TargetFullPath | Out-Null
 
 $ExistingSession = mutagen sync list --long 2>$null | Select-String -SimpleMatch "Name: $SessionName"
 if ($ExistingSession) {
@@ -48,18 +58,20 @@ if ($ExistingSession) {
         --ignore ".cache" `
         --ignore "target" `
         --ignore "*.zip" `
-        $WslProjectUnc `
-        $WindowsProjectPath
+        $SourceFullPath `
+        $TargetFullPath
 }
 
 Write-Host ""
-Write-Host "WSL source:      $WslProjectPath"
-Write-Host "Windows mirror:  $WindowsProjectPath"
-Write-Host "Mutagen session: $SessionName"
+Write-Host "Source workspace: $SourceFullPath"
+Write-Host "Windows mirror:   $TargetFullPath"
+Write-Host "Mutagen session:  $SessionName"
 Write-Host ""
 Write-Host "Run the Windows dev app from PowerShell:"
-Write-Host "  cd $WindowsProjectPath"
+Write-Host "  cd $TargetFullPath"
 Write-Host "  cargo dev"
+Write-Host ""
+Write-Host "Keep Git operations on the source workspace side."
 Write-Host ""
 Write-Host "Useful Mutagen commands:"
 Write-Host "  mutagen sync list"

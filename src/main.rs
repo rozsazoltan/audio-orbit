@@ -5327,6 +5327,51 @@ impl AudioOrbitApp {
         !self.status_message.is_empty() || self.error_message.is_some()
     }
 
+    fn playlist_count_label(&self) -> Option<String> {
+        if self.active_tab != MainContentTab::Music {
+            return None;
+        }
+
+        let playlist = self.current_playlist()?;
+        let total = playlist.tracks.len();
+        if total == 0 {
+            return None;
+        }
+
+        let visible = self.visible_track_indexes().len();
+        if self.show_track_search && !self.track_search_query.trim().is_empty() && visible != total {
+            Some(format!("{visible}/{total} tracks"))
+        } else {
+            Some(format!("{total} tracks"))
+        }
+    }
+
+    fn render_status_panel(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            let mut has_left_content = false;
+
+            if !self.status_message.is_empty() {
+                ui.add(egui::Label::new(self.status_message.as_str()).truncate());
+                has_left_content = true;
+            }
+
+            if !self.media_key_status.is_empty() {
+                if has_left_content {
+                    ui.separator();
+                }
+                ui.small(self.media_key_status.as_str());
+            }
+
+            if let Some(count_label) = self.playlist_count_label() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.small(count_label);
+                });
+            }
+        });
+        ui.add_space(2.0);
+    }
+
     fn render_error_toast(&mut self, context: &egui::Context) {
         let Some(error_message) = self.error_message.clone() else {
             return;
