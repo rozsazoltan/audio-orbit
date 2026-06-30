@@ -172,6 +172,12 @@ struct PreparedRadioPlaybackMessage {
     prepared: PreparedRadioPlayback,
 }
 
+struct WaveformAnalysisMessage {
+    request_id: u64,
+    path: PathBuf,
+    info: PlaybackInfo,
+}
+
 #[derive(Clone, Debug)]
 enum DetailsModal {
     Track(PathBuf),
@@ -246,6 +252,9 @@ struct AudioOrbitApp {
     pending_track_switch: Option<PendingTrackSwitch>,
     pending_prepared_track_receiver: Option<mpsc::Receiver<Result<PreparedTrackPlayback, String>>>,
     pending_prepare_cancel: Option<Arc<AtomicBool>>,
+    pending_waveform_receiver: Option<mpsc::Receiver<Result<WaveformAnalysisMessage, String>>>,
+    pending_waveform_cancel: Option<Arc<AtomicBool>>,
+    waveform_request_id: u64,
     prepare_request_id: u64,
     pending_radio_playback_receiver: Option<mpsc::Receiver<Result<PreparedRadioPlaybackMessage, String>>>,
     radio_playback_request_id: u64,
@@ -331,6 +340,9 @@ impl AudioOrbitApp {
                     pending_track_switch: None,
                     pending_prepared_track_receiver: None,
                     pending_prepare_cancel: None,
+                    pending_waveform_receiver: None,
+                    pending_waveform_cancel: None,
+                    waveform_request_id: 0,
                     prepare_request_id: 0,
                     pending_radio_playback_receiver: None,
                     radio_playback_request_id: 0,
@@ -403,6 +415,9 @@ impl AudioOrbitApp {
                 pending_track_switch: None,
                 pending_prepared_track_receiver: None,
                 pending_prepare_cancel: None,
+                pending_waveform_receiver: None,
+                pending_waveform_cancel: None,
+                waveform_request_id: 0,
                 prepare_request_id: 0,
                 pending_radio_playback_receiver: None,
                 radio_playback_request_id: 0,
@@ -1361,6 +1376,59 @@ impl AudioOrbitApp {
         }
 
         self.prepare_request_id = self.prepare_request_id.wrapping_add(1);
+
+        let can_start_streaming = crossfade_seconds <= 0.05 && !settings.skip_silence_enabled;
+        if can_start_streaming {
+            self.pending_prepared_track_receiver = None;
+            self.pending_track_switch = None;
+            self.crossfade_started_for_path = None;
+            self.status_message = format!("Starting {}...", display_file_name(&path));
+            self.error_message = None;
+
+            let result = match self.player.as_mut() {
+                Some(player) => player.play_file_streaming_from(&path, settings, start_seconds),
+                None => {
+                    self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+                    return;
+                }
+            };
+
+            match result {
+                Ok(info) => {
+                    let mode_label = if settings.orbit_enabled {
+                        settings.mode.label()
+                    } else {
+                        "normal stereo playback"
+                    };
+                    self.active_tab = MainContentTab::Music;
+                    self.active_radio_index = None;
+                    self.active_radio_station_name = None;
+                    self.active_radio_title = None;
+                    self.radio_started_at = None;
+                    self.last_radio_title_lookup_at = None;
+                    self.radio_title_receiver = None;
+                    self.active_playlist_index = Some(playlist_index);
+                    self.selected_track_index = index;
+                    self.active_track_index = index;
+                    self.active_track_path = Some(info.path.clone());
+                    self.store_playback_metadata(&info);
+                    self.remember_last_played_track(index, &info.path);
+                    self.last_playback = Some(info.clone());
+                    self.start_background_waveform_analysis(info.path.clone());
+                    self.status_message = if live_position_compensation {
+                        format!("Applied sound profile and continued {} through {}.", display_file_name(&info.path), mode_label)
+                    } else {
+                        format!("Playing {} through {}.", display_file_name(&info.path), mode_label)
+                    };
+                    self.error_message = None;
+                }
+                Err(error) => {
+                    self.error_message = Some(error.to_string());
+                    self.status_message = "Playback failed.".to_owned();
+                }
+            }
+            return;
+        }
         let request_id = self.prepare_request_id;
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_for_thread = Arc::clone(&cancel);
@@ -1395,6 +1463,79 @@ impl AudioOrbitApp {
                 .map_err(|error| error.to_string());
             let _ = sender.send(result);
         });
+    }
+
+    fn start_background_waveform_analysis(&mut self, path: PathBuf) {
+        if let Some(cancel) = self.pending_waveform_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+
+        self.waveform_request_id = self.waveform_request_id.wrapping_add(1);
+        let request_id = self.waveform_request_id;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_thread = Arc::clone(&cancel);
+        let path_for_thread = path.clone();
+        let (sender, receiver) = mpsc::channel();
+
+        self.pending_waveform_cancel = Some(cancel);
+        self.pending_waveform_receiver = Some(receiver);
+
+        thread::spawn(move || {
+            let result = AudioPlayer::analyze_file_waveform_with_cancel(path_for_thread.clone(), Some(cancel_for_thread))
+                .map(|info| WaveformAnalysisMessage {
+                    request_id,
+                    path: path_for_thread,
+                    info,
+                })
+                .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+    }
+
+    fn process_waveform_analysis(&mut self) {
+        let Some(receiver) = &self.pending_waveform_receiver else {
+            return;
+        };
+
+        let message = match receiver.try_recv() {
+            Ok(message) => message,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.pending_waveform_receiver = None;
+                self.pending_waveform_cancel = None;
+                return;
+            }
+        };
+
+        self.pending_waveform_receiver = None;
+        self.pending_waveform_cancel = None;
+
+        let message = match message {
+            Ok(message) => message,
+            Err(error) => {
+                if !error.contains("cancelled") {
+                    self.status_message = format!("Waveform analysis skipped: {error}");
+                }
+                return;
+            }
+        };
+
+        if message.request_id != self.waveform_request_id {
+            return;
+        }
+        if self.active_track_path.as_ref().map(|path| !same_path(path, &message.path)).unwrap_or(true) {
+            return;
+        }
+
+        if let Some(playback) = self.last_playback.as_mut() {
+            playback.original_duration_seconds = message.info.original_duration_seconds;
+            playback.rendered_duration_seconds = message.info.rendered_duration_seconds;
+            playback.input_channels = message.info.input_channels;
+            playback.sample_rate = message.info.sample_rate;
+            playback.waveform = message.info.waveform.clone();
+            playback.waveform_brightness = message.info.waveform_brightness.clone();
+        }
+        self.store_playback_metadata(&message.info);
     }
 
     fn process_prepared_track_playback(&mut self) {
@@ -2498,7 +2639,11 @@ impl Drop for AudioOrbitApp {
         if let Some(cancel) = self.pending_prepare_cancel.take() {
             cancel.store(true, Ordering::Relaxed);
         }
+        if let Some(cancel) = self.pending_waveform_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
         self.pending_prepared_track_receiver = None;
+        self.pending_waveform_receiver = None;
         self.pending_radio_playback_receiver = None;
         if let Some(player) = &mut self.player {
             player.stop();
@@ -2527,6 +2672,7 @@ impl eframe::App for AudioOrbitApp {
         self.refresh_radio_title_periodically();
         self.process_pending_profile_apply();
         self.process_prepared_track_playback();
+        self.process_waveform_analysis();
         self.process_pending_track_switch();
         self.update_playback_status();
         self.poll_output_device_change();
@@ -5518,9 +5664,9 @@ fn waveform_dynamic_range(values: &[f32]) -> (f32, f32) {
 
 fn shaped_waveform_height(value: f32, floor: f32, range: f32, rect_height: f32) -> f32 {
     let normalized = ((value.clamp(0.0, 1.0) - floor) / range.max(0.001)).clamp(0.0, 1.0);
-    let shaped = normalized.powf(0.92);
-    let min_height = rect_height * 0.08;
-    let max_height = rect_height * 0.86;
+    let shaped = normalized.powf(0.70);
+    let min_height = rect_height * 0.045;
+    let max_height = rect_height * 0.94;
     (min_height + shaped * (max_height - min_height)).clamp(2.0, rect_height - 4.0)
 }
 

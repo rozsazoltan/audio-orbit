@@ -139,6 +139,22 @@ impl AudioPlayer {
         anyhow::bail!(unsupported_audio_message())
     }
 
+    pub fn play_file_streaming_from(
+        &mut self,
+        _path: &Path,
+        _settings: DspSettings,
+        _start_seconds: f32,
+    ) -> Result<PlaybackInfo> {
+        anyhow::bail!(unsupported_audio_message())
+    }
+
+    pub fn analyze_file_waveform_with_cancel(
+        _path: PathBuf,
+        _cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<PlaybackInfo> {
+        anyhow::bail!(unsupported_audio_message())
+    }
+
     pub fn play_file_with_orbit_from(
         &mut self,
         _path: &Path,

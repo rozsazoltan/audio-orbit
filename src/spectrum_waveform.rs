@@ -90,7 +90,7 @@ impl LiveSpectrumAnalyzer {
 
         let raw = analyze_amplitude_bucket(&ordered, self.previous_bucket.level);
         let normalized = self.normalize_live_level(raw.level);
-        let level = smooth_attack_release(normalized, self.previous_bucket.level, 0.38, 0.12);
+        let level = smooth_attack_release(normalized, self.previous_bucket.level, 0.62, 0.20);
         let bucket = SpectrumBucket { level };
         self.previous_bucket = bucket;
         Some(bucket)
@@ -109,10 +109,12 @@ impl LiveSpectrumAnalyzer {
             self.adaptive_peak * 0.998 + level * 0.002
         };
 
-        let floor = self.adaptive_floor.min(0.22);
-        let peak = self.adaptive_peak.max(floor + 0.18);
+        let floor = self.adaptive_floor.min(0.20);
+        let peak = self.adaptive_peak.max(floor + 0.10);
         let normalized = ((level - floor) / (peak - floor)).clamp(0.0, 1.0);
-        (normalized.powf(1.08) * 0.88).clamp(0.0, 0.92)
+        let expanded = normalized.powf(0.62);
+        let contrasted = ((expanded - 0.50) * 1.55 + 0.50).clamp(0.0, 1.0);
+        (contrasted * 0.96).clamp(0.0, 0.96)
     }
 }
 
@@ -144,12 +146,13 @@ fn analyze_amplitude_bucket(samples: &[f32], previous_level: f32) -> SpectrumBuc
     let transient = (diff_sum / count).sqrt() as f32;
     let loudness = db_to_unit(20.0 * rms.max(0.000_001).log10(), -56.0, -5.0, 1.08);
 
-    let raw_level = loudness * 0.44
-        + span.powf(0.88) * 0.28
-        + peak.powf(0.92) * 0.16
-        + transient.clamp(0.0, 1.0).powf(0.75) * 0.08
-        + crest.clamp(0.0, 1.0) * 0.04;
-    let level = smooth_attack_release(raw_level.clamp(0.0, 1.0), previous_level, 0.58, 0.24);
+    let raw_level = loudness * 0.36
+        + span.powf(0.74) * 0.28
+        + peak.powf(0.72) * 0.15
+        + transient.clamp(0.0, 1.0).powf(0.58) * 0.15
+        + crest.clamp(0.0, 1.0).powf(0.80) * 0.06;
+    let movement = (raw_level - previous_level).abs().min(0.28) * 0.45;
+    let level = smooth_attack_release((raw_level + movement).clamp(0.0, 1.0), previous_level, 0.68, 0.26);
 
     SpectrumBucket { level }
 }
