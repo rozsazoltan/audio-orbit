@@ -9,7 +9,6 @@ mod config;
 mod dsp;
 mod icon;
 mod media_keys;
-mod recognition;
 mod single_instance;
 mod spectrum_waveform;
 mod ui_icons;
@@ -18,7 +17,7 @@ mod updater;
 use crate::{
     audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo, PreparedPlayback, RadioVisualizerFrame},
     config::{
-        app_data_dir, collect_audio_files_from_folder, display_file_name, export_state_zip, external_tools_dir,
+        app_data_dir, collect_audio_files_from_folder, display_file_name, export_state_zip,
         import_state_zip, load_state, same_path, save_state, LastPlayedTrack, Playlist, PlaylistKind, RadioStation, RepeatMode, SavedState,
         Track, WindowGeometry, FAVORITES_PLAYLIST_NAME,
     },
@@ -40,7 +39,6 @@ use std::{
 
 const UPDATE_CHECKS_BEFORE_CONFIRMATION: u8 = 2;
 const AUTOMATIC_UPDATE_CHECK_INTERVAL_SECONDS: u64 = 60 * 60;
-const AUTOMATIC_SONGREC_CHECK_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
 const APP_VERSION_LABEL: &str = env!("AUDIO_ORBIT_DISPLAY_VERSION");
 
 fn app_version_label() -> &'static str {
@@ -138,18 +136,6 @@ fn initial_window_position(state: &SavedState) -> Option<egui::Pos2> {
     saved_window_geometry_for_mode(state, state.ui.player_only_mode)
         .or_else(|| saved_window_geometry_for_mode(state, !state.ui.player_only_mode))
         .map(|geometry| egui::pos2(geometry.x, geometry.y))
-}
-
-fn recognize_audio_sample_with_songrec(
-    sample: audio_player::RecognitionAudioSample,
-    command: Option<PathBuf>,
-) -> anyhow::Result<recognition::RecognitionResult> {
-    let sample_path = recognition::temporary_sample_path();
-    sample.write_wav(&sample_path)?;
-    recognition::ensure_sample_exists(&sample_path)?;
-    let result = recognition::recognize_with_songrec(command, &sample_path);
-    recognition::cleanup_sample(&sample_path);
-    result
 }
 
 
@@ -293,11 +279,6 @@ struct AudioOrbitApp {
     update_check_receiver: Option<mpsc::Receiver<Result<updater::UpdateCheck, String>>>,
     update_check_count: u8,
     show_update_check_confirmation: bool,
-    last_songrec_tool_status: Option<recognition::SongRecToolStatus>,
-    songrec_tool_receiver: Option<mpsc::Receiver<Result<recognition::SongRecToolStatus, String>>>,
-    songrec_install_receiver: Option<mpsc::Receiver<Result<recognition::InstalledSongRec, String>>>,
-    recognition_receiver: Option<mpsc::Receiver<Result<recognition::RecognitionResult, String>>>,
-    recognition_started_at: Option<Instant>,
     pending_clipboard_text: Option<String>,
     media_key_receiver: Option<mpsc::Receiver<media_keys::MediaKeyEvent>>,
     media_key_status: String,
@@ -379,11 +360,6 @@ impl AudioOrbitApp {
                     update_check_receiver: None,
                     update_check_count: 0,
                     show_update_check_confirmation: false,
-                    last_songrec_tool_status: None,
-                    songrec_tool_receiver: None,
-                    songrec_install_receiver: None,
-                    recognition_receiver: None,
-                    recognition_started_at: None,
                     pending_clipboard_text: None,
                     media_key_receiver: None,
                     media_key_status: "Media keys: unavailable".to_owned(),
@@ -452,11 +428,6 @@ impl AudioOrbitApp {
                 update_check_receiver: None,
                 update_check_count: 0,
                 show_update_check_confirmation: false,
-                last_songrec_tool_status: None,
-                songrec_tool_receiver: None,
-                songrec_install_receiver: None,
-                recognition_receiver: None,
-                recognition_started_at: None,
                 pending_clipboard_text: None,
                 media_key_receiver: None,
                 media_key_status: "Media keys: unavailable".to_owned(),
@@ -1913,163 +1884,6 @@ impl AudioOrbitApp {
         }
     }
 
-    fn start_automatic_songrec_check_if_due(&mut self) {
-        if !self.state.recognition.enabled
-            || !self.state.recognition.manage_songrec_automatically
-            || !self.state.recognition.auto_update_songrec
-            || self.songrec_tool_receiver.is_some()
-            || self.songrec_install_receiver.is_some()
-        {
-            return;
-        }
-
-        let now = current_unix_seconds();
-        let last_check = self.state.recognition.last_songrec_auto_check_unix_seconds;
-        if now.saturating_sub(last_check) < AUTOMATIC_SONGREC_CHECK_INTERVAL_SECONDS {
-            return;
-        }
-
-        self.state.recognition.last_songrec_auto_check_unix_seconds = now;
-        self.save_state_silently();
-        self.start_songrec_tool_check(false);
-    }
-
-    fn start_songrec_tool_check(&mut self, manual: bool) {
-        if self.songrec_tool_receiver.is_some() {
-            self.status_message = "SongRec release check is already running.".to_owned();
-            return;
-        }
-
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let result = std::panic::catch_unwind(|| {
-                recognition::check_songrec_tool(false).map_err(|error| error.to_string())
-            })
-            .unwrap_or_else(|_| Err("SongRec release check crashed unexpectedly.".to_owned()));
-            let _ = sender.send(result);
-        });
-
-        self.songrec_tool_receiver = Some(receiver);
-        if manual {
-            self.status_message = "Checking SongRec releases...".to_owned();
-            self.error_message = None;
-        }
-    }
-
-    fn process_songrec_tool_events(&mut self) {
-        let Some(receiver) = &self.songrec_tool_receiver else {
-            return;
-        };
-
-        match receiver.try_recv() {
-            Ok(Ok(status)) => {
-                self.songrec_tool_receiver = None;
-                self.handle_songrec_tool_status(status);
-            }
-            Ok(Err(error)) => {
-                self.songrec_tool_receiver = None;
-                self.error_message = Some(format!("SongRec release check failed: {error}"));
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.songrec_tool_receiver = None;
-                self.error_message = Some("SongRec release check ended before Audio Orbit received a GitHub result. Check internet access and try again.".to_owned());
-            }
-        }
-    }
-
-    fn handle_songrec_tool_status(&mut self, status: recognition::SongRecToolStatus) {
-        if let Some(version) = status.installed_version.clone() {
-            self.state.recognition.installed_songrec_version = Some(version);
-        }
-
-        let status_message = if !status.is_installed() && status.asset_download_url.is_some() {
-            "SongRec can be installed by Audio Orbit.".to_owned()
-        } else if status.is_update_available {
-            format!(
-                "SongRec update available: v{}.",
-                status.latest_version.as_deref().unwrap_or("unknown")
-            )
-        } else if let Some(path) = &status.executable_path {
-            format!("SongRec is ready: {}.", path.display())
-        } else {
-            "No official Windows SongRec asset was found on the selected release. You can still set an executable manually.".to_owned()
-        };
-
-        self.last_songrec_tool_status = Some(status);
-        self.status_message = status_message;
-        self.error_message = None;
-        self.save_state_silently();
-    }
-
-    fn install_or_update_songrec_now(&mut self) {
-        if self.songrec_install_receiver.is_some() {
-            self.status_message = "SongRec install/update is already running.".to_owned();
-            return;
-        }
-
-        let status = self.last_songrec_tool_status.clone();
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let result = std::panic::catch_unwind(|| {
-                (|| {
-                    let status = match status {
-                        Some(status) if status.asset_download_url.is_some() => status,
-                        _ => recognition::check_songrec_tool(false).map_err(|error| error.to_string())?,
-                    };
-
-                    let Some(download_url) = status.asset_download_url.as_deref() else {
-                        return Err("No official Windows SongRec downloadable asset was found for the selected release.".to_owned());
-                    };
-
-                    recognition::install_or_update_songrec(
-                        download_url,
-                        status.latest_version.as_deref(),
-                        status.asset_name.as_deref(),
-                    )
-                    .map_err(|error| error.to_string())
-                })()
-            })
-            .unwrap_or_else(|_| Err("SongRec install/update crashed unexpectedly.".to_owned()));
-            let _ = sender.send(result);
-        });
-
-        self.songrec_install_receiver = Some(receiver);
-        self.status_message = "Installing SongRec into .audio-orbit-dll...".to_owned();
-        self.error_message = None;
-    }
-
-    fn process_songrec_install_events(&mut self) {
-        let Some(receiver) = &self.songrec_install_receiver else {
-            return;
-        };
-
-        match receiver.try_recv() {
-            Ok(Ok(installed)) => {
-                self.songrec_install_receiver = None;
-                self.state.recognition.songrec_command = None;
-                self.state.recognition.installed_songrec_version = installed.version.clone();
-                self.status_message = format!(
-                    "SongRec is installed and ready: {}{}.",
-                    installed.executable_path.display(),
-                    installed.version.as_deref().map(|version| format!(" · v{version}")).unwrap_or_default()
-                );
-                self.error_message = None;
-                self.save_state_silently();
-                self.start_songrec_tool_check(false);
-            }
-            Ok(Err(error)) => {
-                self.songrec_install_receiver = None;
-                self.error_message = Some(format!("SongRec install/update failed: {error}"));
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.songrec_install_receiver = None;
-                self.error_message = Some("SongRec install/update ended before Audio Orbit received the GitHub download result. Check internet access and try again.".to_owned());
-            }
-        }
-    }
-
     fn handle_update_check_result(&mut self, check: updater::UpdateCheck, automatic: bool) {
         if check.is_update_available {
             self.status_message = format!(
@@ -2205,168 +2019,6 @@ impl AudioOrbitApp {
             self.error_message = None;
         }
     }
-    fn open_external_tools_folder(&mut self) {
-        let folder = external_tools_dir();
-        if let Err(error) = fs::create_dir_all(&folder).and_then(|_| reveal_in_file_manager(&folder).map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.to_string()))) {
-            self.error_message = Some(format!("Failed to open Audio Orbit tools folder: {error}"));
-        } else {
-            self.status_message = format!("Opened Audio Orbit tools folder: {}.", folder.display());
-            self.error_message = None;
-        }
-    }
-
-    fn open_songrec_releases(&mut self) {
-        if let Err(error) = open_url("https://github.com/marin-m/SongRec/releases") {
-            self.error_message = Some(format!("Failed to open SongRec releases: {error}"));
-        } else {
-            self.status_message = "Opened SongRec releases.".to_owned();
-            self.error_message = None;
-        }
-    }
-
-
-    fn recognize_current_audio(&mut self) {
-        if !self.state.recognition.enabled {
-            self.status_message = "Recognition is turned off. Enable it in Settings > Recognition.".to_owned();
-            self.open_panel_modal(AppPanelModal::Settings);
-            return;
-        }
-
-        if self.recognition_receiver.is_some() {
-            self.status_message = "Audio recognition is already running.".to_owned();
-            return;
-        }
-
-        if self.state.recognition.prefer_stream_metadata {
-            if let Some(title) = self
-                .active_radio_title
-                .clone()
-                .filter(|title| !title.trim().is_empty())
-            {
-                self.pending_clipboard_text = Some(title.clone());
-                self.status_message = format!("Radio stream title copied: {title}.");
-                self.error_message = None;
-                return;
-            }
-        }
-
-        let sample_seconds = self.state.recognition.clamped_sample_seconds() as f32;
-        let command = self.state.recognition.songrec_command.clone();
-        if command.is_none()
-            && self.state.recognition.manage_songrec_automatically
-            && recognition::installed_songrec_executable().is_none()
-        {
-            self.install_or_update_songrec_now();
-            self.status_message = "Installing SongRec first. Run recognition again when installation is ready.".to_owned();
-            return;
-        }
-
-        if self.active_radio_index.is_some() {
-            let Some(player) = &self.player else {
-                self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
-                return;
-            };
-
-            match player.radio_recognition_sample(sample_seconds) {
-                Ok(Some(sample)) => {
-                    self.start_recognition_worker_from_sample(sample, command, "internet radio");
-                }
-                Ok(None) => {
-                    self.error_message = Some("Start an internet radio station before recognition.".to_owned());
-                }
-                Err(error) => {
-                    self.error_message = Some(error.to_string());
-                }
-            }
-            return;
-        }
-
-        if let Some(path) = self.active_track_path.clone() {
-            let position = self.displayed_playback_position_seconds();
-            let start_seconds = (position - 4.0).max(0.0);
-            self.start_recognition_worker_from_file(path, start_seconds, sample_seconds, command);
-            return;
-        }
-
-        self.error_message = Some("Start a track or internet radio station before recognition.".to_owned());
-    }
-
-    fn start_recognition_worker_from_sample(
-        &mut self,
-        sample: audio_player::RecognitionAudioSample,
-        command: Option<PathBuf>,
-        source_label: &'static str,
-    ) {
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let result = recognize_audio_sample_with_songrec(sample, command)
-                .map_err(|error| error.to_string());
-            let _ = sender.send(result);
-        });
-
-        self.recognition_receiver = Some(receiver);
-        self.recognition_started_at = Some(Instant::now());
-        self.status_message = format!("Identifying {source_label} with free SongRec-compatible recognition...");
-        self.error_message = None;
-    }
-
-    fn start_recognition_worker_from_file(
-        &mut self,
-        path: PathBuf,
-        start_seconds: f32,
-        sample_seconds: f32,
-        command: Option<PathBuf>,
-    ) {
-        let title = display_file_name(&path);
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let result = AudioPlayer::capture_file_recognition_sample(&path, start_seconds, sample_seconds)
-                .and_then(|sample| recognize_audio_sample_with_songrec(sample, command))
-                .map_err(|error| error.to_string());
-            let _ = sender.send(result);
-        });
-
-        self.recognition_receiver = Some(receiver);
-        self.recognition_started_at = Some(Instant::now());
-        self.status_message = format!("Identifying {title} with free SongRec-compatible recognition...");
-        self.error_message = None;
-    }
-
-    fn process_recognition_events(&mut self, _context: &egui::Context) {
-        let Some(receiver) = &self.recognition_receiver else {
-            return;
-        };
-
-        match receiver.try_recv() {
-            Ok(Ok(result)) => {
-                self.recognition_receiver = None;
-                self.recognition_started_at = None;
-                let label = result.display_label();
-                self.pending_clipboard_text = Some(label.clone());
-                self.status_message = format!("Recognized and copied: {label}.");
-                self.error_message = None;
-            }
-            Ok(Err(error)) => {
-                self.recognition_receiver = None;
-                self.recognition_started_at = None;
-                self.error_message = Some(error);
-            }
-            Err(mpsc::TryRecvError::Empty) => {
-                if let Some(started_at) = self.recognition_started_at {
-                    self.status_message = format!(
-                        "Identifying audio... {}",
-                        format_duration(started_at.elapsed().as_secs_f32())
-                    );
-                }
-            }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.recognition_receiver = None;
-                self.recognition_started_at = None;
-                self.error_message = Some("Audio recognition worker stopped unexpectedly.".to_owned());
-            }
-        }
-    }
-
     fn save_state_silently(&mut self) {
         if let Err(error) = save_state(&self.state) {
             self.error_message = Some(error.to_string());
@@ -2751,9 +2403,6 @@ impl eframe::App for AudioOrbitApp {
 
         self.process_media_key_events();
         self.process_update_check_events();
-        self.process_songrec_tool_events();
-        self.process_songrec_install_events();
-        self.process_recognition_events(context);
         self.process_escape_navigation(context);
         self.process_keyboard_shortcuts(context);
         self.process_radio_title_events();
@@ -4554,16 +4203,6 @@ impl AudioOrbitApp {
         });
     }
 
-    fn responsive_modal_size(&self, context: &egui::Context, max_width: f32, max_height: f32) -> egui::Vec2 {
-        let screen_rect = context.screen_rect();
-        let horizontal_margin = if screen_rect.width() < 520.0 { 12.0 } else { 32.0 };
-        let vertical_margin = if screen_rect.height() < 420.0 { 12.0 } else { 48.0 };
-        let available_width = (screen_rect.width() - horizontal_margin).max(260.0);
-        let available_height = (screen_rect.height() - vertical_margin).max(190.0);
-
-        egui::vec2(available_width.min(max_width), available_height.min(max_height))
-    }
-
     fn render_modal_backdrop(&self, context: &egui::Context, id: &'static str) {
         let screen_rect = context.screen_rect();
         let painter = context.layer_painter(egui::LayerId::new(
@@ -4879,133 +4518,6 @@ impl AudioOrbitApp {
         }
 
         self.show_radio_add_modal = is_open;
-    }
-
-    fn render_recognition_settings_section(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Recognition");
-        ui.small("Optional, fully free recognition. It is off by default; when enabled, Audio Orbit can manage SongRec inside .audio-orbit-dll so the app stays installer-free.");
-
-        let enabled_changed = ui
-            .checkbox(&mut self.state.recognition.enabled, "Enable recognition")
-            .on_hover_text("When off, the top-bar recognition button is disabled and Audio Orbit does not call SongRec.")
-            .changed();
-        if enabled_changed {
-            self.save_state_silently();
-            if self.state.recognition.enabled
-                && self.state.recognition.manage_songrec_automatically
-                && self.state.recognition.auto_update_songrec
-            {
-                self.start_automatic_songrec_check_if_due();
-            }
-        }
-
-        ui.add_enabled_ui(self.state.recognition.enabled, |ui| {
-            let metadata_first_changed = ui
-                .checkbox(
-                    &mut self.state.recognition.prefer_stream_metadata,
-                    "Use radio StreamTitle metadata first",
-                )
-                .on_hover_text("When internet radio already provides the current track title, Audio Orbit returns that instantly and avoids an external lookup.")
-                .changed();
-            if metadata_first_changed {
-                self.save_state_silently();
-            }
-
-            let manage_changed = ui
-                .checkbox(
-                    &mut self.state.recognition.manage_songrec_automatically,
-                    "Let Audio Orbit install and manage SongRec",
-                )
-                .on_hover_text("Downloads SongRec into the managed .audio-orbit-dll folder instead of asking the user to place files manually.")
-                .changed();
-            if manage_changed {
-                self.save_state_silently();
-            }
-
-            let auto_update_changed = ui
-                .add_enabled(
-                    self.state.recognition.manage_songrec_automatically,
-                    egui::Checkbox::new(
-                        &mut self.state.recognition.auto_update_songrec,
-                        "Check SongRec updates once per day on startup",
-                    ),
-                )
-                .on_hover_text("Only runs when recognition and automatic SongRec management are enabled.")
-                .changed();
-            if auto_update_changed {
-                self.save_state_silently();
-            }
-
-            ui.add_space(6.0);
-            ui.label("SongRec executable");
-            let tools_folder = external_tools_dir();
-            let installed_path = recognition::installed_songrec_executable();
-            ui.horizontal_wrapped(|ui| {
-                ui.monospace(self.state.recognition.command_label());
-                if ui.button(ui_icons::label(Icon::Search, "Check SongRec")).clicked() {
-                    self.start_songrec_tool_check(true);
-                }
-                if ui
-                    .add_enabled(
-                        self.state.recognition.manage_songrec_automatically && self.songrec_install_receiver.is_none(),
-                        egui::Button::new(ui_icons::label(Icon::Download, "Install / update")),
-                    )
-                    .clicked()
-                {
-                    self.install_or_update_songrec_now();
-                }
-                if ui.button(ui_icons::label(Icon::FolderOpen, "Choose...")) .clicked() {
-                    if let Some(path) = FileDialog::new().pick_file() {
-                        self.state.recognition.songrec_command = Some(path.clone());
-                        self.status_message = format!("SongRec executable set to {}.", path.display());
-                        self.error_message = None;
-                        self.save_state_silently();
-                    }
-                }
-                if ui.button(ui_icons::label(Icon::FolderOpen, "Open .audio-orbit-dll")).clicked() {
-                    self.open_external_tools_folder();
-                }
-                if ui.button(ui_icons::label(Icon::ExternalLink, "SongRec releases")).clicked() {
-                    self.open_songrec_releases();
-                }
-                if ui.button("Auto lookup").clicked() {
-                    self.state.recognition.songrec_command = None;
-                    self.status_message = "SongRec executable reset to automatic lookup.".to_owned();
-                    self.error_message = None;
-                    self.save_state_silently();
-                }
-            });
-
-            if let Some(path) = installed_path {
-                ui.small(format!("Managed SongRec: {}", path.display()));
-            } else {
-                ui.small(format!("Managed SongRec is not installed yet. Audio Orbit will install it into {} when requested.", tools_folder.display()));
-            }
-
-            if let Some(status) = &self.last_songrec_tool_status {
-                ui.small(format!(
-                    "Latest checked SongRec: {} · asset: {}",
-                    status.latest_version.as_deref().unwrap_or("unknown"),
-                    status.asset_name.as_deref().unwrap_or("none")
-                ));
-            }
-
-            let mut sample_seconds = self.state.recognition.clamped_sample_seconds();
-            if ui
-                .add(egui::Slider::new(&mut sample_seconds, 6..=20).text("sample seconds"))
-                .on_hover_text("Longer samples can improve recognition but take slightly longer to process.")
-                .changed()
-            {
-                self.state.recognition.sample_seconds = sample_seconds;
-                self.save_state_silently();
-            }
-        });
-
-        if !self.state.recognition.enabled {
-            ui.small("Recognition is disabled. The app will not use SongRec or make SongRec release checks until you enable this option.");
-        }
-
-        ui.small("SongRec is GPL-3.0 and optional. Audio Orbit uses it as an external helper executable for Shazam-compatible recognition, not as a required runtime dependency.");
     }
 
     fn render_recording_settings_section(&mut self, ui: &mut egui::Ui) {
@@ -5737,11 +5249,6 @@ fn ensure_state_is_valid(state: &mut SavedState) {
         state.selected_profile_index = 0;
     }
 
-    // Song recognition is no longer exposed in the app UI. Keep legacy saved-state fields
-    // readable for compatibility, but prevent background SongRec checks from older configs.
-    state.recognition.enabled = false;
-    state.recognition.auto_update_songrec = false;
-
     if let Some(index) = state.selected_radio_index {
         if index >= state.radio_stations.len() {
             state.selected_radio_index = None;
@@ -6235,27 +5742,5 @@ fn reveal_in_file_manager(path: &Path) -> anyhow::Result<()> {
     {
         Command::new("xdg-open").arg(folder).spawn()?;
         Ok(())
-    }
-}
-
-fn open_url(url: &str) -> std::io::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()?;
-        return Ok(());
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open").arg(url).spawn()?;
-        return Ok(());
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        Command::new("xdg-open").arg(url).spawn()?;
-        return Ok(());
     }
 }

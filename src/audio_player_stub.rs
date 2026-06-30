@@ -1,8 +1,6 @@
 use crate::dsp::DspSettings;
 use anyhow::Result;
 use std::{
-    fs::File,
-    io::Write,
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -18,61 +16,6 @@ pub struct PlaybackInfo {
     pub waveform: Vec<f32>,
     pub waveform_brightness: Vec<f32>,
     pub silence_ranges: Vec<(f32, f32)>,
-}
-
-#[derive(Clone, Debug)]
-pub struct RecognitionAudioSample {
-    pub sample_rate: u32,
-    pub channels: u16,
-    pub samples: Vec<f32>,
-}
-
-impl RecognitionAudioSample {
-    pub fn duration_seconds(&self) -> f32 {
-        if self.sample_rate == 0 || self.channels == 0 {
-            0.0
-        } else {
-            self.samples.len() as f32 / self.channels as f32 / self.sample_rate as f32
-        }
-    }
-
-    pub fn write_wav(&self, path: &Path) -> Result<()> {
-        if self.samples.is_empty() {
-            anyhow::bail!("recognition sample is empty");
-        }
-        if self.sample_rate == 0 || self.channels == 0 {
-            anyhow::bail!("recognition sample has an invalid audio format");
-        }
-
-        let mut file = File::create(path)?;
-        let bits_per_sample = 16u16;
-        let bytes_per_sample = bits_per_sample / 8;
-        let block_align = self.channels.saturating_mul(bytes_per_sample);
-        let byte_rate = self.sample_rate.saturating_mul(block_align as u32);
-        let data_size = (self.samples.len() * bytes_per_sample as usize) as u32;
-        let chunk_size = 36u32.saturating_add(data_size);
-
-        file.write_all(b"RIFF")?;
-        file.write_all(&chunk_size.to_le_bytes())?;
-        file.write_all(b"WAVE")?;
-        file.write_all(b"fmt ")?;
-        file.write_all(&16u32.to_le_bytes())?;
-        file.write_all(&1u16.to_le_bytes())?;
-        file.write_all(&self.channels.to_le_bytes())?;
-        file.write_all(&self.sample_rate.to_le_bytes())?;
-        file.write_all(&byte_rate.to_le_bytes())?;
-        file.write_all(&block_align.to_le_bytes())?;
-        file.write_all(&bits_per_sample.to_le_bytes())?;
-        file.write_all(b"data")?;
-        file.write_all(&data_size.to_le_bytes())?;
-
-        for sample in &self.samples {
-            let scaled = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
-            file.write_all(&scaled.to_le_bytes())?;
-        }
-        file.flush()?;
-        Ok(())
-    }
 }
 
 pub struct PreparedPlayback;
@@ -149,17 +92,6 @@ impl AudioPlayer {
         RadioVisualizerFrame::default()
     }
 
-    pub fn radio_recognition_sample(&self, _seconds: f32) -> Result<Option<RecognitionAudioSample>> {
-        Ok(None)
-    }
-
-    pub fn capture_file_recognition_sample(
-        _path: &Path,
-        _start_seconds: f32,
-        _seconds: f32,
-    ) -> Result<RecognitionAudioSample> {
-        anyhow::bail!(unsupported_audio_message())
-    }
 
     pub fn prepare_file(
         _path: PathBuf,
