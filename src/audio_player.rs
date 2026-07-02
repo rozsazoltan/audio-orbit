@@ -892,6 +892,23 @@ impl AudioPlayer {
         start_seconds: f32,
         cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
     ) -> Result<PlaybackInfo> {
+        self.play_file_streaming_with_cached_waveform_and_crossfade(
+            path,
+            settings,
+            start_seconds,
+            cached_waveform,
+            0.0,
+        )
+    }
+
+    pub fn play_file_streaming_with_cached_waveform_and_crossfade(
+        &mut self,
+        path: &Path,
+        settings: DspSettings,
+        start_seconds: f32,
+        cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
+        crossfade_seconds: f32,
+    ) -> Result<PlaybackInfo> {
         if settings.skip_silence_enabled {
             anyhow::bail!("streaming playback is not available while silence skipping is enabled");
         }
@@ -915,6 +932,7 @@ impl AudioPlayer {
         let total_duration = decoder.total_duration();
         let (waveform, waveform_brightness) = cached_waveform.unwrap_or_default();
         let seek_to = Duration::from_secs_f32(start_seconds);
+        let crossfade_seconds = crossfade_seconds.max(0.0);
 
         // Use the decoder's real random-access seek when available. The previous
         // implementation used `skip_duration`, which had to decode and discard audio
@@ -931,6 +949,7 @@ impl AudioPlayer {
                 sample_rate,
                 waveform,
                 waveform_brightness,
+                crossfade_seconds,
             );
         }
 
@@ -946,6 +965,7 @@ impl AudioPlayer {
             sample_rate,
             waveform,
             waveform_brightness,
+            crossfade_seconds,
         )
     }
 
@@ -960,6 +980,7 @@ impl AudioPlayer {
         sample_rate: u32,
         waveform: Vec<f32>,
         waveform_brightness: Vec<f32>,
+        crossfade_seconds: f32,
     ) -> Result<PlaybackInfo>
     where
         S: Source<Item = f32> + Send + 'static,
@@ -968,12 +989,25 @@ impl AudioPlayer {
             .map(|duration| duration.saturating_sub(Duration::from_secs_f32(start_seconds)))
             .unwrap_or(Duration::ZERO);
         let source = LiveFileSource::new(source, settings, start_seconds);
+        let fade_seconds = crossfade_seconds.max(0.0);
 
-        self.stop();
+        if fade_seconds > 0.05 {
+            let _ = self.stop_radio_recording();
+            if let Some(old_sink) = self.sink.take() {
+                fade_out_and_stop(old_sink, fade_seconds, self.volume_gain());
+            }
+        } else {
+            self.stop();
+        }
+
         let sink = Sink::try_new(&self.stream_handle)
             .context("failed to create audio playback sink")?;
         sink.set_volume(self.volume_gain());
-        sink.append(source);
+        if fade_seconds > 0.05 {
+            sink.append(FadeInSource::new(source, fade_seconds));
+        } else {
+            sink.append(source);
+        }
         sink.play();
 
         self.sink = Some(sink);
@@ -1089,6 +1123,7 @@ impl AudioPlayer {
         apply_fade_in(&mut prepared.processed_samples, prepared.sample_rate, fade_seconds);
 
         if fade_seconds > 0.05 {
+            let _ = self.stop_radio_recording();
             if let Some(old_sink) = self.sink.take() {
                 fade_out_and_stop(old_sink, fade_seconds, self.volume_gain());
             }

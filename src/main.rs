@@ -151,8 +151,6 @@ struct PreparedTrackPlayback {
     index: Option<usize>,
     crossfade_seconds: f32,
     live_position_compensation: bool,
-    previous_position: Option<f32>,
-    previous_duration: Option<f32>,
     prepared: PreparedPlayback,
     requested_at: Instant,
 }
@@ -1475,13 +1473,19 @@ impl AudioOrbitApp {
         let playlist_index = self.state.selected_playlist_index;
         let cached_waveform = self.cached_waveform_for_track(index, &path);
 
-        if crossfade_seconds <= 0.05 && !settings.skip_silence_enabled {
+        if !settings.skip_silence_enabled {
             self.pending_prepared_track_receiver = None;
             let result = self
                 .player
                 .as_mut()
                 .expect("audio player was checked above")
-                .play_file_streaming_with_cached_waveform(&path, settings, start_seconds, cached_waveform);
+                .play_file_streaming_with_cached_waveform_and_crossfade(
+                    &path,
+                    settings,
+                    start_seconds,
+                    cached_waveform,
+                    crossfade_seconds,
+                );
 
             match result {
                 Ok(info) => {
@@ -1508,6 +1512,12 @@ impl AudioOrbitApp {
                     self.last_playback = Some(info.clone());
                     self.status_message = if live_position_compensation {
                         format!("Applied sound profile and continued {} through {}.", display_file_name(&info.path), mode_label)
+                    } else if crossfade_seconds > 0.05 {
+                        format!(
+                            "Crossfading to {} through {}; previous source is fading out.",
+                            display_file_name(&info.path),
+                            mode_label
+                        )
                     } else {
                         format!("Playing {} through {}.", display_file_name(&info.path), mode_label)
                     };
@@ -1523,16 +1533,6 @@ impl AudioOrbitApp {
             return;
         }
 
-        let previous_position = if crossfade_seconds > 0.05 {
-            Some(self.displayed_playback_position_seconds())
-        } else {
-            None
-        };
-        let previous_duration = if crossfade_seconds > 0.05 {
-            Some(self.displayed_playback_duration_seconds())
-        } else {
-            None
-        };
         let requested_at = Instant::now();
         let (sender, receiver) = mpsc::channel();
         let path_for_thread = path.clone();
@@ -1554,8 +1554,6 @@ impl AudioOrbitApp {
                     index,
                     crossfade_seconds,
                     live_position_compensation,
-                    previous_position,
-                    previous_duration,
                     prepared,
                     requested_at,
                 })
@@ -1593,8 +1591,6 @@ impl AudioOrbitApp {
             index,
             crossfade_seconds,
             live_position_compensation,
-            previous_position,
-            previous_duration,
             prepared: prepared_audio,
             requested_at,
         } = prepared;
@@ -1632,39 +1628,26 @@ impl AudioOrbitApp {
                 self.active_playlist_index = Some(playlist_index);
                 self.selected_track_index = index;
 
-                if crossfade_seconds > 0.05 {
-                    let started_at = Instant::now();
-                    let switch_after = Duration::from_secs_f32((crossfade_seconds * 0.5).max(0.1));
-                    self.pending_track_switch = Some(PendingTrackSwitch {
-                        switch_at: started_at + switch_after,
-                        started_at,
-                        previous_position: previous_position.unwrap_or_else(|| self.displayed_playback_position_seconds()),
-                        previous_duration: previous_duration.unwrap_or_else(|| self.displayed_playback_duration_seconds()),
-                        playlist_index,
-                        index,
-                        info: info.clone(),
-                    });
-                    self.status_message = format!(
-                        "Crossfading to {} through {}; display switches halfway through the mix.",
+                self.active_track_index = index;
+                self.active_track_path = Some(info.path.clone());
+                self.pending_track_switch = None;
+                self.crossfade_started_for_path = None;
+                self.store_playback_metadata(&info);
+                self.remember_last_played_track(index, &info.path);
+                self.last_playback = Some(info.clone());
+                self.status_message = if live_position_compensation {
+                    format!("Applied sound profile and continued {} through {}.", display_file_name(&info.path), mode_label)
+                } else if crossfade_seconds > 0.05 {
+                    format!(
+                        "Crossfading to {} through {}; previous source is fading out.",
                         display_file_name(&info.path),
                         mode_label
-                    );
+                    )
                 } else {
-                    self.active_track_index = index;
-                    self.active_track_path = Some(info.path.clone());
-                    self.pending_track_switch = None;
-                    self.crossfade_started_for_path = None;
-                    self.store_playback_metadata(&info);
-                    self.remember_last_played_track(index, &info.path);
-                    self.last_playback = Some(info.clone());
-                    self.status_message = if live_position_compensation {
-                        format!("Applied sound profile and continued {} through {}.", display_file_name(&info.path), mode_label)
-                    } else {
-                        format!("Playing {} through {}.", display_file_name(&info.path), mode_label)
-                    };
-                    self.persist_playback_session();
-                    self.save_state_silently();
-                }
+                    format!("Playing {} through {}.", display_file_name(&info.path), mode_label)
+                };
+                self.persist_playback_session();
+                self.save_state_silently();
                 self.error_message = None;
             }
             Err(error) => {

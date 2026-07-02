@@ -304,7 +304,7 @@ pub fn render_orbit_to_stereo_with_cached_waveform(
 
 fn automatic_silence_floor(samples: &[f32]) -> f32 {
     if samples.is_empty() {
-        return 0.012;
+        return 0.006;
     }
 
     let mut levels = samples
@@ -313,7 +313,7 @@ fn automatic_silence_floor(samples: &[f32]) -> f32 {
         .filter(|value| value.is_finite())
         .collect::<Vec<_>>();
     if levels.is_empty() {
-        return 0.012;
+        return 0.006;
     }
 
     levels.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
@@ -323,19 +323,20 @@ fn automatic_silence_floor(samples: &[f32]) -> f32 {
         levels.get(index).copied().unwrap_or(0.0)
     };
 
-    let p08 = percentile(0.08);
-    let p18 = percentile(0.18);
-    let p35 = percentile(0.35);
+    let p05 = percentile(0.05);
+    let p12 = percentile(0.12);
+    let p25 = percentile(0.25);
 
-    // AIMP-like behavior: the user controls only how long a gap must be. The level is inferred
-    // from the track's own noise floor so MP3/AAC dither and tiny decoder noise still count as silence,
-    // while genuinely quiet musical passages are not aggressively removed.
-    (0.010_f32
-        .max(p08 * 5.0)
-        .max(p18 * 3.0)
-        .max(p35 * 1.35)
-        .max(peak * 0.005))
-        .clamp(0.006, 0.034)
+    // Be conservative: gap skipping should catch encoded/dithered silence, not
+    // quiet intros, fades, ambience, or sparse musical passages. Earlier builds
+    // used the 35th percentile too strongly, which could raise the gate too far
+    // on dynamic tracks.
+    (0.004_f32
+        .max(p05 * 6.0)
+        .max(p12 * 3.0)
+        .max(p25 * 0.85)
+        .max(peak * 0.0018))
+        .clamp(0.0025, 0.020)
 }
 
 fn detect_silence_ranges(
@@ -349,14 +350,14 @@ fn detect_silence_ranges(
     }
 
     let sample_rate_usize = sample_rate.max(1) as usize;
-    let window_frames = (sample_rate_usize / 25).max(256); // about 40 ms at common sample rates
+    let window_frames = (sample_rate_usize / 20).max(512); // about 50 ms at common sample rates
     let min_silent_windows = ((threshold_seconds.max(1) as f32 * sample_rate as f32) / window_frames as f32)
         .ceil()
         .max(1.0) as usize;
-    let bridge_tolerance_windows = ((sample_rate as f32 * 0.24) / window_frames as f32)
+    let bridge_tolerance_windows = ((sample_rate as f32 * 0.12) / window_frames as f32)
         .ceil()
         .max(1.0) as usize;
-    let edge_padding_frames = ((sample_rate as f32 * 0.025) as usize).max(1);
+    let edge_padding_frames = ((sample_rate as f32 * 0.080) as usize).max(1);
 
     let mut ranges = Vec::new();
     let mut candidate_start: Option<usize> = None;
@@ -368,7 +369,8 @@ fn detect_silence_ranges(
         let end = (start + chunk.len()).min(mono.len());
         let rms = (chunk.iter().map(|sample| sample * sample).sum::<f32>() / chunk.len().max(1) as f32).sqrt();
         let peak = chunk.iter().map(|sample| sample.abs()).fold(0.0_f32, f32::max);
-        let silent = rms <= silence_floor && peak <= silence_floor * 12.0;
+        let peak_gate = (silence_floor * 6.0).max(0.008);
+        let silent = rms <= silence_floor && peak <= peak_gate;
 
         if silent {
             if candidate_start.is_none() {
@@ -379,7 +381,11 @@ fn detect_silence_ranges(
             continue;
         }
 
-        if candidate_start.is_some() && bridge_windows < bridge_tolerance_windows && rms <= silence_floor * 2.25 {
+        if candidate_start.is_some()
+            && bridge_windows < bridge_tolerance_windows
+            && rms <= silence_floor * 1.35
+            && peak <= peak_gate * 1.50
+        {
             bridge_windows += 1;
             continue;
         }
