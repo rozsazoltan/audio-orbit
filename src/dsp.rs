@@ -1,3 +1,4 @@
+use crate::spectrum_waveform::spectrum_waveform;
 use serde::{Deserialize, Serialize};
 use std::f32::consts::PI;
 
@@ -77,12 +78,16 @@ pub struct RenderInfo {
     pub input_channels: u16,
     pub sample_rate: u32,
     pub waveform: Vec<f32>,
+    pub waveform_brightness: Vec<f32>,
     pub silence_ranges: Vec<(f32, f32)>,
 }
 
 const BASE_ORBIT_RATE_HZ: f32 = 0.20;
 const MAX_STEREO_DELAY_SECONDS: f32 = 0.00085;
 const MAX_SURROUND_DELAY_SECONDS: f32 = 0.00165;
+#[cfg(debug_assertions)]
+const WAVEFORM_POINTS: usize = 1024;
+#[cfg(not(debug_assertions))]
 const WAVEFORM_POINTS: usize = 2048;
 
 pub fn render_orbit_to_stereo(
@@ -92,11 +97,31 @@ pub fn render_orbit_to_stereo(
     settings: DspSettings,
     start_seconds: f32,
 ) -> (Vec<f32>, RenderInfo) {
+    render_orbit_to_stereo_with_cached_waveform(
+        input_samples,
+        input_channels,
+        sample_rate,
+        settings,
+        start_seconds,
+        None,
+    )
+}
+
+pub fn render_orbit_to_stereo_with_cached_waveform(
+    input_samples: &[f32],
+    input_channels: u16,
+    sample_rate: u32,
+    settings: DspSettings,
+    start_seconds: f32,
+    cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
+) -> (Vec<f32>, RenderInfo) {
     let channels = input_channels.max(1) as usize;
     let frame_count = input_samples.len() / channels;
     let mono = downmix_to_mono(input_samples, channels, frame_count);
     let mut start_frame = ((start_seconds.max(0.0) * sample_rate as f32) as usize).min(frame_count);
-    let waveform = waveform_peaks(&mono, WAVEFORM_POINTS);
+    let (waveform, waveform_brightness) = cached_waveform
+        .filter(|(waveform, waveform_brightness)| !waveform.is_empty() && !waveform_brightness.is_empty())
+        .unwrap_or_else(|| spectrum_waveform(&mono, sample_rate, WAVEFORM_POINTS));
 
     let output_level = settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
     let silence_floor = automatic_silence_floor(&mono);
@@ -155,6 +180,7 @@ pub fn render_orbit_to_stereo(
                 input_channels,
                 sample_rate,
                 waveform,
+                waveform_brightness,
                 silence_ranges,
             },
         );
@@ -269,6 +295,7 @@ pub fn render_orbit_to_stereo(
             input_channels,
             sample_rate,
             waveform,
+            waveform_brightness,
             silence_ranges,
         },
     )
@@ -600,57 +627,6 @@ fn downmix_to_mono(input_samples: &[f32], channels: usize, frame_count: usize) -
     }
 
     mono
-}
-
-fn waveform_peaks(samples: &[f32], points: usize) -> Vec<f32> {
-    if samples.is_empty() || points == 0 {
-        return Vec::new();
-    }
-
-    let chunk_size = (samples.len() / points).max(1);
-    let mut peaks = Vec::with_capacity(points);
-    let mut previous = 0.0_f32;
-
-    for chunk in samples.chunks(chunk_size).take(points) {
-        let mut peak = 0.0_f32;
-        let mut energy = 0.0_f64;
-        let mut count = 0usize;
-
-        for sample in chunk {
-            let level = sample.abs().min(1.0);
-            peak = peak.max(level);
-            energy += (level as f64) * (level as f64);
-            count += 1;
-        }
-
-        let rms = if count == 0 {
-            0.0
-        } else {
-            (energy / count as f64).sqrt() as f32
-        };
-        let envelope = aimp_waveform_envelope(peak, rms);
-        previous = if envelope > previous {
-            previous * 0.35 + envelope * 0.65
-        } else {
-            previous * 0.76 + envelope * 0.24
-        };
-        peaks.push(previous.clamp(0.0, 0.92));
-    }
-
-    while peaks.len() < points {
-        peaks.push(0.0);
-    }
-
-    peaks
-}
-
-fn aimp_waveform_envelope(peak: f32, rms: f32) -> f32 {
-    let peak = peak.abs().max(0.000_01).min(1.0);
-    let rms = rms.abs().max(0.000_01).min(1.0);
-    let db = 20.0 * (rms * 0.82 + peak * 0.18).log10();
-    let body = ((db + 54.0) / 54.0).clamp(0.0, 1.0);
-    let transient = (peak / (rms + 0.020)).clamp(0.0, 5.0) / 5.0;
-    (body.powf(1.34) * 0.82 + transient.powf(1.8) * 0.18).clamp(0.0, 0.92)
 }
 
 fn smooth_value(previous: f32, target: f32, smoothing_coeff: f32) -> f32 {

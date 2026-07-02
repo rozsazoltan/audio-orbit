@@ -16,6 +16,18 @@ pub const FAVORITES_PLAYLIST_NAME: &str = "Favorites";
 const BACKUP_STATE_ENTRY: &str = "audio-orbit/state.json";
 const BACKUP_META_ENTRY: &str = "audio-orbit/backup.json";
 
+pub fn app_semver() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+pub fn app_version_label() -> &'static str {
+    if cfg!(debug_assertions) {
+        "dev"
+    } else {
+        concat!("v", env!("CARGO_PKG_VERSION"))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlaylistKind {
     Favorites,
@@ -75,6 +87,8 @@ pub struct Track {
     pub metadata: TrackMetadata,
     #[serde(default)]
     pub waveform: Vec<f32>,
+    #[serde(default)]
+    pub waveform_brightness: Vec<f32>,
 }
 
 impl Track {
@@ -87,10 +101,12 @@ impl Track {
             .unwrap_or_else(|| display_file_name(&path));
 
         let group = folder_group_for_path(&path, root, folder_depth);
-        let metadata = read_track_metadata(&path).unwrap_or_else(|_| TrackMetadata {
+        // Keep large folder imports responsive: expensive decoder/tag metadata is filled
+        // lazily from playback results instead of being read for every scanned file.
+        let metadata = TrackMetadata {
             size_bytes: fs::metadata(&path).ok().map(|metadata| metadata.len()),
             ..Default::default()
-        });
+        };
 
         Self {
             path,
@@ -98,6 +114,7 @@ impl Track {
             group,
             metadata,
             waveform: Vec::new(),
+            waveform_brightness: Vec::new(),
         }
     }
 
@@ -107,6 +124,7 @@ impl Track {
         sample_rate_hz: u32,
         channels: u16,
         waveform: Vec<f32>,
+        waveform_brightness: Vec<f32>,
     ) {
         self.metadata.duration_seconds = Some(duration_seconds);
         self.metadata.sample_rate_hz = Some(sample_rate_hz);
@@ -114,7 +132,10 @@ impl Track {
         if self.metadata.size_bytes.is_none() {
             self.metadata.size_bytes = fs::metadata(&self.path).ok().map(|metadata| metadata.len());
         }
-        self.waveform = waveform;
+        if !waveform.is_empty() && !waveform_brightness.is_empty() {
+            self.waveform = waveform;
+            self.waveform_brightness = waveform_brightness;
+        }
     }
 }
 
@@ -314,6 +335,59 @@ impl DspProfile {
 }
 
 
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecognitionSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub songrec_command: Option<PathBuf>,
+    #[serde(default = "default_recognition_sample_seconds")]
+    pub sample_seconds: u8,
+    #[serde(default = "default_true")]
+    pub prefer_stream_metadata: bool,
+    #[serde(default = "default_true")]
+    pub manage_songrec_automatically: bool,
+    #[serde(default = "default_true")]
+    pub auto_update_songrec: bool,
+    #[serde(default)]
+    pub last_songrec_auto_check_unix_seconds: u64,
+    #[serde(default)]
+    pub installed_songrec_version: Option<String>,
+}
+
+impl Default for RecognitionSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            songrec_command: None,
+            sample_seconds: default_recognition_sample_seconds(),
+            prefer_stream_metadata: true,
+            manage_songrec_automatically: true,
+            auto_update_songrec: true,
+            last_songrec_auto_check_unix_seconds: 0,
+            installed_songrec_version: None,
+        }
+    }
+}
+
+impl RecognitionSettings {
+    pub fn clamped_sample_seconds(&self) -> u8 {
+        self.sample_seconds.clamp(6, 20)
+    }
+
+    pub fn command_label(&self) -> String {
+        self.songrec_command
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "Auto: managed .audio-orbit-dll, app folder, then PATH".to_owned())
+    }
+}
+
+fn default_recognition_sample_seconds() -> u8 {
+    12
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RecordingSettings {
     #[serde(default)]
@@ -333,6 +407,14 @@ pub fn default_recording_output_folder() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join(".audio-orbit-records")))
+}
+
+
+pub fn external_tools_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(".audio-orbit-dll")))
+        .unwrap_or_else(|| PathBuf::from(".audio-orbit-dll"))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -459,6 +541,8 @@ pub struct UiSettings {
     pub player_only_mode: bool,
     #[serde(default)]
     pub show_track_search: bool,
+    #[serde(default = "default_true")]
+    pub search_playback_filtered_only: bool,
     #[serde(default)]
     pub window_geometry: Option<WindowGeometry>,
     #[serde(default)]
@@ -476,6 +560,7 @@ impl Default for UiSettings {
             show_profile_panel: true,
             player_only_mode: false,
             show_track_search: false,
+            search_playback_filtered_only: true,
             window_geometry: None,
             full_layout_window_geometry: None,
             player_only_window_geometry: None,
@@ -507,6 +592,8 @@ pub struct SavedState {
     #[serde(default)]
     pub recording: RecordingSettings,
     #[serde(default)]
+    pub recognition: RecognitionSettings,
+    #[serde(default)]
     pub ui: UiSettings,
 }
 
@@ -533,6 +620,7 @@ impl Default for SavedState {
             update_settings: UpdateSettings::default(),
             playback: PlaybackSettings::default(),
             recording: RecordingSettings::default(),
+            recognition: RecognitionSettings::default(),
             ui: UiSettings::default(),
         }
     }
@@ -591,7 +679,7 @@ pub fn export_state_zip(state: &SavedState, path: &Path) -> Result<()> {
 
     let meta = serde_json::json!({
         "app": "Audio Orbit",
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": app_version_label(),
         "type": "full-app-state-backup"
     });
     zip.start_file(BACKUP_META_ENTRY, options)?;

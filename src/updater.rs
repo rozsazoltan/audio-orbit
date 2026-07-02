@@ -1,3 +1,4 @@
+use crate::config::{app_semver, app_version_label};
 use anyhow::{Context, Result};
 use reqwest::{blocking::Client, StatusCode};
 use semver::Version;
@@ -63,8 +64,8 @@ pub fn check_for_update(include_prereleases: bool) -> Result<UpdateCheck> {
         get_github_json(&client, LATEST_RELEASE_API, "GitHub latest release")?
     };
 
-    let current_version = env!("CARGO_PKG_VERSION").to_owned();
-    let current_semver = Version::parse(&current_version).context("invalid current application version")?;
+    let current_version = app_version_label().to_owned();
+    let current_semver = Version::parse(app_semver()).context("invalid current application version")?;
     let latest_semver = Version::parse(latest_release.tag_name.trim_start_matches('v'))
         .context("invalid latest GitHub release version")?;
 

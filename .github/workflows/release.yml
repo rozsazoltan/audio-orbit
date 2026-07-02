@@ -250,7 +250,7 @@ jobs:
 
       - name: Build executable from merged release commit
         shell: pwsh
-        run: cargo build --release --target $env:RUST_TARGET
+        run: cargo build --release --target $env:RUST_TARGET --bin audio-orbit
 
       - name: Prepare release asset
         shell: pwsh
