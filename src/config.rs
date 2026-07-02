@@ -16,10 +16,6 @@ pub const FAVORITES_PLAYLIST_NAME: &str = "Favorites";
 const BACKUP_STATE_ENTRY: &str = "audio-orbit/state.json";
 const BACKUP_META_ENTRY: &str = "audio-orbit/backup.json";
 
-pub fn app_semver() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
 pub fn app_version_label() -> &'static str {
     if cfg!(debug_assertions) {
         "dev"
@@ -330,58 +326,6 @@ impl DspProfile {
 
 
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RecognitionSettings {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub songrec_command: Option<PathBuf>,
-    #[serde(default = "default_recognition_sample_seconds")]
-    pub sample_seconds: u8,
-    #[serde(default = "default_true")]
-    pub prefer_stream_metadata: bool,
-    #[serde(default = "default_true")]
-    pub manage_songrec_automatically: bool,
-    #[serde(default = "default_true")]
-    pub auto_update_songrec: bool,
-    #[serde(default)]
-    pub last_songrec_auto_check_unix_seconds: u64,
-    #[serde(default)]
-    pub installed_songrec_version: Option<String>,
-}
-
-impl Default for RecognitionSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            songrec_command: None,
-            sample_seconds: default_recognition_sample_seconds(),
-            prefer_stream_metadata: true,
-            manage_songrec_automatically: true,
-            auto_update_songrec: true,
-            last_songrec_auto_check_unix_seconds: 0,
-            installed_songrec_version: None,
-        }
-    }
-}
-
-impl RecognitionSettings {
-    pub fn clamped_sample_seconds(&self) -> u8 {
-        self.sample_seconds.clamp(6, 20)
-    }
-
-    pub fn command_label(&self) -> String {
-        self.songrec_command
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "Auto: managed .audio-orbit-dll, app folder, then PATH".to_owned())
-    }
-}
-
-fn default_recognition_sample_seconds() -> u8 {
-    12
-}
-
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RecordingSettings {
     #[serde(default)]
@@ -401,31 +345,6 @@ pub fn default_recording_output_folder() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join(".audio-orbit-records")))
-}
-
-
-pub fn external_tools_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join(".audio-orbit-dll")))
-        .unwrap_or_else(|| PathBuf::from(".audio-orbit-dll"))
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct UpdateSettings {
-    #[serde(default)]
-    pub include_prereleases: bool,
-    #[serde(default)]
-    pub last_auto_check_unix_seconds: u64,
-}
-
-impl Default for UpdateSettings {
-    fn default() -> Self {
-        Self {
-            include_prereleases: false,
-            last_auto_check_unix_seconds: 0,
-        }
-    }
 }
 
 
@@ -580,13 +499,9 @@ pub struct SavedState {
     #[serde(default)]
     pub last_played_track: Option<LastPlayedTrack>,
     #[serde(default)]
-    pub update_settings: UpdateSettings,
-    #[serde(default)]
     pub playback: PlaybackSettings,
     #[serde(default)]
     pub recording: RecordingSettings,
-    #[serde(default)]
-    pub recognition: RecognitionSettings,
     #[serde(default)]
     pub ui: UiSettings,
 }
@@ -611,10 +526,8 @@ impl Default for SavedState {
             radio_stations: Vec::new(),
             selected_radio_index: None,
             last_played_track: None,
-            update_settings: UpdateSettings::default(),
             playback: PlaybackSettings::default(),
             recording: RecordingSettings::default(),
-            recognition: RecognitionSettings::default(),
             ui: UiSettings::default(),
         }
     }

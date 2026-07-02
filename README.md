@@ -2,7 +2,6 @@
 
 `audio-orbit` is a lightweight Windows music player for local audio libraries, internet radio streams, folder-based playlists, smooth crossfade playback, silence skipping, and headphone-friendly orbit-style stereo movement.
 
-It is designed for people who keep music in local folders and want an AIMP-like desktop player with portable app data, playlist backups, global media keys, release updates, and simple spatial stereo controls. The orbit effect can be turned off per sound profile, so the app can also be used as a normal stereo music player.
 
 - [What it does](#what-it-does)
   - [Local music libraries](#local-music-libraries)
@@ -10,9 +9,7 @@ It is designed for people who keep music in local folders and want an AIMP-like 
   - [Playback](#playback)
   - [Sound profiles](#sound-profiles)
   - [Backups](#backups)
-  - [Updates](#updates)
   - [Radio recordings](#radio-recordings)
-  - [Free song recognition](#free-song-recognition)
 - [Get started](#get-started)
 - [Usage](#usage)
   - [Create a folder playlist](#create-a-folder-playlist)
@@ -22,7 +19,6 @@ It is designed for people who keep music in local folders and want an AIMP-like 
   - [Search tracks](#search-tracks)
   - [Manage Favorites](#manage-favorites)
   - [Export and import backups](#export-and-import-backups)
-  - [Check for updates](#check-for-updates)
 - [Window behavior](#window-behavior)
 - [Data location](#data-location)
 - [Known limitations](#known-limitations)
@@ -61,7 +57,6 @@ Audio Orbit supports common desktop-player behavior:
 - favorite radio stations and filter the Radio list to favorites
 - show a live radio visualizer with elapsed listening time
 - record the original internet radio stream bytes to timestamped files
-- identify the current track with StreamTitle metadata or a free SongRec-compatible local recognizer
 - remember the window size and position between app launches
 - prevent multiple app instances from running at the same time
 
@@ -86,7 +81,6 @@ Backups are ZIP files containing the full app state:
 - crossfade settings
 - silence skip settings
 - internet radio station list
-- update settings
 - UI layout settings
 
 Audio files themselves are not embedded in the backup. The backup stores library and playlist state, not your music collection.
@@ -98,23 +92,15 @@ Internet radio recordings are captured from the original stream bytes before vol
 
 Saved files use the stop-time based format `audio-orbit-records-yyyy-mm-dd-hh-mm-ss.mp3`. By default, recordings are saved next to the executable in `.audio-orbit-records/`. Right-click the microphone button to open the current recordings folder, or open/change it from **Settings > Recording**.
 
-### Free song recognition
 
-Audio Orbit includes an optional 100% free recognition path. Recognition is off by default. When it is enabled, internet radio can be identified instantly from stream metadata when the station provides `StreamTitle`. For audio fingerprint recognition, Audio Orbit can install and manage SongRec in the portable `.audio-orbit-dll` helper folder, or you can set a custom SongRec executable in **Settings > Recognition**.
 
-Audio Orbit captures a short DSP-free sample from the current local track or live radio stream, writes a temporary WAV file, and asks SongRec to recognize it. No paid API key is required. When automatic SongRec management is enabled, Audio Orbit checks SongRec releases at most once per day on startup and also provides manual Check / Install / update buttons. The managed installer downloads a Windows portable `.zip` or `.exe` asset from GitHub releases into `.audio-orbit-dll`, prefers ZIP/CLI assets over GUI installer assets, extracts `songrec.exe`, `songrec-cli.exe`, or `audio-file-to-recognized-song.exe` when the release asset is a ZIP, validates the installed executable, and reports a normal scrollable error instead of silently stopping if the install worker fails. CLI-only release assets are normalized to `songrec-cli.exe` inside `.audio-orbit-dll` so Audio Orbit can find them consistently. Installer-like assets are rejected instead of being renamed into `.audio-orbit-dll` as if they were CLI executables.
 
-SongRec is an unofficial Shazam-compatible recognizer, so this feature is treated as a free optional external backend rather than a required runtime dependency.
 
-### Updates
 
-Audio Orbit can check GitHub releases for new Windows executable builds. Stable releases are checked by default. Prerelease watching can be enabled in the release watcher.
 
-On startup, Audio Orbit performs a background update check at most once per hour. If a newer release is available, the release watcher modal opens automatically. To avoid GitHub rate limiting, manual update checks are also limited per app session.
 
 ## Get started
 
-Download the Windows executable from the GitHub Releases page and place it in a folder where Audio Orbit can store its portable data next to the executable.
 
 Recommended layout:
 
@@ -123,7 +109,6 @@ audio-orbit/
 ├─ audio-orbit.exe
 └─ .audio-orbit-data/
    ├─ state.json
-   └─ update/
 ```
 
 Run `audio-orbit.exe`, add a folder playlist, and start playback from the track list.
@@ -196,21 +181,15 @@ Export creates a compressed ZIP backup of the full app state. Import restores th
 
 ### Identify the current song
 
-Enable recognition in **Settings > Recognition**, then use the recognition button in the top toolbar. If the active internet radio stream provides the current title, Audio Orbit returns that metadata immediately. Otherwise, Audio Orbit can install or use SongRec to fingerprint a short clean sample from the current playback.
 
-### Check for updates
 
-Open **Settings** or **Release watcher**.
 
-By default, only stable releases are checked. Enable prerelease watching when you want to include prerelease builds.
 
-If an update is available, Audio Orbit can replace its current executable and restart itself.
 
 ## Window behavior
 
 Audio Orbit remembers the window size and position when the app closes and restores the same layout on the next launch. Player-only and full-layout sizes are kept separately, and switching modes restores that mode's own saved width and height.
 
-Settings, Updates, Backup, About, folder import, add-radio, and Details dialogs use responsive modal layouts with internal scrolling on small windows and a fixed bottom info area for status/error messages.
 
 Only one Audio Orbit instance can run at a time. If the app is already open, starting the executable again exits immediately instead of opening a second player window.
 
@@ -222,7 +201,6 @@ Audio Orbit stores app data next to the executable:
 .audio-orbit-data/state.json
 ```
 
-This keeps settings portable across version updates when the new executable replaces the old one in the same folder.
 
 ## Known limitations
 
@@ -234,21 +212,16 @@ Support for audio formats depends on the bundled Rust audio decoding stack. Comm
 
 ## Contributing
 
-Development notes, local build steps, release workflow notes, and contribution guidance live in [CONTRIBUTING.md](CONTRIBUTING.md). For local Windows development with WSL/Mutagen sync, run `cargo dev` or `./scripts/dev.ps1` from the Windows checkout; debug builds identify themselves as `dev` instead of the packaged release version.
 
 ## License & Acknowledgments
 
-Audio Orbit is open source and released under the [GNU Affero General Public License v3.0 (AGPL-3.0)](https://www.gnu.org/licenses/agpl-3.0.html).
 
-The app uses Rust ecosystem libraries for the desktop UI, audio decoding/playback, metadata reading, ZIP backups, HTTP update checks, and Lucide icons.
 
 Copyright (C) 2020–present [Zoltán Rózsa](https://github.com/rozsazoltan)
 
-### Notes on waveform analysis and recognition
 
 Audio Orbit renders local and live radio waveform bars through a RustFFT-backed amplitude analysis path. The visual design intentionally follows AIMP-like progress bars: neutral gray for the upcoming waveform, blue for the played region, and yellow markers for silence-skip sections. The analyzer still uses spectral information internally to shape a stable loudness envelope, but the UI does not draw colored bass/mid/treble stacks.
 
-Free recognition uses radio stream metadata first when available. If a real audio lookup is needed, Audio Orbit can install or update `songrec.exe` / `songrec-cli.exe` in the managed `.audio-orbit-dll` folder, or use a custom executable path from Settings > Recognition. Recognized titles are copied to the clipboard automatically.
 
 
 ## Development runner

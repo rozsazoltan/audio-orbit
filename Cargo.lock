@@ -515,7 +515,6 @@ dependencies = [
  "rfd",
  "rodio",
  "rustfft",
- "semver",
  "serde",
  "serde_json",
  "windows-sys 0.59.0",
