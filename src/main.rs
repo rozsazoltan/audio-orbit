@@ -3257,7 +3257,7 @@ impl AudioOrbitApp {
         });
 
         if self.active_radio_index.is_some() {
-            let requested_points = (ui.available_width() / 2.8).round().clamp(80.0, 900.0) as usize;
+            let requested_points = (ui.available_width() / 1.65).round().clamp(140.0, 1600.0) as usize;
             let frame = self
                 .player
                 .as_ref()
@@ -6097,50 +6097,75 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
 
     painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(210));
 
-    let bar_count = (rect.width() / 2.8).round().clamp(80.0, 900.0) as usize;
-    let gap = 0.75;
+    let bar_count = (rect.width() / 1.65).round().clamp(140.0, 1600.0) as usize;
+    let gap = 0.85;
     let bar_width = ((rect.width() - gap * bar_count.saturating_sub(1) as f32) / bar_count.max(1) as f32)
-        .clamp(0.65, 2.2);
+        .clamp(0.75, 2.2);
     let pitch = bar_width + gap;
-    let bucket_seconds = if frame.bucket_seconds > 0.0 { frame.bucket_seconds } else { 1.0 / 16.0 };
-
+    let bucket_seconds = if frame.bucket_seconds > 0.0 { frame.bucket_seconds } else { 1.0 / 32.0 };
     let center_y = rect.center().y;
-    let baseline_color = egui::Color32::from_rgb(58, 63, 74);
-    let played_color = egui::Color32::from_rgb(78, 148, 255);
 
-    for index in 0..bar_count {
+    let mut levels = vec![0.0_f32; bar_count];
+    for bar in &frame.bars {
+        let slot_from_right = (bar.age_seconds.max(0.0) / bucket_seconds).round() as usize;
+        if slot_from_right >= bar_count {
+            continue;
+        }
+        let slot = bar_count - 1 - slot_from_right;
+        levels[slot] = levels[slot].max(bar.peak.clamp(0.0, 1.0));
+    }
+
+    let peak = levels
+        .iter()
+        .copied()
+        .fold(0.0_f32, f32::max)
+        .max(0.08);
+    let mut sorted = levels.clone();
+    sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let floor_index = ((sorted.len().saturating_sub(1)) as f32 * 0.12) as usize;
+    let noise_floor = sorted.get(floor_index).copied().unwrap_or(0.0).min(peak * 0.55);
+    let dynamic_range = (peak - noise_floor).max(0.05);
+
+    let empty_color = egui::Color32::from_rgb(58, 63, 74);
+    let live_color = egui::Color32::from_rgb(78, 148, 255);
+
+    for (index, value) in levels.into_iter().enumerate() {
         let x1 = rect.left() + index as f32 * pitch;
         let x2 = (x1 + bar_width).min(rect.right());
-        painter.rect_filled(
-            egui::Rect::from_min_max(egui::pos2(x1, center_y - 0.45), egui::pos2(x2, center_y + 0.45)),
-            0.0,
-            baseline_color,
-        );
-    }
+        if x1 >= rect.right() {
+            break;
+        }
 
-    for bar in &frame.bars {
-        let offset = bar.age_seconds.max(0.0) / bucket_seconds;
-        let x2 = rect.right() - offset * pitch;
-        let x1 = x2 - bar_width;
-        if x1 >= rect.right() || x2 <= rect.left() {
+        if value <= 0.004 {
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(x1, center_y - 0.45),
+                    egui::pos2(x2, center_y + 0.45),
+                ),
+                0.0,
+                empty_color,
+            );
             continue;
         }
 
-        let value = bar.peak.clamp(0.0, 1.0);
-        if value <= 0.006 {
-            continue;
-        }
-        let eased = value.powf(1.18);
-        let height = (rect.height() * 0.84 * eased).clamp(2.0, rect.height() * 0.88);
+        let normalized = ((value - noise_floor) / dynamic_range).clamp(0.018, 1.0);
+        let eased = normalized.powf(1.08);
+        let height = (rect.height() * 0.84 * eased).max(3.0).min(rect.height() - 4.0);
         painter.rect_filled(
             egui::Rect::from_min_max(
-                egui::pos2(x1.max(rect.left()), center_y - height * 0.5),
-                egui::pos2(x2.min(rect.right()), center_y + height * 0.5),
+                egui::pos2(x1, center_y - height * 0.5),
+                egui::pos2(x2, center_y + height * 0.5),
             ),
             0.0,
-            played_color,
+            live_color,
         );
     }
+
+    let live_edge = egui::Rect::from_min_max(
+        egui::pos2(rect.right() - 2.0, rect.top() + 4.0),
+        egui::pos2(rect.right(), rect.bottom() - 4.0),
+    );
+    painter.rect_filled(live_edge, 0.0, egui::Color32::WHITE.linear_multiply(0.85));
 
     response
 }
