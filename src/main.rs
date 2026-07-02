@@ -599,20 +599,25 @@ impl AudioOrbitApp {
     }
 
     fn restore_repeat_selection_for_current_playlist(&mut self) {
-        self.selected_track_indexes.clear();
-        let Some(playlist) = self.current_playlist() else {
-            return;
-        };
+        let selected_indexes = self
+            .current_playlist()
+            .map(|playlist| {
+                playlist
+                    .tracks
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, track)| {
+                        playlist
+                            .repeat_selection
+                            .iter()
+                            .any(|selected_path| same_path(selected_path.as_path(), track.path.as_path()))
+                            .then_some(index)
+                    })
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
 
-        for (index, track) in playlist.tracks.iter().enumerate() {
-            if playlist
-                .repeat_selection
-                .iter()
-                .any(|selected_path| same_path(selected_path, &track.path))
-            {
-                self.selected_track_indexes.insert(index);
-            }
-        }
+        self.selected_track_indexes = selected_indexes;
     }
 
     fn persist_repeat_selection_for_current_playlist(&mut self) {
@@ -5378,11 +5383,11 @@ fn ensure_state_is_valid(state: &mut SavedState) {
         playlist
             .repeat_selection
             .retain(|selected_path| track_paths.iter().any(|track_path| same_path(track_path, selected_path)));
-        let mut deduped_repeat_selection = Vec::new();
+        let mut deduped_repeat_selection: Vec<PathBuf> = Vec::new();
         for selected_path in playlist.repeat_selection.drain(..) {
             if !deduped_repeat_selection
                 .iter()
-                .any(|existing_path| same_path(existing_path, &selected_path))
+                .any(|existing_path| same_path(existing_path.as_path(), selected_path.as_path()))
             {
                 deduped_repeat_selection.push(selected_path);
             }
