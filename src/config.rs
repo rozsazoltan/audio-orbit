@@ -166,6 +166,40 @@ pub struct LastPlayedTrack {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlaybackSession {
+    #[serde(default)]
+    pub was_active: bool,
+    #[serde(default = "default_playback_session_source")]
+    pub source: String,
+    #[serde(default)]
+    pub playlist_index: Option<usize>,
+    #[serde(default)]
+    pub track_path: Option<PathBuf>,
+    #[serde(default)]
+    pub position_seconds: f32,
+    #[serde(default)]
+    pub radio_index: Option<usize>,
+}
+
+impl Default for PlaybackSession {
+    fn default() -> Self {
+        Self {
+            was_active: false,
+            source: default_playback_session_source(),
+            playlist_index: None,
+            track_path: None,
+            position_seconds: 0.0,
+            radio_index: None,
+        }
+    }
+}
+
+fn default_playback_session_source() -> String {
+    "music".to_owned()
+}
+
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Playlist {
     pub name: String,
     pub tracks: Vec<Track>,
@@ -499,6 +533,8 @@ pub struct SavedState {
     #[serde(default)]
     pub last_played_track: Option<LastPlayedTrack>,
     #[serde(default)]
+    pub playback_session: PlaybackSession,
+    #[serde(default)]
     pub playback: PlaybackSettings,
     #[serde(default)]
     pub recording: RecordingSettings,
@@ -526,6 +562,7 @@ impl Default for SavedState {
             radio_stations: Vec::new(),
             selected_radio_index: None,
             last_played_track: None,
+            playback_session: PlaybackSession::default(),
             playback: PlaybackSettings::default(),
             recording: RecordingSettings::default(),
             ui: UiSettings::default(),

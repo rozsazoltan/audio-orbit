@@ -13,7 +13,7 @@ use crate::{
     audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo, PreparedPlayback, RadioVisualizerFrame},
     config::{
         app_data_dir, app_version_label, collect_audio_files_from_folder, display_file_name, export_state_zip,
-        import_state_zip, load_state, same_path, save_state, LastPlayedTrack, Playlist, PlaylistKind, RadioStation, RepeatMode, SavedState,
+        import_state_zip, load_state, same_path, save_state, LastPlayedTrack, PlaybackSession, Playlist, PlaylistKind, RadioStation, RepeatMode, SavedState,
         Track, WindowGeometry, FAVORITES_PLAYLIST_NAME,
     },
     dsp::{DspSettings, OrbitMode},
@@ -240,6 +240,8 @@ struct AudioOrbitApp {
     pending_prepared_track_receiver: Option<mpsc::Receiver<Result<PreparedTrackPlayback, String>>>,
     pending_folder_scan_receiver: Option<mpsc::Receiver<Result<PendingFolderScanResult, String>>>,
     pending_profile_apply_at: Option<Instant>,
+    profile_apply_applied_until: Option<Instant>,
+    waveform_drag_position_seconds: Option<f32>,
     suppress_window_geometry_save_until: Option<Instant>,
     show_folder_import_modal: bool,
     show_radio_add_modal: bool,
@@ -318,6 +320,8 @@ impl AudioOrbitApp {
                     pending_prepared_track_receiver: None,
                     pending_folder_scan_receiver: None,
                     pending_profile_apply_at: None,
+                    profile_apply_applied_until: None,
+                    waveform_drag_position_seconds: None,
                     suppress_window_geometry_save_until: None,
                     show_folder_import_modal: false,
                     show_radio_add_modal: false,
@@ -383,6 +387,8 @@ impl AudioOrbitApp {
                 pending_prepared_track_receiver: None,
                 pending_folder_scan_receiver: None,
                 pending_profile_apply_at: None,
+                profile_apply_applied_until: None,
+                waveform_drag_position_seconds: None,
                 suppress_window_geometry_save_until: None,
                 show_folder_import_modal: false,
                 show_radio_add_modal: false,
@@ -438,8 +444,7 @@ impl AudioOrbitApp {
         app.media_key_receiver = media_keys.receiver;
         app.media_key_status = media_keys.status_message;
         app.restore_last_played_track_selection();
-        app.state.selected_radio_index = None;
-        app.radio_selection_was_user_set = false;
+        app.restore_saved_playback_session();
         app
     }
 
@@ -676,6 +681,132 @@ impl AudioOrbitApp {
         };
         self.state.selected_playlist_index = last_played.playlist_index;
         self.selected_track_index = Some(track_index);
+        self.scroll_to_active_track_requested = true;
+    }
+
+    fn restore_saved_playback_session(&mut self) {
+        let session = self.state.playback_session.clone();
+        match session.source.as_str() {
+            "radio" => {
+                let Some(radio_index) = session.radio_index.or(self.state.selected_radio_index) else {
+                    return;
+                };
+                if radio_index >= self.state.radio_stations.len() {
+                    return;
+                }
+                self.active_tab = MainContentTab::Radio;
+                self.state.selected_radio_index = Some(radio_index);
+                self.radio_selection_was_user_set = true;
+                self.scroll_to_active_radio_requested = true;
+                if session.was_active {
+                    self.play_radio_station(radio_index);
+                }
+            }
+            "track" | "music" => {
+                let Some((playlist_index, track_index, path)) = self.find_session_track(&session) else {
+                    return;
+                };
+                self.active_tab = MainContentTab::Music;
+                self.state.selected_playlist_index = playlist_index;
+                self.selected_track_index = Some(track_index);
+                self.scroll_to_active_track_requested = true;
+                if session.was_active {
+                    let start_seconds = session.position_seconds.max(0.0);
+                    self.play_path(path, Some(track_index), start_seconds);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn find_session_track(&self, session: &PlaybackSession) -> Option<(usize, usize, PathBuf)> {
+        let session_path = session
+            .track_path
+            .as_ref()
+            .or_else(|| self.state.last_played_track.as_ref().map(|track| &track.track_path))?;
+        let preferred_playlist = session
+            .playlist_index
+            .or_else(|| self.state.last_played_track.as_ref().map(|track| track.playlist_index));
+
+        if let Some(playlist_index) = preferred_playlist {
+            if let Some(playlist) = self.state.playlists.get(playlist_index) {
+                if let Some(track_index) = playlist.tracks.iter().position(|track| same_path(&track.path, session_path)) {
+                    return Some((playlist_index, track_index, playlist.tracks[track_index].path.clone()));
+                }
+            }
+        }
+
+        for (playlist_index, playlist) in self.state.playlists.iter().enumerate() {
+            if let Some(track_index) = playlist.tracks.iter().position(|track| same_path(&track.path, session_path)) {
+                return Some((playlist_index, track_index, playlist.tracks[track_index].path.clone()));
+            }
+        }
+
+        None
+    }
+
+    fn persist_playback_session(&mut self) {
+        let mut session = PlaybackSession::default();
+        session.source = match self.active_tab {
+            MainContentTab::Radio => "radio".to_owned(),
+            MainContentTab::Music => "music".to_owned(),
+        };
+
+        let radio_candidate = if self.active_radio_index.is_some()
+            || (self.active_track_path.is_none() && self.active_tab == MainContentTab::Radio)
+        {
+            self.active_radio_index.or(self.state.selected_radio_index)
+        } else {
+            None
+        };
+
+        if let Some(radio_index) = radio_candidate {
+            let is_active = self
+                .player
+                .as_ref()
+                .map(|player| player.is_playing() || player.is_paused())
+                .unwrap_or(false)
+                && self.active_radio_index.is_some();
+            session.source = "radio".to_owned();
+            session.was_active = is_active;
+            session.radio_index = Some(radio_index);
+            self.state.selected_radio_index = Some(radio_index);
+            self.state.playback_session = session;
+            return;
+        }
+
+        let track_path = self
+            .active_track_path
+            .clone()
+            .or_else(|| self.selected_track_path())
+            .or_else(|| self.state.last_played_track.as_ref().map(|track| track.track_path.clone()));
+        if let Some(path) = track_path {
+            let playlist_index = self
+                .active_playlist_index
+                .or_else(|| self.state.last_played_track.as_ref().map(|track| track.playlist_index))
+                .unwrap_or(self.state.selected_playlist_index);
+            let is_active = self
+                .player
+                .as_ref()
+                .map(|player| player.is_playing() || player.is_paused())
+                .unwrap_or(false)
+                && self.active_track_path.is_some();
+            session.source = "track".to_owned();
+            session.was_active = is_active;
+            session.playlist_index = Some(playlist_index);
+            session.track_path = Some(path.clone());
+            session.position_seconds = if is_active {
+                self.displayed_playback_position_seconds().max(0.0)
+            } else {
+                0.0
+            };
+            self.state.last_played_track = Some(LastPlayedTrack {
+                playlist_index,
+                track_path: path,
+            });
+        }
+
+        self.state.playback_session = session;
     }
 
     fn active_track_title(&self) -> String {
@@ -848,6 +979,7 @@ impl AudioOrbitApp {
                 self.state.selected_radio_index = Some(index);
                 self.radio_selection_was_user_set = true;
                 self.status_message = format!("Playing internet radio: {}.", station.name);
+                self.persist_playback_session();
                 self.save_state_silently();
                 self.start_radio_title_lookup(index, station.url);
             }
@@ -1360,6 +1492,8 @@ impl AudioOrbitApp {
                     } else {
                         format!("Playing {} through {}.", display_file_name(&info.path), mode_label)
                     };
+                    self.persist_playback_session();
+                    self.save_state_silently();
                     self.error_message = None;
                 }
                 Err(error) => {
@@ -1509,6 +1643,8 @@ impl AudioOrbitApp {
                     } else {
                         format!("Playing {} through {}.", display_file_name(&info.path), mode_label)
                     };
+                    self.persist_playback_session();
+                    self.save_state_silently();
                 }
                 self.error_message = None;
             }
@@ -1616,6 +1752,9 @@ impl AudioOrbitApp {
                 self.status_message = format!("Seeked to {}.", format_duration(seconds));
                 self.store_playback_metadata(&info);
                 self.last_playback = Some(info);
+                self.waveform_drag_position_seconds = None;
+                self.persist_playback_session();
+                self.save_state_silently();
                 self.error_message = None;
             }
             Ok(None) => {}
@@ -1627,9 +1766,16 @@ impl AudioOrbitApp {
 
     fn schedule_current_profile_apply(&mut self) {
         self.pending_profile_apply_at = Some(Instant::now() + Duration::from_secs(3));
+        self.profile_apply_applied_until = None;
     }
 
     fn process_pending_profile_apply(&mut self) {
+        if let Some(until) = self.profile_apply_applied_until {
+            if Instant::now() >= until {
+                self.profile_apply_applied_until = None;
+            }
+        }
+
         let Some(apply_at) = self.pending_profile_apply_at else {
             return;
         };
@@ -1639,8 +1785,25 @@ impl AudioOrbitApp {
         }
 
         self.pending_profile_apply_at = None;
+        self.profile_apply_applied_until = Some(Instant::now() + Duration::from_secs(2));
         self.save_state_silently();
         self.apply_current_profile_live();
+    }
+
+    fn profile_apply_status_text(&self) -> Option<String> {
+        let now = Instant::now();
+        if let Some(apply_at) = self.pending_profile_apply_at {
+            let seconds = apply_at.saturating_duration_since(now).as_secs_f32().ceil().max(1.0) as u64;
+            return Some(format!("Apply in {seconds}s..."));
+        }
+        if self
+            .profile_apply_applied_until
+            .map(|until| now < until)
+            .unwrap_or(false)
+        {
+            return Some("Sound profile applied.".to_owned());
+        }
+        None
     }
 
     fn apply_current_profile_live(&mut self) {
@@ -1678,6 +1841,8 @@ impl AudioOrbitApp {
         self.remember_last_played_track(pending.index, &pending.info.path);
         self.store_playback_metadata(&pending.info);
         self.last_playback = Some(pending.info);
+        self.persist_playback_session();
+        self.save_state_silently();
     }
 
     fn displayed_playback_position_seconds(&self) -> f32 {
@@ -1872,6 +2037,8 @@ impl AudioOrbitApp {
         self.crossfade_started_for_path = None;
         self.last_playback = None;
         self.status_message = "Playback stopped.".to_owned();
+        self.persist_playback_session();
+        self.save_state_silently();
     }
 
     fn pause_or_resume(&mut self) {
@@ -2374,13 +2541,7 @@ impl AudioOrbitApp {
 
 impl Drop for AudioOrbitApp {
     fn drop(&mut self) {
-        if let (Some(index), Some(path)) = (self.active_track_index, self.active_track_path.clone()) {
-            self.state.last_played_track = Some(LastPlayedTrack {
-                playlist_index: self.active_playlist_index.unwrap_or(self.state.selected_playlist_index),
-                track_path: path,
-            });
-            self.selected_track_index = Some(index);
-        }
+        self.persist_playback_session();
         if let Some(player) = &mut self.player {
             player.stop();
         }
@@ -2452,7 +2613,11 @@ impl eframe::App for AudioOrbitApp {
                 });
         }
 
-        if !self.status_message.is_empty() || !self.media_key_status.is_empty() || self.playlist_count_label().is_some() {
+        if self.profile_apply_status_text().is_some()
+            || !self.status_message.is_empty()
+            || !self.media_key_status.is_empty()
+            || self.playlist_count_label().is_some()
+        {
             egui::TopBottomPanel::bottom("status_panel").show(context, |ui| {
                 self.render_status_panel(ui);
             });
@@ -2777,7 +2942,7 @@ impl AudioOrbitApp {
         });
 
         if self.active_radio_index.is_some() {
-            let requested_points = (ui.available_width() / 1.65).round().clamp(140.0, 1600.0) as usize;
+            let requested_points = ui.available_width().round().clamp(96.0, 4096.0) as usize;
             let frame = self
                 .player
                 .as_ref()
@@ -2788,8 +2953,9 @@ impl AudioOrbitApp {
         } else if has_now_playing {
             let position = self.displayed_playback_position_seconds();
             let duration = self.displayed_playback_duration_seconds();
+            let visual_position = self.waveform_drag_position_seconds.unwrap_or(position);
             let progress = if duration > 0.0 {
-                (position / duration).clamp(0.0, 1.0)
+                (visual_position / duration).clamp(0.0, 1.0)
             } else {
                 0.0
             };
@@ -2815,10 +2981,30 @@ impl AudioOrbitApp {
                 .map(|playback| playback.original_duration_seconds)
                 .unwrap_or(duration);
             let response = draw_waveform_seek(ui, waveform, waveform_brightness, progress, silence_ranges, marker_duration);
-            if (response.clicked() || response.drag_stopped()) && duration > 0.0 {
-                if let Some(pointer) = response.interact_pointer_pos() {
-                    let next_position = ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration;
-                    self.seek_current(next_position);
+            if duration > 0.0 {
+                if response.dragged() {
+                    if let Some(pointer) = response.interact_pointer_pos() {
+                        let next_position = ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration;
+                        self.waveform_drag_position_seconds = Some(next_position);
+                    }
+                } else if response.drag_stopped() {
+                    let next_position = self.waveform_drag_position_seconds.or_else(|| {
+                        response.interact_pointer_pos().map(|pointer| {
+                            ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration
+                        })
+                    });
+                    if let Some(next_position) = next_position {
+                        self.seek_current(next_position);
+                    }
+                    self.waveform_drag_position_seconds = None;
+                } else if response.clicked() {
+                    if let Some(pointer) = response.interact_pointer_pos() {
+                        let next_position = ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration;
+                        self.seek_current(next_position);
+                    }
+                    self.waveform_drag_position_seconds = None;
+                } else if !response.hovered() && !ui.input(|input| input.pointer.primary_down()) {
+                    self.waveform_drag_position_seconds = None;
                 }
             }
         } else {
@@ -4738,12 +4924,15 @@ impl AudioOrbitApp {
             (text_width(ui, &self.media_key_status, small_font.clone(), text_color) + 16.0)
                 .min(available_width * 0.35)
         };
-        let separator_width = if !self.status_message.is_empty() && !self.media_key_status.is_empty() { 12.0 } else { 0.0 };
+        let primary_status = self
+            .profile_apply_status_text()
+            .unwrap_or_else(|| self.status_message.clone());
+        let separator_width = if !primary_status.is_empty() && !self.media_key_status.is_empty() { 12.0 } else { 0.0 };
         let available_status_width = (available_width - count_width - media_width - separator_width - 12.0).max(48.0);
 
         ui.horizontal(|ui| {
-            if !self.status_message.is_empty() {
-                render_ellipsized_single_line(ui, &self.status_message, available_status_width, body_font.clone(), text_color);
+            if !primary_status.is_empty() {
+                render_ellipsized_single_line(ui, &primary_status, available_status_width, body_font.clone(), text_color);
                 if !self.media_key_status.is_empty() {
                     ui.separator();
                 }
@@ -5133,6 +5322,20 @@ fn ensure_state_is_valid(state: &mut SavedState) {
         }
     }
 
+
+    if !state.playback_session.position_seconds.is_finite() || state.playback_session.position_seconds < 0.0 {
+        state.playback_session.position_seconds = 0.0;
+    }
+    if !matches!(state.playback_session.source.as_str(), "music" | "track" | "radio") {
+        state.playback_session = PlaybackSession::default();
+    }
+    if let Some(index) = state.playback_session.radio_index {
+        if index >= state.radio_stations.len() {
+            state.playback_session.radio_index = None;
+            state.playback_session.was_active = false;
+        }
+    }
+
     if !state.ui.playlist_scroll_offset_y.is_finite() || state.ui.playlist_scroll_offset_y < 0.0 {
         state.ui.playlist_scroll_offset_y = 0.0;
     }
@@ -5202,12 +5405,9 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
 
     painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(210));
 
-    let bar_count = (rect.width() / 1.65).round().clamp(140.0, 1600.0) as usize;
-    let gap = 0.85;
-    let bar_width = ((rect.width() - gap * bar_count.saturating_sub(1) as f32) / bar_count.max(1) as f32)
-        .clamp(0.75, 2.2);
-    let pitch = bar_width + gap;
-    let bucket_seconds = if frame.bucket_seconds > 0.0 { frame.bucket_seconds } else { 1.0 / 32.0 };
+    let bar_count = rect.width().round().clamp(96.0, 4096.0) as usize;
+    let bar_width = rect.width() / bar_count.max(1) as f32;
+    let bucket_seconds = if frame.bucket_seconds > 0.0 { frame.bucket_seconds } else { 1.0 / 48.0 };
     let center_y = rect.center().y;
 
     let mut levels = vec![0.0_f32; bar_count];
@@ -5220,23 +5420,19 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
         levels[slot] = levels[slot].max(bar.peak.clamp(0.0, 1.0));
     }
 
-    let peak = levels
-        .iter()
-        .copied()
-        .fold(0.0_f32, f32::max)
-        .max(0.08);
+    let peak = levels.iter().copied().fold(0.0_f32, f32::max).max(0.08);
     let mut sorted = levels.clone();
     sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-    let floor_index = ((sorted.len().saturating_sub(1)) as f32 * 0.12) as usize;
-    let noise_floor = sorted.get(floor_index).copied().unwrap_or(0.0).min(peak * 0.55);
+    let floor_index = ((sorted.len().saturating_sub(1)) as f32 * 0.10) as usize;
+    let noise_floor = sorted.get(floor_index).copied().unwrap_or(0.0).min(peak * 0.50);
     let dynamic_range = (peak - noise_floor).max(0.05);
 
     let empty_color = egui::Color32::from_rgb(58, 63, 74);
     let live_color = egui::Color32::from_rgb(78, 148, 255);
 
     for (index, value) in levels.into_iter().enumerate() {
-        let x1 = rect.left() + index as f32 * pitch;
-        let x2 = (x1 + bar_width).min(rect.right());
+        let x1 = rect.left() + index as f32 * bar_width;
+        let x2 = if index + 1 == bar_count { rect.right() } else { rect.left() + (index + 1) as f32 * bar_width };
         if x1 >= rect.right() {
             break;
         }
@@ -5255,7 +5451,7 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
 
         let normalized = ((value - noise_floor) / dynamic_range).clamp(0.018, 1.0);
         let eased = normalized.powf(1.08);
-        let height = (rect.height() * 0.84 * eased).max(3.0).min(rect.height() - 4.0);
+        let height = (rect.height() * 0.84 * eased).max(2.0).min(rect.height() - 4.0);
         painter.rect_filled(
             egui::Rect::from_min_max(
                 egui::pos2(x1, center_y - height * 0.5),
@@ -5295,41 +5491,37 @@ fn draw_waveform_seek(
 
     let progress = progress.clamp(0.0, 1.0);
     let progress_x = rect.left() + rect.width() * progress;
-    let target_points = (rect.width() / 1.65).round().clamp(140.0, 2200.0) as usize;
+    let target_points = rect.width().round().clamp(96.0, 4096.0) as usize;
     let step = (waveform.len() as f32 / target_points.max(1) as f32).ceil().max(1.0) as usize;
-    let rendered_points = (waveform.len() + step - 1) / step;
-    let gap = 0.85;
-    let bar_width = ((rect.width() - gap * rendered_points.saturating_sub(1) as f32) / rendered_points.max(1) as f32)
-        .clamp(0.75, 2.2);
-    let peak = waveform
-        .iter()
-        .copied()
-        .fold(0.0_f32, f32::max)
-        .max(0.08);
+    let rendered_points = ((waveform.len() + step - 1) / step).max(1);
+    let bar_width = rect.width() / rendered_points as f32;
+    let peak = waveform.iter().copied().fold(0.0_f32, f32::max).max(0.08);
     let mut sorted = waveform.to_vec();
     sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-    let floor_index = ((sorted.len().saturating_sub(1)) as f32 * 0.12) as usize;
-    let noise_floor = sorted.get(floor_index).copied().unwrap_or(0.0).min(peak * 0.55);
+    let floor_index = ((sorted.len().saturating_sub(1)) as f32 * 0.10) as usize;
+    let noise_floor = sorted.get(floor_index).copied().unwrap_or(0.0).min(peak * 0.50);
     let dynamic_range = (peak - noise_floor).max(0.05);
 
     let unplayed_color = egui::Color32::from_rgb(92, 98, 110);
     let played_color = egui::Color32::from_rgb(78, 148, 255);
     let silence_color = egui::Color32::from_rgb(238, 194, 74);
+    let center_y = rect.center().y;
 
     for (bar_index, chunk) in waveform.chunks(step).enumerate() {
-        let value = chunk
-            .iter()
-            .copied()
-            .fold(0.0_f32, f32::max);
+        let value = chunk.iter().copied().fold(0.0_f32, f32::max);
         let normalized = ((value - noise_floor) / dynamic_range).clamp(0.018, 1.0);
         let eased = normalized.powf(1.08);
-        let x1 = rect.left() + bar_index as f32 * (bar_width + gap);
-        let x2 = (x1 + bar_width).min(rect.right());
+        let x1 = rect.left() + bar_index as f32 * bar_width;
+        let x2 = if bar_index + 1 == rendered_points { rect.right() } else { rect.left() + (bar_index + 1) as f32 * bar_width };
         if x1 >= rect.right() {
             break;
         }
 
-        let height = (rect.height() * 0.84 * eased).max(3.0).min(rect.height() - 4.0);
+        let height = (rect.height() * 0.84 * eased).max(2.0).min(rect.height() - 4.0);
+        let bar_rect = egui::Rect::from_min_max(
+            egui::pos2(x1, center_y - height * 0.5),
+            egui::pos2(x2, center_y + height * 0.5),
+        );
         let bar_start_seconds = if duration_seconds > 0.0 {
             (bar_index * step) as f32 / waveform.len().max(1) as f32 * duration_seconds
         } else {
@@ -5342,21 +5534,19 @@ fn draw_waveform_seek(
         };
         let is_silence = duration_seconds > 0.0
             && silence_ranges.iter().any(|(start, end)| *end > bar_start_seconds && *start < bar_end_seconds);
-        let color = if is_silence {
-            silence_color
-        } else if x1 <= progress_x {
-            played_color
+
+        if is_silence {
+            painter.rect_filled(bar_rect, 0.0, silence_color);
+        } else if x2 <= progress_x {
+            painter.rect_filled(bar_rect, 0.0, played_color);
+        } else if x1 >= progress_x {
+            painter.rect_filled(bar_rect, 0.0, unplayed_color);
         } else {
-            unplayed_color
-        };
-        painter.rect_filled(
-            egui::Rect::from_min_max(
-                egui::pos2(x1, rect.center().y - height * 0.5),
-                egui::pos2(x2, rect.center().y + height * 0.5),
-            ),
-            0.0,
-            color,
-        );
+            let left_rect = egui::Rect::from_min_max(bar_rect.min, egui::pos2(progress_x, bar_rect.max.y));
+            let right_rect = egui::Rect::from_min_max(egui::pos2(progress_x, bar_rect.min.y), bar_rect.max);
+            painter.rect_filled(left_rect, 0.0, played_color);
+            painter.rect_filled(right_rect, 0.0, unplayed_color);
+        }
     }
 
     let playhead = egui::Rect::from_min_max(
