@@ -26,7 +26,6 @@ const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * R
 pub struct PlaybackInfo {
     pub path: PathBuf,
     pub original_duration_seconds: f32,
-    pub rendered_duration_seconds: f32,
     pub input_channels: u16,
     pub sample_rate: u32,
     pub size_bytes: Option<u64>,
@@ -787,12 +786,9 @@ impl AudioPlayer {
         self.current_radio_url = None;
 
         let original_duration_seconds = total_duration.map(|duration| duration.as_secs_f32()).unwrap_or(0.0);
-        let rendered_duration_seconds = remaining_duration.as_secs_f32();
-
         Ok(PlaybackInfo {
             path: path.to_path_buf(),
             original_duration_seconds,
-            rendered_duration_seconds,
             input_channels,
             sample_rate,
             size_bytes: fs::metadata(path).ok().map(|metadata| metadata.len()),
@@ -931,10 +927,6 @@ impl AudioPlayer {
         }
 
         self.play_file_with_orbit_from(&path, settings, seconds).map(Some)
-    }
-
-    pub fn seek_current(&mut self, seconds: f32) -> Result<Option<PlaybackInfo>> {
-        self.seek_current_with_cached_waveform(seconds, None)
     }
 
     pub fn stop(&mut self) {
@@ -1170,7 +1162,6 @@ fn playback_info(path: &Path, render_info: RenderInfo) -> PlaybackInfo {
     PlaybackInfo {
         path: path.to_path_buf(),
         original_duration_seconds: render_info.original_duration_seconds,
-        rendered_duration_seconds: render_info.rendered_duration_seconds,
         input_channels: render_info.input_channels,
         sample_rate: render_info.sample_rate,
         size_bytes: fs::metadata(path).ok().map(|metadata| metadata.len()),
