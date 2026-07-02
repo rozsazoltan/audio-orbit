@@ -196,6 +196,64 @@ fn db_to_unit_for_radio(db: f32, min_db: f32, max_db: f32, power: f32) -> f32 {
         .powf(power)
 }
 
+struct FadeInSource<S> {
+    inner: S,
+    total_samples: u64,
+    emitted_samples: u64,
+}
+
+impl<S: Source<Item = f32>> FadeInSource<S> {
+    fn new(inner: S, fade_seconds: f32) -> Self {
+        let total_samples = if fade_seconds > 0.0 {
+            (fade_seconds * inner.sample_rate() as f32 * inner.channels().max(1) as f32)
+                .round()
+                .max(0.0) as u64
+        } else {
+            0
+        };
+
+        Self {
+            inner,
+            total_samples,
+            emitted_samples: 0,
+        }
+    }
+}
+
+impl<S: Source<Item = f32>> Iterator for FadeInSource<S> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let sample = self.inner.next()?;
+        if self.total_samples == 0 || self.emitted_samples >= self.total_samples {
+            self.emitted_samples = self.emitted_samples.saturating_add(1);
+            return Some(sample);
+        }
+
+        let gain = (self.emitted_samples as f32 / self.total_samples as f32).clamp(0.0, 1.0);
+        self.emitted_samples = self.emitted_samples.saturating_add(1);
+        Some(sample * gain)
+    }
+}
+
+impl<S: Source<Item = f32>> Source for FadeInSource<S> {
+    fn current_frame_len(&self) -> Option<usize> {
+        self.inner.current_frame_len()
+    }
+
+    fn channels(&self) -> u16 {
+        self.inner.channels()
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.inner.sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
+    }
+}
+
 fn fill_radio_waveform_gaps(values: &mut [f32]) {
     let mut previous: Option<(usize, f32)> = None;
 
@@ -572,7 +630,12 @@ impl AudioPlayer {
         self.volume_percent as f32 / 100.0
     }
 
-    pub fn play_radio_stream(&mut self, url: &str, settings: DspSettings) -> Result<()> {
+    pub fn play_radio_stream_with_crossfade(
+        &mut self,
+        url: &str,
+        settings: DspSettings,
+        crossfade_seconds: f32,
+    ) -> Result<()> {
         let response = reqwest::blocking::Client::builder()
             .user_agent("Audio-Orbit-Radio")
             .build()?
@@ -585,8 +648,17 @@ impl AudioPlayer {
         let decoder = Decoder::new(BufReader::new(stream))
             .with_context(|| format!("failed to decode internet radio stream: {url}"))?;
 
+        let fade_seconds = crossfade_seconds.max(0.0);
         let keep_visualizer_history = self.current_radio_url.as_deref() == Some(url);
-        self.stop();
+        if fade_seconds > 0.05 {
+            let _ = self.stop_radio_recording();
+            if let Some(old_sink) = self.sink.take() {
+                fade_out_and_stop(old_sink, fade_seconds, self.volume_gain());
+            }
+        } else {
+            self.stop();
+        }
+
         if !keep_visualizer_history {
             self.radio_visualizer = Arc::new(Mutex::new(RadioVisualizerState::default()));
         }
@@ -595,7 +667,11 @@ impl AudioPlayer {
         let sink = Sink::try_new(&self.stream_handle)
             .context("failed to create audio playback sink")?;
         sink.set_volume(self.volume_gain());
-        sink.append(radio_source);
+        if fade_seconds > 0.05 {
+            sink.append(FadeInSource::new(radio_source, fade_seconds));
+        } else {
+            sink.append(radio_source);
+        }
         sink.play();
 
         self.sink = Some(sink);

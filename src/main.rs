@@ -37,6 +37,7 @@ use std::{
 // appear instead of a solid high-frequency block.
 const RADIO_WAVEFORM_PIXELS_PER_SECOND: f32 = 30.0;
 const RADIO_WAVEFORM_BAR_PITCH_PIXELS: f32 = 3.0;
+const WAVEFORM_BAR_WIDTH_PIXELS: f32 = 1.35;
 const RADIO_WAVEFORM_MAX_VISIBLE_SECONDS: f32 = 180.0;
 const RADIO_METADATA_REFRESH_INTERVAL_SECONDS: u64 = 5;
 
@@ -966,14 +967,18 @@ impl AudioOrbitApp {
             return;
         };
         let settings = self.current_settings();
+        let crossfade_seconds = self.configured_manual_crossfade_seconds();
         let Some(player) = &mut self.player else {
             self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
             return;
         };
-
-        self.status_message = format!("Opening internet radio: {}...", station.name);
+        self.status_message = if crossfade_seconds > 0.05 {
+            format!("Crossfading to internet radio: {}...", station.name)
+        } else {
+            format!("Opening internet radio: {}...", station.name)
+        };
         self.error_message = None;
-        match player.play_radio_stream(&station.url, settings) {
+        match player.play_radio_stream_with_crossfade(&station.url, settings, crossfade_seconds) {
             Ok(()) => {
                 self.active_tab = MainContentTab::Radio;
                 self.active_radio_index = Some(index);
@@ -988,7 +993,11 @@ impl AudioOrbitApp {
                 self.pending_track_switch = None;
                 self.state.selected_radio_index = Some(index);
                 self.radio_selection_was_user_set = true;
-                self.status_message = format!("Playing internet radio: {}.", station.name);
+                self.status_message = if crossfade_seconds > 0.05 {
+                    format!("Crossfading to internet radio: {}.", station.name)
+                } else {
+                    format!("Playing internet radio: {}.", station.name)
+                };
                 self.persist_playback_session();
                 self.save_state_silently();
                 self.start_radio_title_lookup(index, station.url);
@@ -1713,9 +1722,8 @@ impl AudioOrbitApp {
             .as_ref()
             .map(AudioPlayer::is_playing)
             .unwrap_or(false);
-        let is_local_track_playing = self.active_radio_index.is_none() && self.active_track_path.is_some();
 
-        if self.state.playback.crossfade_enabled && is_currently_playing && is_local_track_playing {
+        if self.state.playback.crossfade_enabled && is_currently_playing {
             self.state.playback.crossfade_seconds.max(1) as f32
         } else {
             0.0
@@ -3424,7 +3432,7 @@ impl AudioOrbitApp {
                 }
             });
         });
-        ui.add(egui::Label::new("Radio streams are live sources. They ignore shuffle, repeat, auto-play next, crossfade, silence skipping, and playback transitions.").wrap());
+        ui.add(egui::Label::new("Radio streams are live sources. They ignore shuffle, repeat, auto-play next, and silence skipping. Crossfade is used when switching sources if enabled.").wrap());
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
@@ -4293,11 +4301,11 @@ impl AudioOrbitApp {
 
     fn render_profile_transition_section(&mut self, ui: &mut egui::Ui) {
         ui.heading("Playback transitions");
-        ui.small("Crossfade and silence skipping are kept near the active sound profile because they affect how this profile feels during playback.");
+        ui.small("Crossfade and silence skipping are kept near the active sound profile because they affect how this profile feels during playback. Crossfade also applies when switching between music and internet radio sources.");
 
         let mut playback_changed = false;
         playback_changed |= ui
-            .checkbox(&mut self.state.playback.crossfade_enabled, "Crossfade tracks")
+            .checkbox(&mut self.state.playback.crossfade_enabled, "Crossfade source changes")
             .changed();
         if self.state.playback.crossfade_enabled {
             playback_changed |= ui
@@ -4781,7 +4789,7 @@ impl AudioOrbitApp {
         }
 
         playback_changed |= ui
-            .checkbox(&mut self.state.playback.crossfade_enabled, "Crossfade tracks")
+            .checkbox(&mut self.state.playback.crossfade_enabled, "Crossfade source changes")
             .changed();
         if self.state.playback.crossfade_enabled {
             playback_changed |= ui
@@ -5450,26 +5458,15 @@ fn draw_radio_waveform_strip(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) ->
 
     painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(210));
 
-    let center_y = rect.center().y.round();
-    let baseline_color = egui::Color32::from_rgb(82, 88, 99);
-    let live_color = egui::Color32::from_rgb(78, 148, 255);
-
-    painter.rect_filled(
-        egui::Rect::from_min_max(
-            egui::pos2(rect.left(), center_y - 0.5),
-            egui::pos2(rect.right(), center_y + 0.5),
-        ),
-        0.0,
-        baseline_color,
-    );
-
     if frame.bars.is_empty() {
         return response;
     }
 
     let rendered_points = frame.bars.len().max(1);
     let bar_pitch = rect.width() / rendered_points as f32;
-    let draw_width = (bar_pitch * 0.62).clamp(1.0, 2.2);
+    let draw_width = WAVEFORM_BAR_WIDTH_PIXELS.min(bar_pitch.max(1.0));
+    let center_y = rect.center().y.round();
+    let live_color = egui::Color32::from_rgb(78, 148, 255);
 
     for (bar_index, bar) in frame.bars.iter().enumerate() {
         let x_center = (rect.left() + (bar_index as f32 + 0.5) * bar_pitch).round();
@@ -5482,9 +5479,6 @@ fn draw_radio_waveform_strip(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) ->
             continue;
         }
 
-        // Draw a sparse, vertical-line waveform. The time window is controlled by
-        // pixels/second, while the line density is controlled separately by the
-        // fixed bar pitch. This avoids the small-window "too many bars" effect.
         let eased = value.powf(1.12);
         let height = (rect.height() * 0.72 * eased)
             .max(1.5)
@@ -5519,10 +5513,13 @@ fn draw_waveform_seek(
 
     let progress = progress.clamp(0.0, 1.0);
     let progress_x = rect.left() + rect.width() * progress;
-    let target_points = rect.width().round().clamp(96.0, 4096.0) as usize;
+    let target_points = (rect.width() / RADIO_WAVEFORM_BAR_PITCH_PIXELS)
+        .ceil()
+        .clamp(32.0, 2048.0) as usize;
     let step = (waveform.len() as f32 / target_points.max(1) as f32).ceil().max(1.0) as usize;
     let rendered_points = ((waveform.len() + step - 1) / step).max(1);
-    let bar_width = rect.width() / rendered_points as f32;
+    let bar_pitch = rect.width() / rendered_points as f32;
+    let draw_width = WAVEFORM_BAR_WIDTH_PIXELS.min(bar_pitch.max(1.0));
     let peak = waveform.iter().copied().fold(0.0_f32, f32::max).max(0.08);
     let mut sorted = waveform.to_vec();
     sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
@@ -5533,22 +5530,21 @@ fn draw_waveform_seek(
     let unplayed_color = egui::Color32::from_rgb(92, 98, 110);
     let played_color = egui::Color32::from_rgb(78, 148, 255);
     let silence_color = egui::Color32::from_rgb(238, 194, 74);
-    let center_y = rect.center().y;
+    let center_y = rect.center().y.round();
 
     for (bar_index, chunk) in waveform.chunks(step).enumerate() {
         let value = chunk.iter().copied().fold(0.0_f32, f32::max);
         let normalized = ((value - noise_floor) / dynamic_range).clamp(0.018, 1.0);
         let eased = normalized.powf(1.08);
-        let x1 = rect.left() + bar_index as f32 * bar_width;
-        let x2 = if bar_index + 1 == rendered_points { rect.right() } else { rect.left() + (bar_index + 1) as f32 * bar_width };
-        if x1 >= rect.right() {
-            break;
+        let x_center = (rect.left() + (bar_index as f32 + 0.5) * bar_pitch).round();
+        if x_center < rect.left() || x_center > rect.right() {
+            continue;
         }
 
         let height = (rect.height() * 0.84 * eased).max(2.0).min(rect.height() - 4.0);
         let bar_rect = egui::Rect::from_min_max(
-            egui::pos2(x1, center_y - height * 0.5),
-            egui::pos2(x2, center_y + height * 0.5),
+            egui::pos2(x_center - draw_width * 0.5, center_y - height * 0.5),
+            egui::pos2(x_center + draw_width * 0.5, center_y + height * 0.5),
         );
         let bar_start_seconds = if duration_seconds > 0.0 {
             (bar_index * step) as f32 / waveform.len().max(1) as f32 * duration_seconds
@@ -5563,18 +5559,14 @@ fn draw_waveform_seek(
         let is_silence = duration_seconds > 0.0
             && silence_ranges.iter().any(|(start, end)| *end > bar_start_seconds && *start < bar_end_seconds);
 
-        if is_silence {
-            painter.rect_filled(bar_rect, 0.0, silence_color);
-        } else if x2 <= progress_x {
-            painter.rect_filled(bar_rect, 0.0, played_color);
-        } else if x1 >= progress_x {
-            painter.rect_filled(bar_rect, 0.0, unplayed_color);
+        let color = if is_silence {
+            silence_color
+        } else if x_center <= progress_x {
+            played_color
         } else {
-            let left_rect = egui::Rect::from_min_max(bar_rect.min, egui::pos2(progress_x, bar_rect.max.y));
-            let right_rect = egui::Rect::from_min_max(egui::pos2(progress_x, bar_rect.min.y), bar_rect.max);
-            painter.rect_filled(left_rect, 0.0, played_color);
-            painter.rect_filled(right_rect, 0.0, unplayed_color);
-        }
+            unplayed_color
+        };
+        painter.rect_filled(bar_rect, 0.0, color);
     }
 
     let playhead = egui::Rect::from_min_max(
