@@ -288,12 +288,6 @@ impl Playlist {
             .unwrap_or(true)
     }
 
-    pub fn selected_group_label(&self) -> String {
-        self.selected_group
-            .clone()
-            .unwrap_or_else(|| "All folders".to_owned())
-    }
-
     pub fn set_selected_group(&mut self, group: Option<String>) {
         self.selected_group = group;
         self.ensure_selected_group_exists();
@@ -772,6 +766,7 @@ fn write_state_to_path(state: &SavedState, path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn read_track_metadata(path: &Path) -> Result<TrackMetadata> {
     let file_size = fs::metadata(path).ok().map(|metadata| metadata.len());
     let tagged_file = lofty::read_from_path(path)

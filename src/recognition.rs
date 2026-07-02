@@ -58,7 +58,9 @@ struct GitHubAsset {
 pub struct RecognitionResult {
     pub title: String,
     pub subtitle: Option<String>,
+    #[allow(dead_code)]
     pub source: String,
+    #[allow(dead_code)]
     pub raw: String,
 }
 

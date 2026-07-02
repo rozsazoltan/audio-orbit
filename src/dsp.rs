@@ -90,6 +90,7 @@ const WAVEFORM_POINTS: usize = 1024;
 #[cfg(not(debug_assertions))]
 const WAVEFORM_POINTS: usize = 2048;
 
+#[allow(dead_code)]
 pub fn render_orbit_to_stereo(
     input_samples: &[f32],
     input_channels: u16,
