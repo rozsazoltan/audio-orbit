@@ -10,7 +10,7 @@ mod spectrum_waveform;
 mod ui_icons;
 
 use crate::{
-    audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo, PreparedPlayback, RadioMetadataEvent, RadioVisualizerFrame},
+    audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo, PreparedPlayback, RadioVisualizerFrame},
     config::{
         app_data_dir, app_version_label, collect_audio_files_from_folder, display_file_name, export_state_zip,
         import_state_zip, load_state, same_path, save_state, LastPlayedTrack, PlaybackSession, Playlist, PlaylistKind, RadioStation, RepeatMode, SavedState,
@@ -32,11 +32,13 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const RADIO_WAVEFORM_PIXELS_PER_SECOND: f32 = 64.0;
-const RADIO_WAVEFORM_POINTS_PER_SECOND: f32 = 64.0;
-const RADIO_WAVEFORM_MIN_VISIBLE_SECONDS: f32 = 4.0;
-const RADIO_WAVEFORM_MAX_VISIBLE_SECONDS: f32 = 60.0;
-const RADIO_METADATA_REFRESH_INTERVAL_SECONDS: u64 = 8;
+// Radio waveform is a rolling live overview, not a zoomed-in oscilloscope.
+// Keep scroll speed constant, but show enough seconds for real music dynamics to
+// appear instead of a solid high-frequency block.
+const RADIO_WAVEFORM_PIXELS_PER_SECOND: f32 = 30.0;
+const RADIO_WAVEFORM_BAR_PITCH_PIXELS: f32 = 3.0;
+const RADIO_WAVEFORM_MAX_VISIBLE_SECONDS: f32 = 180.0;
+const RADIO_METADATA_REFRESH_INTERVAL_SECONDS: u64 = 5;
 
 fn min_window_size_for_mode(player_only_mode: bool) -> egui::Vec2 {
     if player_only_mode {
@@ -276,11 +278,9 @@ struct AudioOrbitApp {
     radio_selection_was_user_set: bool,
     active_radio_station_name: Option<String>,
     active_radio_title: Option<String>,
-    active_radio_title_is_live: bool,
     radio_started_at: Option<Instant>,
     last_radio_title_lookup_at: Option<Instant>,
     radio_title_receiver: Option<mpsc::Receiver<(usize, Option<RadioStreamMetadata>)>>,
-    radio_metadata_receiver: Option<mpsc::Receiver<RadioMetadataEvent>>,
     collapsed_groups: BTreeSet<String>,
     pending_folder_path: Option<PathBuf>,
     pending_playlist_name: String,
@@ -358,11 +358,9 @@ impl AudioOrbitApp {
                     radio_selection_was_user_set: false,
                     active_radio_station_name: None,
                     active_radio_title: None,
-                    active_radio_title_is_live: false,
                     radio_started_at: None,
                     last_radio_title_lookup_at: None,
                     radio_title_receiver: None,
-                    radio_metadata_receiver: None,
                     collapsed_groups: BTreeSet::new(),
                     pending_folder_path: None,
                     pending_playlist_name,
@@ -427,11 +425,9 @@ impl AudioOrbitApp {
                 radio_selection_was_user_set: false,
                 active_radio_station_name: None,
                 active_radio_title: None,
-                active_radio_title_is_live: false,
                 radio_started_at: None,
                 last_radio_title_lookup_at: None,
                 radio_title_receiver: None,
-                radio_metadata_receiver: None,
                 collapsed_groups: BTreeSet::new(),
                 pending_folder_path: None,
                 pending_playlist_name,
@@ -856,7 +852,7 @@ impl AudioOrbitApp {
                     .filter(|name| !name.trim().is_empty())
                     .unwrap_or_else(|| station.name.clone());
                 let elapsed = self.radio_elapsed_seconds().map(format_duration).unwrap_or_else(|| "0:00".to_owned());
-                format!("{station_name} · live for {elapsed}")
+                format!("{station_name} · live for {elapsed} · {}", station.url)
             });
         }
 
@@ -975,19 +971,16 @@ impl AudioOrbitApp {
             return;
         };
 
-        let (metadata_sender, metadata_receiver) = mpsc::channel();
         self.status_message = format!("Opening internet radio: {}...", station.name);
         self.error_message = None;
-        match player.play_radio_stream(&station.url, settings, Some(metadata_sender)) {
+        match player.play_radio_stream(&station.url, settings) {
             Ok(()) => {
                 self.active_tab = MainContentTab::Radio;
                 self.active_radio_index = Some(index);
                 self.active_radio_station_name = station.last_station_name.clone();
                 self.active_radio_title = station.last_stream_title.clone();
-                self.active_radio_title_is_live = false;
                 self.radio_started_at = Some(Instant::now());
                 self.last_radio_title_lookup_at = Some(Instant::now());
-                self.radio_metadata_receiver = Some(metadata_receiver);
                 self.active_track_index = None;
                 self.active_playlist_index = None;
                 self.active_track_path = None;
@@ -1016,57 +1009,6 @@ impl AudioOrbitApp {
         });
     }
 
-    fn process_radio_metadata_events(&mut self) {
-        let Some(receiver) = &self.radio_metadata_receiver else {
-            return;
-        };
-        let events = receiver.try_iter().collect::<Vec<_>>();
-        if events.is_empty() {
-            return;
-        }
-
-        let Some(index) = self.active_radio_index else {
-            return;
-        };
-
-        let mut changed = false;
-        for event in events {
-            let Some(stream_title) = event
-                .stream_title
-                .map(|title| title.trim().to_owned())
-                .filter(|title| !title.is_empty())
-            else {
-                continue;
-            };
-
-            let station_name = self
-                .state
-                .radio_stations
-                .get(index)
-                .map(|station| station.name.as_str())
-                .unwrap_or("Internet radio");
-            if stream_title.eq_ignore_ascii_case(station_name) {
-                continue;
-            }
-
-            self.active_radio_title_is_live = true;
-            if self.active_radio_title.as_deref() != Some(stream_title.as_str()) {
-                self.active_radio_title = Some(stream_title.clone());
-                changed = true;
-            }
-            if let Some(station) = self.state.radio_stations.get_mut(index) {
-                if station.last_stream_title.as_deref() != Some(stream_title.as_str()) {
-                    station.last_stream_title = Some(stream_title);
-                    changed = true;
-                }
-            }
-        }
-
-        if changed {
-            self.save_state_silently();
-        }
-    }
-
     fn process_radio_title_events(&mut self) {
         let Some(receiver) = &self.radio_title_receiver else {
             return;
@@ -1078,16 +1020,13 @@ impl AudioOrbitApp {
             if let Some(metadata) = metadata {
                 if self.active_radio_index == Some(index) {
                     self.active_radio_station_name = metadata.station_name.clone().or_else(|| self.active_radio_station_name.clone());
-                    if !self.active_radio_title_is_live {
-                        self.active_radio_title = metadata.stream_title.clone().or_else(|| self.active_radio_title.clone());
-                    }
+                    self.active_radio_title = metadata.stream_title.clone().or_else(|| self.active_radio_title.clone());
                 }
-                let should_accept_polled_stream_title = self.active_radio_index != Some(index) || !self.active_radio_title_is_live;
                 if let Some(station) = self.state.radio_stations.get_mut(index) {
                     if metadata.station_name.is_some() {
                         station.last_station_name = metadata.station_name;
                     }
-                    if metadata.stream_title.is_some() && should_accept_polled_stream_title {
+                    if metadata.stream_title.is_some() {
                         station.last_stream_title = metadata.stream_title;
                     }
                 }
@@ -1546,11 +1485,9 @@ impl AudioOrbitApp {
                     self.active_radio_index = None;
                     self.active_radio_station_name = None;
                     self.active_radio_title = None;
-                    self.active_radio_title_is_live = false;
                     self.radio_started_at = None;
                     self.last_radio_title_lookup_at = None;
                     self.radio_title_receiver = None;
-                    self.radio_metadata_receiver = None;
                     self.active_playlist_index = Some(playlist_index);
                     self.selected_track_index = index;
                     self.active_track_index = index;
@@ -1680,11 +1617,9 @@ impl AudioOrbitApp {
                 self.active_radio_index = None;
                 self.active_radio_station_name = None;
                 self.active_radio_title = None;
-                self.active_radio_title_is_live = false;
                 self.radio_started_at = None;
                 self.last_radio_title_lookup_at = None;
                 self.radio_title_receiver = None;
-                self.radio_metadata_receiver = None;
                 self.active_playlist_index = Some(playlist_index);
                 self.selected_track_index = index;
 
@@ -2117,11 +2052,9 @@ impl AudioOrbitApp {
         self.active_radio_index = None;
         self.active_radio_station_name = None;
         self.active_radio_title = None;
-        self.active_radio_title_is_live = false;
         self.radio_started_at = None;
         self.last_radio_title_lookup_at = None;
         self.radio_title_receiver = None;
-        self.radio_metadata_receiver = None;
         self.pending_track_switch = None;
         self.crossfade_started_for_path = None;
         self.last_playback = None;
@@ -2652,7 +2585,6 @@ impl eframe::App for AudioOrbitApp {
         self.process_media_key_events();
         self.process_escape_navigation(context);
         self.process_keyboard_shortcuts(context);
-        self.process_radio_metadata_events();
         self.process_radio_title_events();
         self.refresh_radio_title_periodically();
         self.process_pending_profile_apply();
@@ -3034,10 +2966,10 @@ impl AudioOrbitApp {
         if self.active_radio_index.is_some() {
             let available_width = ui.available_width().max(96.0);
             let visible_seconds = (available_width / RADIO_WAVEFORM_PIXELS_PER_SECOND)
-                .clamp(RADIO_WAVEFORM_MIN_VISIBLE_SECONDS, RADIO_WAVEFORM_MAX_VISIBLE_SECONDS);
-            let requested_points = (visible_seconds * RADIO_WAVEFORM_POINTS_PER_SECOND)
-                .round()
-                .clamp(96.0, 4096.0) as usize;
+                .clamp(1.0, RADIO_WAVEFORM_MAX_VISIBLE_SECONDS);
+            let requested_points = (available_width / RADIO_WAVEFORM_BAR_PITCH_PIXELS)
+                .ceil()
+                .clamp(32.0, 900.0) as usize;
             let frame = self
                 .player
                 .as_ref()
@@ -3592,22 +3524,21 @@ impl AudioOrbitApp {
                 for (index, station) in visible_stations {
                     let active = self.active_radio_index == Some(index);
                     let selected = active || (self.radio_selection_was_user_set && self.state.selected_radio_index == Some(index));
-                    let display_station_name = station
-                        .last_station_name
+                    let display_stream_title = station
+                        .last_stream_title
                         .as_deref()
-                        .filter(|name| !name.trim().is_empty())
-                        .unwrap_or(station.name.as_str());
-                    let display_stream_title = station.last_stream_title.as_deref().filter(|title| {
-                        !title.trim().is_empty()
-                            && !title.eq_ignore_ascii_case(display_station_name)
-                            && !title.eq_ignore_ascii_case(&station.name)
-                    });
+                        .filter(|title| !title.trim().is_empty() && !title.eq_ignore_ascii_case(&station.name));
+                    let primary_title = display_stream_title.unwrap_or(station.name.as_str());
                     let station_title = if active {
-                        format!("{} {}", ui_icons::icon(Icon::Play), display_station_name)
+                        format!("{} {}", ui_icons::icon(Icon::Play), primary_title)
                     } else {
-                        display_station_name.to_owned()
+                        primary_title.to_owned()
                     };
-                    let station_info = display_stream_title.unwrap_or("").to_owned();
+                    let station_info = if display_stream_title.is_some() {
+                        station.name.clone()
+                    } else {
+                        String::new()
+                    };
 
                     let row_hovered = next_row_pointer_hovered(ui, row_width, 34.0);
                     let row_response = ui.allocate_ui_with_layout(
@@ -3655,9 +3586,7 @@ impl AudioOrbitApp {
                             let info_width = if station_info.is_empty() {
                                 0.0
                             } else {
-                                text_width(ui, &station_info, info_font.clone(), info_color)
-                                    .ceil()
-                                    .min(body_width * 0.45)
+                                text_width(ui, &station_info, info_font.clone(), info_color).ceil()
                             };
                             let info_gap = if station_info.is_empty() { 0.0 } else { 6.0 };
                             let title_left = body_rect.left() + body_padding;
@@ -5234,20 +5163,32 @@ fn read_icy_stream_title<R: Read>(reader: &mut R, metadata_interval: usize) -> O
         return None;
     }
 
+    // Some stations return an empty first ICY metadata block. Read a few blocks
+    // from the metadata request so the visible title can update while radio keeps
+    // playing, without mixing ICY bytes into the playback stream.
     let mut audio_buffer = vec![0_u8; metadata_interval];
-    reader.read_exact(&mut audio_buffer).ok()?;
+    for _ in 0..6 {
+        reader.read_exact(&mut audio_buffer).ok()?;
 
-    let mut length_byte = [0_u8; 1];
-    reader.read_exact(&mut length_byte).ok()?;
-    let metadata_length = length_byte[0] as usize * 16;
-    if metadata_length == 0 || metadata_length > 4096 {
-        return None;
+        let mut length_byte = [0_u8; 1];
+        reader.read_exact(&mut length_byte).ok()?;
+        let metadata_length = length_byte[0] as usize * 16;
+        if metadata_length == 0 {
+            continue;
+        }
+        if metadata_length > 4096 {
+            return None;
+        }
+
+        let mut metadata = vec![0_u8; metadata_length];
+        reader.read_exact(&mut metadata).ok()?;
+        let metadata = String::from_utf8_lossy(&metadata);
+        if let Some(title) = parse_icy_stream_title(&metadata) {
+            return Some(title);
+        }
     }
 
-    let mut metadata = vec![0_u8; metadata_length];
-    reader.read_exact(&mut metadata).ok()?;
-    let metadata = String::from_utf8_lossy(&metadata);
-    parse_icy_stream_title(&metadata)
+    None
 }
 
 fn parse_icy_stream_title(metadata: &str) -> Option<String> {
@@ -5509,70 +5450,51 @@ fn draw_radio_waveform_strip(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) ->
 
     painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(210));
 
-    let center_y = rect.center().y;
-    let empty_color = egui::Color32::from_rgb(92, 98, 110);
+    let center_y = rect.center().y.round();
+    let baseline_color = egui::Color32::from_rgb(82, 88, 99);
     let live_color = egui::Color32::from_rgb(78, 148, 255);
 
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(rect.left(), center_y - 0.5),
+            egui::pos2(rect.right(), center_y + 0.5),
+        ),
+        0.0,
+        baseline_color,
+    );
+
     if frame.bars.is_empty() {
-        painter.rect_filled(
-            egui::Rect::from_min_max(
-                egui::pos2(rect.left(), center_y - 0.5),
-                egui::pos2(rect.right(), center_y + 0.5),
-            ),
-            0.0,
-            empty_color,
-        );
         return response;
     }
 
     let rendered_points = frame.bars.len().max(1);
-    let bar_width = rect.width() / rendered_points as f32;
+    let bar_pitch = rect.width() / rendered_points as f32;
+    let draw_width = (bar_pitch * 0.62).clamp(1.0, 2.2);
 
     for (bar_index, bar) in frame.bars.iter().enumerate() {
-        let x1 = rect.left() + bar_index as f32 * bar_width;
-        let x2 = if bar_index + 1 == rendered_points {
-            rect.right()
-        } else {
-            rect.left() + (bar_index + 1) as f32 * bar_width
-        };
-        if x1 >= rect.right() {
-            break;
-        }
-
-        let value = bar.peak.clamp(0.0, 1.0);
-        if value <= 0.006 {
-            painter.rect_filled(
-                egui::Rect::from_min_max(
-                    egui::pos2(x1, center_y - 0.5),
-                    egui::pos2(x2, center_y + 0.5),
-                ),
-                0.0,
-                empty_color,
-            );
+        let x_center = (rect.left() + (bar_index as f32 + 0.5) * bar_pitch).round();
+        if x_center < rect.left() || x_center > rect.right() {
             continue;
         }
 
-        let eased = value.powf(1.08).clamp(0.018, 1.0);
-        let height = (rect.height() * 0.84 * eased).max(2.0).min(rect.height() - 4.0);
-        painter.rect_filled(
-            egui::Rect::from_min_max(
-                egui::pos2(x1, center_y - height * 0.5),
-                egui::pos2(x2, center_y + height * 0.5),
-            ),
-            0.0,
-            live_color,
-        );
-    }
+        let value = bar.peak.clamp(0.0, 1.0);
+        if value <= 0.004 {
+            continue;
+        }
 
-    let live_edge_x = rect.right() - bar_width.max(1.0);
-    painter.rect_filled(
-        egui::Rect::from_min_max(
-            egui::pos2(live_edge_x, rect.top() + 4.0),
-            egui::pos2(rect.right(), rect.bottom() - 4.0),
-        ),
-        0.0,
-        egui::Color32::WHITE.linear_multiply(0.82),
-    );
+        // Draw a sparse, vertical-line waveform. The time window is controlled by
+        // pixels/second, while the line density is controlled separately by the
+        // fixed bar pitch. This avoids the small-window "too many bars" effect.
+        let eased = value.powf(1.12);
+        let height = (rect.height() * 0.72 * eased)
+            .max(1.5)
+            .min(rect.height() - 5.0);
+        let bar_rect = egui::Rect::from_min_max(
+            egui::pos2(x_center - draw_width * 0.5, center_y - height * 0.5),
+            egui::pos2(x_center + draw_width * 0.5, center_y + height * 0.5),
+        );
+        painter.rect_filled(bar_rect, 0.0, live_color);
+    }
 
     response
 }

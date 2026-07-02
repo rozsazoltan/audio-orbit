@@ -1,7 +1,4 @@
-use crate::{
-    dsp::{render_orbit_to_stereo_with_cached_waveform, DspSettings, RenderInfo},
-    spectrum_waveform::LiveSpectrumAnalyzer,
-};
+use crate::dsp::{render_orbit_to_stereo_with_cached_waveform, DspSettings, RenderInfo};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait};
 use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, OutputStreamHandle, Sink, Source};
@@ -12,13 +9,17 @@ use std::{
     fs::File,
     io::{self, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{mpsc, Arc, Mutex},
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 120;
-const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 48;
+const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 180;
+// Keep the raw radio envelope at a higher resolution than the UI needs.
+// The UI then bins these live samples into one value per horizontal pixel,
+// which avoids synthetic/repeating patterns and keeps the strip tied to the
+// decoded audio itself.
+const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 64;
 const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
 
 #[derive(Clone, Debug)]
@@ -50,11 +51,6 @@ pub struct RadioRecordingInfo {
     pub bytes_written: u64,
 }
 
-#[derive(Clone, Debug)]
-pub struct RadioMetadataEvent {
-    pub stream_title: Option<String>,
-}
-
 struct ActiveRadioRecording {
     file: File,
     path: PathBuf,
@@ -68,156 +64,37 @@ struct RadioStream<R> {
     inner: Mutex<R>,
     position: u64,
     recorder: RadioRecordingHandle,
-    metadata_interval: Option<usize>,
-    audio_bytes_until_metadata: usize,
-    metadata_sender: Option<mpsc::Sender<RadioMetadataEvent>>,
-    last_stream_title: Option<String>,
 }
 
 impl<R> RadioStream<R> {
-    fn new(
-        inner: R,
-        recorder: RadioRecordingHandle,
-        metadata_interval: Option<usize>,
-        metadata_sender: Option<mpsc::Sender<RadioMetadataEvent>>,
-    ) -> Self {
-        let metadata_interval = metadata_interval.filter(|interval| *interval > 0 && *interval <= 2_000_000);
+    fn new(inner: R, recorder: RadioRecordingHandle) -> Self {
         Self {
             inner: Mutex::new(inner),
             position: 0,
             recorder,
-            audio_bytes_until_metadata: metadata_interval.unwrap_or(0),
-            metadata_interval,
-            metadata_sender,
-            last_stream_title: None,
-        }
-    }
-
-    fn record_audio_bytes(&self, bytes: &[u8]) {
-        if bytes.is_empty() {
-            return;
-        }
-
-        if let Ok(mut recording) = self.recorder.lock() {
-            if let Some(recording) = recording.as_mut() {
-                if recording.file.write_all(bytes).is_ok() {
-                    recording.bytes_written = recording.bytes_written.saturating_add(bytes.len() as u64);
-                }
-            }
-        }
-    }
-
-    fn publish_stream_title(&mut self, metadata: &str) {
-        let stream_title = parse_icy_stream_title(metadata);
-        if stream_title == self.last_stream_title {
-            return;
-        }
-
-        self.last_stream_title = stream_title.clone();
-        if let Some(sender) = &self.metadata_sender {
-            let _ = sender.send(RadioMetadataEvent { stream_title });
         }
     }
 }
 
 impl<R: Read + Send> Read for RadioStream<R> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        if buffer.is_empty() {
-            return Ok(0);
-        }
-
-        let Some(metadata_interval) = self.metadata_interval else {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|_| io::Error::new(io::ErrorKind::Other, "radio stream lock poisoned"))?;
-            let read = inner.read(buffer)?;
-            drop(inner);
-            self.record_audio_bytes(&buffer[..read]);
-            self.position = self.position.saturating_add(read as u64);
-            return Ok(read);
-        };
-
-        let mut written = 0;
-        loop {
-            if written >= buffer.len() {
-                return Ok(written);
-            }
-
-            if self.audio_bytes_until_metadata == 0 {
-                let metadata = {
-                    let mut inner = self
-                        .inner
-                        .lock()
-                        .map_err(|_| io::Error::new(io::ErrorKind::Other, "radio stream lock poisoned"))?;
-                    read_icy_metadata_block(&mut *inner)
-                };
-
-                match metadata {
-                    Ok(Some(metadata)) => self.publish_stream_title(&metadata),
-                    Ok(None) => {}
-                    Err(error) if written > 0 => return Ok(written),
-                    Err(error) => return Err(error),
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "radio stream lock poisoned"))?;
+        let read = inner.read(buffer)?;
+        if read > 0 {
+            if let Ok(mut recording) = self.recorder.lock() {
+                if let Some(recording) = recording.as_mut() {
+                    if recording.file.write_all(&buffer[..read]).is_ok() {
+                        recording.bytes_written = recording.bytes_written.saturating_add(read as u64);
+                    }
                 }
-
-                self.audio_bytes_until_metadata = metadata_interval;
-                continue;
-            }
-
-            let read_limit = (buffer.len() - written).min(self.audio_bytes_until_metadata);
-            let read = {
-                let mut inner = self
-                    .inner
-                    .lock()
-                    .map_err(|_| io::Error::new(io::ErrorKind::Other, "radio stream lock poisoned"))?;
-                inner.read(&mut buffer[written..written + read_limit])?
-            };
-
-            if read == 0 {
-                return Ok(written);
-            }
-
-            self.record_audio_bytes(&buffer[written..written + read]);
-            self.position = self.position.saturating_add(read as u64);
-            self.audio_bytes_until_metadata = self.audio_bytes_until_metadata.saturating_sub(read);
-            written += read;
-
-            if written > 0 {
-                return Ok(written);
             }
         }
+        self.position += read as u64;
+        Ok(read)
     }
-}
-
-fn read_icy_metadata_block<R: Read>(reader: &mut R) -> io::Result<Option<String>> {
-    let mut length_byte = [0_u8; 1];
-    reader.read_exact(&mut length_byte)?;
-    let metadata_length = length_byte[0] as usize * 16;
-    if metadata_length == 0 {
-        return Ok(None);
-    }
-
-    let mut metadata = vec![0_u8; metadata_length];
-    reader.read_exact(&mut metadata)?;
-    Ok(Some(String::from_utf8_lossy(&metadata).into_owned()))
-}
-
-fn parse_icy_stream_title(metadata: &str) -> Option<String> {
-    let marker = "StreamTitle='";
-    let start = metadata.find(marker)? + marker.len();
-    let rest = &metadata[start..];
-    let end = rest.find("';").or_else(|| rest.find('\''))?;
-    Some(clean_radio_metadata_value(&rest[..end])).filter(|value| !value.is_empty())
-}
-
-fn clean_radio_metadata_value(value: &str) -> String {
-    value
-        .trim_matches(char::from(0))
-        .trim()
-        .trim_matches('\'')
-        .trim_matches('"')
-        .trim()
-        .to_owned()
 }
 
 impl<R> Seek for RadioStream<R> {
@@ -236,7 +113,7 @@ impl<R> Seek for RadioStream<R> {
 #[derive(Clone, Copy)]
 struct RadioVisualizerBucket {
     at: Instant,
-    peak: f32,
+    level: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -259,13 +136,65 @@ impl Default for RadioVisualizerState {
     fn default() -> Self {
         Self {
             peaks: VecDeque::new(),
-            display_floor: 0.025,
+            // A live stream cannot be normalized against a full track. Keep a slow
+            // visual range so radio does not pump frame-by-frame, but do not smooth
+            // the actual audio buckets: the strip must be built from the live music.
+            display_floor: 0.018,
             display_peak: 0.42,
         }
     }
 }
 
 type RadioVisualizerHandle = Arc<Mutex<RadioVisualizerState>>;
+
+struct LiveRadioWaveformAnalyzer {
+    samples_per_bucket: usize,
+    samples_in_bucket: usize,
+    sum_squares: f64,
+    peak: f32,
+}
+
+impl LiveRadioWaveformAnalyzer {
+    fn new(sample_rate: u32, buckets_per_second: usize) -> Self {
+        Self {
+            samples_per_bucket: (sample_rate as usize / buckets_per_second.max(1)).max(1),
+            samples_in_bucket: 0,
+            sum_squares: 0.0,
+            peak: 0.0,
+        }
+    }
+
+    fn push_sample(&mut self, sample: f32) -> Option<f32> {
+        let sample = sample.clamp(-1.0, 1.0);
+        let abs = sample.abs();
+        self.sum_squares += (sample as f64) * (sample as f64);
+        self.peak = self.peak.max(abs);
+        self.samples_in_bucket += 1;
+
+        if self.samples_in_bucket < self.samples_per_bucket {
+            return None;
+        }
+
+        let rms = (self.sum_squares / self.samples_in_bucket.max(1) as f64).sqrt() as f32;
+        self.samples_in_bucket = 0;
+        self.sum_squares = 0.0;
+        let peak = std::mem::take(&mut self.peak);
+
+        // Real live waveform envelope. Use the decoded audio's short-window RMS
+        // as the main shape, with only a small peak component so compressed radio
+        // streams do not turn into a full-height rectangle. No attack/release
+        // smoothing here: smoothing created the fake/repeating pattern.
+        let loudness = db_to_unit_for_radio(20.0 * rms.max(0.000_001).log10(), -52.0, -7.0, 1.18);
+        let transient = peak.clamp(0.0, 1.0).powf(0.95);
+        Some((loudness * 0.94 + transient * 0.06).clamp(0.0, 1.0))
+    }
+}
+
+fn db_to_unit_for_radio(db: f32, min_db: f32, max_db: f32, power: f32) -> f32 {
+    ((db - min_db) / (max_db - min_db).max(0.001))
+        .clamp(0.0, 1.0)
+        .powf(power)
+}
 
 fn fill_radio_waveform_gaps(values: &mut [f32]) {
     let mut previous: Option<(usize, f32)> = None;
@@ -277,7 +206,7 @@ fn fill_radio_waveform_gaps(values: &mut [f32]) {
 
         if let Some((previous_index, previous_value)) = previous {
             let gap = index.saturating_sub(previous_index + 1);
-            if gap > 0 && gap <= 8 {
+            if gap > 0 && gap <= 3 {
                 let current_value = values[index];
                 for offset in 1..=gap {
                     let mix = offset as f32 / (gap + 1) as f32;
@@ -430,7 +359,7 @@ struct LiveRadioSource<S> {
     output_frame: [f32; 2],
     output_channel: usize,
     visualizer: RadioVisualizerHandle,
-    visualizer_analyzer: LiveSpectrumAnalyzer,
+    visualizer_analyzer: LiveRadioWaveformAnalyzer,
 }
 
 impl<S: Source<Item = f32>> LiveRadioSource<S> {
@@ -450,7 +379,7 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
             output_frame: [0.0, 0.0],
             output_channel: 2,
             visualizer,
-            visualizer_analyzer: LiveSpectrumAnalyzer::new(sample_rate, RADIO_VISUALIZER_BUCKETS_PER_SECOND),
+            visualizer_analyzer: LiveRadioWaveformAnalyzer::new(sample_rate, RADIO_VISUALIZER_BUCKETS_PER_SECOND),
         }
     }
 
@@ -488,7 +417,7 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
     }
 
     fn record_visualizer_sample(&mut self, mono: f32) {
-        let Some(bucket) = self.visualizer_analyzer.push_sample(mono) else {
+        let Some(level) = self.visualizer_analyzer.push_sample(mono) else {
             return;
         };
         let now = Instant::now();
@@ -496,7 +425,7 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
         if let Ok(mut state) = self.visualizer.lock() {
             state.peaks.push_back(RadioVisualizerBucket {
                 at: now,
-                peak: bucket.level.clamp(0.0, 1.0),
+                level: level.clamp(0.0, 1.0),
             });
 
             let history = Duration::from_secs(RADIO_VISUALIZER_HISTORY_SECONDS as u64);
@@ -643,27 +572,16 @@ impl AudioPlayer {
         self.volume_percent as f32 / 100.0
     }
 
-    pub fn play_radio_stream(
-        &mut self,
-        url: &str,
-        settings: DspSettings,
-        metadata_sender: Option<mpsc::Sender<RadioMetadataEvent>>,
-    ) -> Result<()> {
+    pub fn play_radio_stream(&mut self, url: &str, settings: DspSettings) -> Result<()> {
         let response = reqwest::blocking::Client::builder()
             .user_agent("Audio-Orbit-Radio")
             .build()?
             .get(url)
-            .header("Icy-MetaData", "1")
             .send()
             .with_context(|| format!("failed to open internet radio stream: {url}"))?
             .error_for_status()
             .with_context(|| format!("internet radio stream returned an error: {url}"))?;
-        let metadata_interval = response
-            .headers()
-            .get("icy-metaint")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<usize>().ok());
-        let stream = RadioStream::new(response, Arc::clone(&self.radio_recorder), metadata_interval, metadata_sender);
+        let stream = RadioStream::new(response, Arc::clone(&self.radio_recorder));
         let decoder = Decoder::new(BufReader::new(stream))
             .with_context(|| format!("failed to decode internet radio stream: {url}"))?;
 
@@ -803,6 +721,8 @@ impl AudioPlayer {
         }
 
         let mut slot_peaks = vec![0.0_f32; requested_points];
+        let mut slot_sums = vec![0.0_f32; requested_points];
+        let mut slot_counts = vec![0_u16; requested_points];
         let mut has_audio = false;
         for bucket in &state.peaks {
             let age_seconds = now.duration_since(bucket.at).as_secs_f32();
@@ -814,65 +734,73 @@ impl AudioPlayer {
                 continue;
             }
             let slot = requested_points - 1 - slot_from_right;
-            let peak = bucket.peak.clamp(0.0, 1.0);
-            if peak > 0.0005 {
+            let level = bucket.level.clamp(0.0, 1.0);
+            if level > 0.0005 {
                 has_audio = true;
             }
-            slot_peaks[slot] = slot_peaks[slot].max(peak);
+            slot_peaks[slot] = slot_peaks[slot].max(level);
+            slot_sums[slot] += level;
+            slot_counts[slot] = slot_counts[slot].saturating_add(1);
         }
+
+        let mut slot_levels = slot_peaks
+            .into_iter()
+            .zip(slot_sums)
+            .zip(slot_counts)
+            .map(|((peak, sum), count)| {
+                if count == 0 {
+                    0.0
+                } else {
+                    let mean = sum / count as f32;
+                    // AIMP-like overview: keep transients, but do not let a single
+                    // hot live-radio bucket make the whole small strip look solid.
+                    (mean * 0.68 + peak * 0.32).clamp(0.0, 1.0)
+                }
+            })
+            .collect::<Vec<_>>();
 
         if !has_audio {
             return RadioVisualizerFrame {
-                bars: slot_peaks
+                bars: slot_levels
                     .into_iter()
                     .map(|_| RadioVisualizerBar { peak: 0.0 })
                     .collect(),
             };
         }
 
-        // The local track strip looks good because it is normalized from a full
-        // waveform overview. For live radio we only have a rolling history, so
-        // keep a slow-moving display floor/peak in the audio player instead of
-        // stretching the visible window every frame. This avoids both the old
-        // solid-rectangle look and the later pumping/jitter.
-        let mut nonzero = slot_peaks
+        fill_radio_waveform_gaps(&mut slot_levels);
+
+        let mut nonzero = slot_levels
             .iter()
             .copied()
             .filter(|value| *value > 0.0005)
             .collect::<Vec<_>>();
         nonzero.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
         let last = nonzero.len().saturating_sub(1);
-        let target_floor = nonzero[((last as f32 * 0.05) as usize).min(last)].min(0.20);
-        let target_peak = nonzero[((last as f32 * 0.985) as usize).min(last)].max(target_floor + 0.16);
+        let target_floor = nonzero[((last as f32 * 0.06) as usize).min(last)].min(0.22);
+        let target_peak = nonzero[((last as f32 * 0.94) as usize).min(last)].max(target_floor + 0.18);
 
-        let floor_blend = if target_floor > state.display_floor { 0.035 } else { 0.14 };
+        // Slow range tracking gives radio a full-track-like overview feel without
+        // making every UI frame rescale the entire strip.
+        let floor_blend = if target_floor > state.display_floor { 0.010 } else { 0.040 };
         state.display_floor = (state.display_floor * (1.0 - floor_blend) + target_floor * floor_blend)
             .clamp(0.0, 0.24);
 
-        let peak_blend = if target_peak > state.display_peak { 0.18 } else { 0.035 };
+        let peak_blend = if target_peak > state.display_peak { 0.040 } else { 0.010 };
         state.display_peak = (state.display_peak * (1.0 - peak_blend) + target_peak * peak_blend)
-            .max(state.display_floor + 0.12)
-            .clamp(0.18, 1.0);
+            .max(state.display_floor + 0.16)
+            .clamp(0.22, 1.0);
 
         let display_floor = state.display_floor;
-        let display_range = (state.display_peak - display_floor).max(0.10);
-        fill_radio_waveform_gaps(&mut slot_peaks);
-
-        let mut previous_peak = 0.0_f32;
-        let bars = slot_peaks
+        let display_range = (state.display_peak - display_floor).max(0.12);
+        let bars = slot_levels
             .into_iter()
-            .map(|peak| {
-                let normalized = ((peak.clamp(0.0, 1.0) - display_floor) / display_range)
+            .map(|level| {
+                let normalized = ((level.clamp(0.0, 1.0) - display_floor) / display_range)
                     .clamp(0.0, 1.0)
-                    .powf(0.88);
-                let shaped = if normalized > previous_peak {
-                    previous_peak * 0.18 + normalized * 0.82
-                } else {
-                    previous_peak * 0.58 + normalized * 0.42
-                };
-                previous_peak = shaped;
+                    .powf(1.08);
                 RadioVisualizerBar {
-                    peak: shaped.clamp(0.0, 0.98),
+                    peak: normalized.clamp(0.0, 1.0),
                 }
             })
             .collect();

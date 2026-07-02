@@ -50,6 +50,7 @@ pub fn spectrum_waveform(samples: &[f32], sample_rate: u32, points: usize) -> (V
     (levels, bands)
 }
 
+#[allow(dead_code)]
 pub struct LiveSpectrumAnalyzer {
     fft_size: usize,
     hop_size: usize,
@@ -63,6 +64,7 @@ pub struct LiveSpectrumAnalyzer {
     adaptive_peak: f32,
 }
 
+#[allow(dead_code)]
 impl LiveSpectrumAnalyzer {
     pub fn new(sample_rate: u32, buckets_per_second: usize) -> Self {
         let sample_rate = sample_rate.max(1);
