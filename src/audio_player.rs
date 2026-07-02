@@ -703,7 +703,7 @@ impl AudioPlayer {
         };
         let file = File::open(path)
             .with_context(|| format!("failed to open audio file: {}", path.display()))?;
-        let decoder = Decoder::new(BufReader::new(file))
+        let mut decoder = Decoder::new(BufReader::new(file))
             .with_context(|| format!("failed to decode audio file: {}", path.display()))?;
 
         let input_channels = decoder.channels();
@@ -713,13 +713,60 @@ impl AudioPlayer {
         }
 
         let total_duration = decoder.total_duration();
+        let (waveform, waveform_brightness) = cached_waveform.unwrap_or_default();
+        let seek_to = Duration::from_secs_f32(start_seconds);
+
+        // Use the decoder's real random-access seek when available. The previous
+        // implementation used `skip_duration`, which had to decode and discard audio
+        // until the target timestamp and caused a visible pause after dragging the
+        // waveform playhead.
+        if decoder.try_seek(seek_to).is_ok() {
+            return self.start_file_streaming_source(
+                path,
+                settings,
+                start_seconds,
+                decoder.convert_samples::<f32>(),
+                total_duration,
+                input_channels,
+                sample_rate,
+                waveform,
+                waveform_brightness,
+            );
+        }
+
+        self.start_file_streaming_source(
+            path,
+            settings,
+            start_seconds,
+            decoder
+                .convert_samples::<f32>()
+                .skip_duration(seek_to),
+            total_duration,
+            input_channels,
+            sample_rate,
+            waveform,
+            waveform_brightness,
+        )
+    }
+
+    fn start_file_streaming_source<S>(
+        &mut self,
+        path: &Path,
+        settings: DspSettings,
+        start_seconds: f32,
+        source: S,
+        total_duration: Option<Duration>,
+        input_channels: u16,
+        sample_rate: u32,
+        waveform: Vec<f32>,
+        waveform_brightness: Vec<f32>,
+    ) -> Result<PlaybackInfo>
+    where
+        S: Source<Item = f32> + Send + 'static,
+    {
         let remaining_duration = total_duration
             .map(|duration| duration.saturating_sub(Duration::from_secs_f32(start_seconds)))
             .unwrap_or(Duration::ZERO);
-        let (waveform, waveform_brightness) = cached_waveform.unwrap_or_default();
-        let source = decoder
-            .convert_samples::<f32>()
-            .skip_duration(Duration::from_secs_f32(start_seconds));
         let source = LiveFileSource::new(source, settings, start_seconds);
 
         self.stop();
@@ -865,7 +912,11 @@ impl AudioPlayer {
         Ok(playback_info(&prepared.path, prepared.render_info))
     }
 
-    pub fn seek_current(&mut self, seconds: f32) -> Result<Option<PlaybackInfo>> {
+    pub fn seek_current_with_cached_waveform(
+        &mut self,
+        seconds: f32,
+        cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
+    ) -> Result<Option<PlaybackInfo>> {
         let Some(path) = self.current_path.clone() else {
             return Ok(None);
         };
@@ -875,11 +926,15 @@ impl AudioPlayer {
 
         if !settings.skip_silence_enabled {
             return self
-                .play_file_streaming_with_cached_waveform(&path, settings, seconds, None)
+                .play_file_streaming_with_cached_waveform(&path, settings, seconds, cached_waveform)
                 .map(Some);
         }
 
         self.play_file_with_orbit_from(&path, settings, seconds).map(Some)
+    }
+
+    pub fn seek_current(&mut self, seconds: f32) -> Result<Option<PlaybackInfo>> {
+        self.seek_current_with_cached_waveform(seconds, None)
     }
 
     pub fn stop(&mut self) {

@@ -852,17 +852,17 @@ impl AudioOrbitApp {
             if self.player_only_mode {
                 format!(
                     "{} · {}",
-                    format_duration(playback.rendered_duration_seconds),
+                    format_duration(playback.original_duration_seconds),
                     playback.size_bytes.map(format_file_size).unwrap_or_else(|| "unknown size".to_owned())
                 )
             } else {
                 format!(
-                    "{} · {} Hz · {} ch · {} · rendered {}",
+                    "{} · {} Hz · {} ch · {} · duration {}",
                     display_parent(&playback.path),
                     playback.sample_rate,
                     playback.input_channels,
                     playback.size_bytes.map(format_file_size).unwrap_or_else(|| "unknown size".to_owned()),
-                    format_duration(playback.rendered_duration_seconds)
+                    format_duration(playback.original_duration_seconds)
                 )
             }
         })
@@ -877,7 +877,9 @@ impl AudioOrbitApp {
         }
 
         if self.active_track_path.is_some() || self.pending_track_switch.is_some() {
-            let position = self.displayed_playback_position_seconds();
+            let position = self
+                .waveform_drag_position_seconds
+                .unwrap_or_else(|| self.displayed_playback_position_seconds());
             let duration = self.displayed_playback_duration_seconds();
             return format!("{} / {}", format_duration(position), format_duration(duration));
         }
@@ -1742,12 +1744,24 @@ impl AudioOrbitApp {
         self.play_path_with_crossfade(path, Some(previous_index), 0.0, crossfade_seconds);
     }
 
+    fn current_waveform_for_seek(&self) -> Option<(Vec<f32>, Vec<f32>)> {
+        if let Some(playback) = &self.last_playback {
+            if !playback.waveform.is_empty() && !playback.waveform_brightness.is_empty() {
+                return Some((playback.waveform.clone(), playback.waveform_brightness.clone()));
+            }
+        }
+
+        let path = self.active_track_path.as_ref()?;
+        self.cached_waveform_for_track(self.active_track_index, path)
+    }
+
     fn seek_current(&mut self, seconds: f32) {
+        let cached_waveform = self.current_waveform_for_seek();
         let Some(player) = &mut self.player else {
             return;
         };
 
-        match player.seek_current(seconds) {
+        match player.seek_current_with_cached_waveform(seconds, cached_waveform) {
             Ok(Some(info)) => {
                 self.status_message = format!("Seeked to {}.", format_duration(seconds));
                 self.store_playback_metadata(&info);
@@ -2982,14 +2996,17 @@ impl AudioOrbitApp {
                 .unwrap_or(duration);
             let response = draw_waveform_seek(ui, waveform, waveform_brightness, progress, silence_ranges, marker_duration);
             if duration > 0.0 {
-                if response.dragged() {
-                    if let Some(pointer) = response.interact_pointer_pos() {
+                let pointer_position = response.interact_pointer_pos();
+                if response.drag_started() || response.dragged() {
+                    if let Some(pointer) = pointer_position {
                         let next_position = ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration;
                         self.waveform_drag_position_seconds = Some(next_position);
                     }
-                } else if response.drag_stopped() {
+                }
+
+                if response.drag_stopped() {
                     let next_position = self.waveform_drag_position_seconds.or_else(|| {
-                        response.interact_pointer_pos().map(|pointer| {
+                        pointer_position.map(|pointer| {
                             ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration
                         })
                     });
@@ -2998,7 +3015,7 @@ impl AudioOrbitApp {
                     }
                     self.waveform_drag_position_seconds = None;
                 } else if response.clicked() {
-                    if let Some(pointer) = response.interact_pointer_pos() {
+                    if let Some(pointer) = pointer_position {
                         let next_position = ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration;
                         self.seek_current(next_position);
                     }
