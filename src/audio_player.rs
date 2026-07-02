@@ -17,8 +17,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 45;
-const RADIO_VISUALIZER_VISIBLE_SECONDS: f32 = 24.0;
+const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 120;
 const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 48;
 const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
 
@@ -619,7 +618,7 @@ impl AudioPlayer {
         }))
     }
 
-    pub fn radio_visualizer_frame(&self, requested_points: usize) -> RadioVisualizerFrame {
+    pub fn radio_visualizer_frame(&self, requested_points: usize, visible_seconds: f32) -> RadioVisualizerFrame {
         let Ok(mut state) = self.radio_visualizer.lock() else {
             return RadioVisualizerFrame::default();
         };
@@ -628,8 +627,10 @@ impl AudioPlayer {
         }
 
         let now = Instant::now();
-        let visible_seconds = RADIO_VISUALIZER_VISIBLE_SECONDS;
-        let bucket_seconds = visible_seconds / requested_points.max(1) as f32;
+        let requested_points = requested_points.clamp(1, RADIO_VISUALIZER_MAX_BUCKETS);
+        let visible_seconds = visible_seconds
+            .clamp(1.0, RADIO_VISUALIZER_HISTORY_SECONDS as f32);
+        let bucket_seconds = (visible_seconds / requested_points as f32).max(1.0 / 240.0);
         let max_age = visible_seconds + bucket_seconds * 2.0;
 
         while state
@@ -660,20 +661,17 @@ impl AudioPlayer {
         let bars = slot_peaks
             .into_iter()
             .enumerate()
-            .filter_map(|(slot, peak)| {
+            .map(|(slot, peak)| {
                 let shaped = if peak > previous_peak {
                     previous_peak * 0.22 + peak * 0.78
                 } else {
                     previous_peak * 0.70 + peak * 0.30
                 };
                 previous_peak = shaped;
-                if shaped <= 0.003 {
-                    return None;
-                }
-                Some(RadioVisualizerBar {
+                RadioVisualizerBar {
                     age_seconds: (requested_points - 1 - slot) as f32 * bucket_seconds,
                     peak: shaped.clamp(0.0, 1.0),
-                })
+                }
             })
             .collect();
 

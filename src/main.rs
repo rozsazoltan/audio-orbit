@@ -32,6 +32,10 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+const RADIO_WAVEFORM_PIXELS_PER_SECOND: f32 = 64.0;
+const RADIO_WAVEFORM_MIN_VISIBLE_SECONDS: f32 = 4.0;
+const RADIO_WAVEFORM_MAX_VISIBLE_SECONDS: f32 = 60.0;
+
 fn min_window_size_for_mode(player_only_mode: bool) -> egui::Vec2 {
     if player_only_mode {
         egui::vec2(380.0, 220.0)
@@ -2956,14 +2960,20 @@ impl AudioOrbitApp {
         });
 
         if self.active_radio_index.is_some() {
-            let requested_points = ui.available_width().round().clamp(96.0, 4096.0) as usize;
+            let available_width = ui.available_width().max(96.0);
+            let requested_points = available_width.round().clamp(96.0, 4096.0) as usize;
+            let visible_seconds = (available_width / RADIO_WAVEFORM_PIXELS_PER_SECOND)
+                .clamp(RADIO_WAVEFORM_MIN_VISIBLE_SECONDS, RADIO_WAVEFORM_MAX_VISIBLE_SECONDS);
             let frame = self
                 .player
                 .as_ref()
-                .map(|player| player.radio_visualizer_frame(requested_points))
+                .map(|player| player.radio_visualizer_frame(requested_points, visible_seconds))
                 .unwrap_or_default();
             let response = draw_radio_visualizer(ui, &frame);
-            response.on_hover_text("Internet radio streams are live: new decoded audio enters on the right, older audio moves left, and connection gaps stay empty.");
+            response.on_hover_text(format!(
+                "Internet radio streams are live: the waveform scrolls at a constant speed and this panel currently shows about {:.0}s of history.",
+                visible_seconds
+            ));
         } else if has_now_playing {
             let position = self.displayed_playback_position_seconds();
             let duration = self.displayed_playback_duration_seconds();
