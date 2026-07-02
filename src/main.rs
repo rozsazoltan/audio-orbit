@@ -452,6 +452,7 @@ impl AudioOrbitApp {
         app.media_key_status = media_keys.status_message;
         app.restore_last_played_track_selection();
         app.restore_saved_playback_session();
+        app.restore_repeat_selection_for_current_playlist();
         app
     }
 
@@ -588,12 +589,46 @@ impl AudioOrbitApp {
             return;
         }
 
+        self.persist_repeat_selection_for_current_playlist();
         self.state.selected_playlist_index = index;
-        self.selected_track_indexes.clear();
+        self.restore_repeat_selection_for_current_playlist();
         self.selected_track_index = self.eligible_track_indexes().first().copied();
         self.collapsed_groups.clear();
         self.search_cursor = 0;
         self.save_state_silently();
+    }
+
+    fn restore_repeat_selection_for_current_playlist(&mut self) {
+        self.selected_track_indexes.clear();
+        let Some(playlist) = self.current_playlist() else {
+            return;
+        };
+
+        for (index, track) in playlist.tracks.iter().enumerate() {
+            if playlist
+                .repeat_selection
+                .iter()
+                .any(|selected_path| same_path(selected_path, &track.path))
+            {
+                self.selected_track_indexes.insert(index);
+            }
+        }
+    }
+
+    fn persist_repeat_selection_for_current_playlist(&mut self) {
+        let selected_paths = self
+            .current_playlist()
+            .map(|playlist| {
+                self.selected_track_indexes
+                    .iter()
+                    .filter_map(|index| playlist.tracks.get(*index).map(|track| track.path.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if let Some(playlist) = self.current_playlist_mut() {
+            playlist.repeat_selection = selected_paths;
+        }
     }
 
     fn current_settings(&self) -> DspSettings {
@@ -1237,7 +1272,7 @@ impl AudioOrbitApp {
                 let playlist = Playlist::from_folder(name.clone(), folder.clone(), depth, result.files);
                 self.state.playlists.push(playlist);
                 self.state.selected_playlist_index = self.state.playlists.len() - 1;
-                self.selected_track_indexes.clear();
+                self.restore_repeat_selection_for_current_playlist();
                 self.selected_track_index = self.eligible_track_indexes().first().copied();
                 self.status_message = format!(
                     "Imported {track_count} track(s) from {} as {name}.",
@@ -1255,8 +1290,8 @@ impl AudioOrbitApp {
                 if playlist.source_folder.as_ref().map(|source| same_path(source, &folder)).unwrap_or(false) {
                     playlist.folder_depth = depth;
                     playlist.replace_tracks_from_files(result.files);
-                    self.selected_track_indexes.clear();
                     if self.state.selected_playlist_index == playlist_index {
+                        self.restore_repeat_selection_for_current_playlist();
                         self.selected_track_index = self.eligible_track_indexes().first().copied();
                     }
                     self.status_message = format!("Rescanned {name}: {track_count} track(s) found.");
@@ -1305,7 +1340,7 @@ impl AudioOrbitApp {
                 self.show_library_panel = self.state.ui.show_library_panel;
                 self.show_profile_panel = self.state.ui.show_profile_panel;
                 self.player_only_mode = self.state.ui.player_only_mode;
-                self.selected_track_indexes.clear();
+                self.restore_repeat_selection_for_current_playlist();
                 self.selected_track_index = self.eligible_track_indexes().first().copied();
                 self.status_message = format!("Imported app backup from {}.", path.display());
                 self.error_message = None;
@@ -1319,9 +1354,10 @@ impl AudioOrbitApp {
 
     fn add_playlist(&mut self) {
         let number = self.state.playlists.len() + 1;
+        self.persist_repeat_selection_for_current_playlist();
         self.state.playlists.push(Playlist::new(format!("Playlist {number}")));
         self.state.selected_playlist_index = self.state.playlists.len() - 1;
-        self.selected_track_indexes.clear();
+        self.restore_repeat_selection_for_current_playlist();
         self.selected_track_index = None;
         self.status_message = "Created a new playlist.".to_owned();
         self.save_state_silently();
@@ -1355,7 +1391,7 @@ impl AudioOrbitApp {
             }
         }
         self.state.selected_playlist_index = removed_index.saturating_sub(1).min(self.state.playlists.len() - 1);
-        self.selected_track_indexes.clear();
+        self.restore_repeat_selection_for_current_playlist();
         self.selected_track_index = self.eligible_track_indexes().first().copied();
         self.status_message = if removed_playing_playlist {
             "Removed playlist and stopped its active playback.".to_owned()
@@ -2198,6 +2234,7 @@ impl AudioOrbitApp {
     }
 
     fn save_state_silently(&mut self) {
+        self.persist_repeat_selection_for_current_playlist();
         if let Err(error) = save_state(&self.state) {
             self.error_message = Some(error.to_string());
         }
@@ -2555,6 +2592,7 @@ impl AudioOrbitApp {
 impl Drop for AudioOrbitApp {
     fn drop(&mut self) {
         self.persist_playback_session();
+        self.persist_repeat_selection_for_current_playlist();
         if let Some(player) = &mut self.player {
             player.stop();
         }
@@ -3937,6 +3975,7 @@ impl AudioOrbitApp {
                                     } else {
                                         self.selected_track_indexes.remove(&index);
                                     }
+                                    self.save_state_silently();
                                 }
                             }
 
@@ -5335,6 +5374,20 @@ fn ensure_state_is_valid(state: &mut SavedState) {
         }
         playlist.sort_tracks();
         playlist.set_selected_group(playlist.selected_group.clone());
+        let track_paths: Vec<PathBuf> = playlist.tracks.iter().map(|track| track.path.clone()).collect();
+        playlist
+            .repeat_selection
+            .retain(|selected_path| track_paths.iter().any(|track_path| same_path(track_path, selected_path)));
+        let mut deduped_repeat_selection = Vec::new();
+        for selected_path in playlist.repeat_selection.drain(..) {
+            if !deduped_repeat_selection
+                .iter()
+                .any(|existing_path| same_path(existing_path, &selected_path))
+            {
+                deduped_repeat_selection.push(selected_path);
+            }
+        }
+        playlist.repeat_selection = deduped_repeat_selection;
     }
 
     if state.playlists.is_empty() {

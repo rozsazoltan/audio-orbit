@@ -207,6 +207,8 @@ pub struct Playlist {
     pub folder_depth: usize,
     pub selected_group: Option<String>,
     #[serde(default)]
+    pub repeat_selection: Vec<PathBuf>,
+    #[serde(default)]
     pub kind: PlaylistKind,
 }
 
@@ -218,6 +220,7 @@ impl Playlist {
             source_folder: None,
             folder_depth: 2,
             selected_group: None,
+            repeat_selection: Vec::new(),
             kind: PlaylistKind::Manual,
         }
     }
@@ -229,6 +232,7 @@ impl Playlist {
             source_folder: None,
             folder_depth: 0,
             selected_group: None,
+            repeat_selection: Vec::new(),
             kind: PlaylistKind::Favorites,
         }
     }
@@ -245,6 +249,7 @@ impl Playlist {
             source_folder: Some(source_folder),
             folder_depth,
             selected_group: None,
+            repeat_selection: Vec::new(),
             kind: PlaylistKind::Folder,
         };
         playlist.replace_tracks_from_files(files);
