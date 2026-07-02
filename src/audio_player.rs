@@ -117,14 +117,12 @@ struct RadioVisualizerBucket {
 
 #[derive(Clone, Copy, Debug)]
 pub struct RadioVisualizerBar {
-    pub age_seconds: f32,
     pub peak: f32,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct RadioVisualizerFrame {
     pub bars: Vec<RadioVisualizerBar>,
-    pub bucket_seconds: f32,
 }
 
 struct RadioVisualizerState {
@@ -669,16 +667,12 @@ impl AudioPlayer {
                 };
                 previous_peak = shaped;
                 RadioVisualizerBar {
-                    age_seconds: (requested_points - 1 - slot) as f32 * bucket_seconds,
                     peak: shaped.clamp(0.0, 1.0),
                 }
             })
             .collect();
 
-        RadioVisualizerFrame {
-            bars,
-            bucket_seconds,
-        }
+        RadioVisualizerFrame { bars }
     }
 
 
