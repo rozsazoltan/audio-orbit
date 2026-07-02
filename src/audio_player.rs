@@ -12,7 +12,7 @@ use std::{
     fs::File,
     io::{self, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{mpsc, Arc, Mutex},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -50,6 +50,11 @@ pub struct RadioRecordingInfo {
     pub bytes_written: u64,
 }
 
+#[derive(Clone, Debug)]
+pub struct RadioMetadataEvent {
+    pub stream_title: Option<String>,
+}
+
 struct ActiveRadioRecording {
     file: File,
     path: PathBuf,
@@ -63,37 +68,156 @@ struct RadioStream<R> {
     inner: Mutex<R>,
     position: u64,
     recorder: RadioRecordingHandle,
+    metadata_interval: Option<usize>,
+    audio_bytes_until_metadata: usize,
+    metadata_sender: Option<mpsc::Sender<RadioMetadataEvent>>,
+    last_stream_title: Option<String>,
 }
 
 impl<R> RadioStream<R> {
-    fn new(inner: R, recorder: RadioRecordingHandle) -> Self {
+    fn new(
+        inner: R,
+        recorder: RadioRecordingHandle,
+        metadata_interval: Option<usize>,
+        metadata_sender: Option<mpsc::Sender<RadioMetadataEvent>>,
+    ) -> Self {
+        let metadata_interval = metadata_interval.filter(|interval| *interval > 0 && *interval <= 2_000_000);
         Self {
             inner: Mutex::new(inner),
             position: 0,
             recorder,
+            audio_bytes_until_metadata: metadata_interval.unwrap_or(0),
+            metadata_interval,
+            metadata_sender,
+            last_stream_title: None,
+        }
+    }
+
+    fn record_audio_bytes(&self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+
+        if let Ok(mut recording) = self.recorder.lock() {
+            if let Some(recording) = recording.as_mut() {
+                if recording.file.write_all(bytes).is_ok() {
+                    recording.bytes_written = recording.bytes_written.saturating_add(bytes.len() as u64);
+                }
+            }
+        }
+    }
+
+    fn publish_stream_title(&mut self, metadata: &str) {
+        let stream_title = parse_icy_stream_title(metadata);
+        if stream_title == self.last_stream_title {
+            return;
+        }
+
+        self.last_stream_title = stream_title.clone();
+        if let Some(sender) = &self.metadata_sender {
+            let _ = sender.send(RadioMetadataEvent { stream_title });
         }
     }
 }
 
 impl<R: Read + Send> Read for RadioStream<R> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "radio stream lock poisoned"))?;
-        let read = inner.read(buffer)?;
-        if read > 0 {
-            if let Ok(mut recording) = self.recorder.lock() {
-                if let Some(recording) = recording.as_mut() {
-                    if recording.file.write_all(&buffer[..read]).is_ok() {
-                        recording.bytes_written = recording.bytes_written.saturating_add(read as u64);
-                    }
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+
+        let Some(metadata_interval) = self.metadata_interval else {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "radio stream lock poisoned"))?;
+            let read = inner.read(buffer)?;
+            drop(inner);
+            self.record_audio_bytes(&buffer[..read]);
+            self.position = self.position.saturating_add(read as u64);
+            return Ok(read);
+        };
+
+        let mut written = 0;
+        loop {
+            if written >= buffer.len() {
+                return Ok(written);
+            }
+
+            if self.audio_bytes_until_metadata == 0 {
+                let metadata = {
+                    let mut inner = self
+                        .inner
+                        .lock()
+                        .map_err(|_| io::Error::new(io::ErrorKind::Other, "radio stream lock poisoned"))?;
+                    read_icy_metadata_block(&mut *inner)
+                };
+
+                match metadata {
+                    Ok(Some(metadata)) => self.publish_stream_title(&metadata),
+                    Ok(None) => {}
+                    Err(error) if written > 0 => return Ok(written),
+                    Err(error) => return Err(error),
                 }
+
+                self.audio_bytes_until_metadata = metadata_interval;
+                continue;
+            }
+
+            let read_limit = (buffer.len() - written).min(self.audio_bytes_until_metadata);
+            let read = {
+                let mut inner = self
+                    .inner
+                    .lock()
+                    .map_err(|_| io::Error::new(io::ErrorKind::Other, "radio stream lock poisoned"))?;
+                inner.read(&mut buffer[written..written + read_limit])?
+            };
+
+            if read == 0 {
+                return Ok(written);
+            }
+
+            self.record_audio_bytes(&buffer[written..written + read]);
+            self.position = self.position.saturating_add(read as u64);
+            self.audio_bytes_until_metadata = self.audio_bytes_until_metadata.saturating_sub(read);
+            written += read;
+
+            if written > 0 {
+                return Ok(written);
             }
         }
-        self.position += read as u64;
-        Ok(read)
     }
+}
+
+fn read_icy_metadata_block<R: Read>(reader: &mut R) -> io::Result<Option<String>> {
+    let mut length_byte = [0_u8; 1];
+    reader.read_exact(&mut length_byte)?;
+    let metadata_length = length_byte[0] as usize * 16;
+    if metadata_length == 0 {
+        return Ok(None);
+    }
+
+    let mut metadata = vec![0_u8; metadata_length];
+    reader.read_exact(&mut metadata)?;
+    Ok(Some(String::from_utf8_lossy(&metadata).into_owned()))
+}
+
+fn parse_icy_stream_title(metadata: &str) -> Option<String> {
+    let marker = "StreamTitle='";
+    let start = metadata.find(marker)? + marker.len();
+    let rest = &metadata[start..];
+    let end = rest.find("';").or_else(|| rest.find('\''))?;
+    Some(clean_radio_metadata_value(&rest[..end])).filter(|value| !value.is_empty())
+}
+
+fn clean_radio_metadata_value(value: &str) -> String {
+    value
+        .trim_matches(char::from(0))
+        .trim()
+        .trim_matches('\'')
+        .trim_matches('"')
+        .trim()
+        .to_owned()
 }
 
 impl<R> Seek for RadioStream<R> {
@@ -519,16 +643,27 @@ impl AudioPlayer {
         self.volume_percent as f32 / 100.0
     }
 
-    pub fn play_radio_stream(&mut self, url: &str, settings: DspSettings) -> Result<()> {
+    pub fn play_radio_stream(
+        &mut self,
+        url: &str,
+        settings: DspSettings,
+        metadata_sender: Option<mpsc::Sender<RadioMetadataEvent>>,
+    ) -> Result<()> {
         let response = reqwest::blocking::Client::builder()
             .user_agent("Audio-Orbit-Radio")
             .build()?
             .get(url)
+            .header("Icy-MetaData", "1")
             .send()
             .with_context(|| format!("failed to open internet radio stream: {url}"))?
             .error_for_status()
             .with_context(|| format!("internet radio stream returned an error: {url}"))?;
-        let stream = RadioStream::new(response, Arc::clone(&self.radio_recorder));
+        let metadata_interval = response
+            .headers()
+            .get("icy-metaint")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<usize>().ok());
+        let stream = RadioStream::new(response, Arc::clone(&self.radio_recorder), metadata_interval, metadata_sender);
         let decoder = Decoder::new(BufReader::new(stream))
             .with_context(|| format!("failed to decode internet radio stream: {url}"))?;
 

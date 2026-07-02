@@ -10,7 +10,7 @@ mod spectrum_waveform;
 mod ui_icons;
 
 use crate::{
-    audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo, PreparedPlayback, RadioVisualizerFrame},
+    audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo, PreparedPlayback, RadioMetadataEvent, RadioVisualizerFrame},
     config::{
         app_data_dir, app_version_label, collect_audio_files_from_folder, display_file_name, export_state_zip,
         import_state_zip, load_state, same_path, save_state, LastPlayedTrack, PlaybackSession, Playlist, PlaylistKind, RadioStation, RepeatMode, SavedState,
@@ -276,9 +276,11 @@ struct AudioOrbitApp {
     radio_selection_was_user_set: bool,
     active_radio_station_name: Option<String>,
     active_radio_title: Option<String>,
+    active_radio_title_is_live: bool,
     radio_started_at: Option<Instant>,
     last_radio_title_lookup_at: Option<Instant>,
     radio_title_receiver: Option<mpsc::Receiver<(usize, Option<RadioStreamMetadata>)>>,
+    radio_metadata_receiver: Option<mpsc::Receiver<RadioMetadataEvent>>,
     collapsed_groups: BTreeSet<String>,
     pending_folder_path: Option<PathBuf>,
     pending_playlist_name: String,
@@ -356,9 +358,11 @@ impl AudioOrbitApp {
                     radio_selection_was_user_set: false,
                     active_radio_station_name: None,
                     active_radio_title: None,
+                    active_radio_title_is_live: false,
                     radio_started_at: None,
                     last_radio_title_lookup_at: None,
                     radio_title_receiver: None,
+                    radio_metadata_receiver: None,
                     collapsed_groups: BTreeSet::new(),
                     pending_folder_path: None,
                     pending_playlist_name,
@@ -423,9 +427,11 @@ impl AudioOrbitApp {
                 radio_selection_was_user_set: false,
                 active_radio_station_name: None,
                 active_radio_title: None,
+                active_radio_title_is_live: false,
                 radio_started_at: None,
                 last_radio_title_lookup_at: None,
                 radio_title_receiver: None,
+                radio_metadata_receiver: None,
                 collapsed_groups: BTreeSet::new(),
                 pending_folder_path: None,
                 pending_playlist_name,
@@ -850,7 +856,7 @@ impl AudioOrbitApp {
                     .filter(|name| !name.trim().is_empty())
                     .unwrap_or_else(|| station.name.clone());
                 let elapsed = self.radio_elapsed_seconds().map(format_duration).unwrap_or_else(|| "0:00".to_owned());
-                format!("{station_name} · live for {elapsed} · {}", station.url)
+                format!("{station_name} · live for {elapsed}")
             });
         }
 
@@ -969,16 +975,19 @@ impl AudioOrbitApp {
             return;
         };
 
+        let (metadata_sender, metadata_receiver) = mpsc::channel();
         self.status_message = format!("Opening internet radio: {}...", station.name);
         self.error_message = None;
-        match player.play_radio_stream(&station.url, settings) {
+        match player.play_radio_stream(&station.url, settings, Some(metadata_sender)) {
             Ok(()) => {
                 self.active_tab = MainContentTab::Radio;
                 self.active_radio_index = Some(index);
                 self.active_radio_station_name = station.last_station_name.clone();
                 self.active_radio_title = station.last_stream_title.clone();
+                self.active_radio_title_is_live = false;
                 self.radio_started_at = Some(Instant::now());
                 self.last_radio_title_lookup_at = Some(Instant::now());
+                self.radio_metadata_receiver = Some(metadata_receiver);
                 self.active_track_index = None;
                 self.active_playlist_index = None;
                 self.active_track_path = None;
@@ -1007,6 +1016,57 @@ impl AudioOrbitApp {
         });
     }
 
+    fn process_radio_metadata_events(&mut self) {
+        let Some(receiver) = &self.radio_metadata_receiver else {
+            return;
+        };
+        let events = receiver.try_iter().collect::<Vec<_>>();
+        if events.is_empty() {
+            return;
+        }
+
+        let Some(index) = self.active_radio_index else {
+            return;
+        };
+
+        let mut changed = false;
+        for event in events {
+            let Some(stream_title) = event
+                .stream_title
+                .map(|title| title.trim().to_owned())
+                .filter(|title| !title.is_empty())
+            else {
+                continue;
+            };
+
+            let station_name = self
+                .state
+                .radio_stations
+                .get(index)
+                .map(|station| station.name.as_str())
+                .unwrap_or("Internet radio");
+            if stream_title.eq_ignore_ascii_case(station_name) {
+                continue;
+            }
+
+            self.active_radio_title_is_live = true;
+            if self.active_radio_title.as_deref() != Some(stream_title.as_str()) {
+                self.active_radio_title = Some(stream_title.clone());
+                changed = true;
+            }
+            if let Some(station) = self.state.radio_stations.get_mut(index) {
+                if station.last_stream_title.as_deref() != Some(stream_title.as_str()) {
+                    station.last_stream_title = Some(stream_title);
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            self.save_state_silently();
+        }
+    }
+
     fn process_radio_title_events(&mut self) {
         let Some(receiver) = &self.radio_title_receiver else {
             return;
@@ -1018,13 +1078,16 @@ impl AudioOrbitApp {
             if let Some(metadata) = metadata {
                 if self.active_radio_index == Some(index) {
                     self.active_radio_station_name = metadata.station_name.clone().or_else(|| self.active_radio_station_name.clone());
-                    self.active_radio_title = metadata.stream_title.clone().or_else(|| self.active_radio_title.clone());
+                    if !self.active_radio_title_is_live {
+                        self.active_radio_title = metadata.stream_title.clone().or_else(|| self.active_radio_title.clone());
+                    }
                 }
+                let should_accept_polled_stream_title = self.active_radio_index != Some(index) || !self.active_radio_title_is_live;
                 if let Some(station) = self.state.radio_stations.get_mut(index) {
                     if metadata.station_name.is_some() {
                         station.last_station_name = metadata.station_name;
                     }
-                    if metadata.stream_title.is_some() {
+                    if metadata.stream_title.is_some() && should_accept_polled_stream_title {
                         station.last_stream_title = metadata.stream_title;
                     }
                 }
@@ -1483,9 +1546,11 @@ impl AudioOrbitApp {
                     self.active_radio_index = None;
                     self.active_radio_station_name = None;
                     self.active_radio_title = None;
+                    self.active_radio_title_is_live = false;
                     self.radio_started_at = None;
                     self.last_radio_title_lookup_at = None;
                     self.radio_title_receiver = None;
+                    self.radio_metadata_receiver = None;
                     self.active_playlist_index = Some(playlist_index);
                     self.selected_track_index = index;
                     self.active_track_index = index;
@@ -1615,9 +1680,11 @@ impl AudioOrbitApp {
                 self.active_radio_index = None;
                 self.active_radio_station_name = None;
                 self.active_radio_title = None;
+                self.active_radio_title_is_live = false;
                 self.radio_started_at = None;
                 self.last_radio_title_lookup_at = None;
                 self.radio_title_receiver = None;
+                self.radio_metadata_receiver = None;
                 self.active_playlist_index = Some(playlist_index);
                 self.selected_track_index = index;
 
@@ -2050,9 +2117,11 @@ impl AudioOrbitApp {
         self.active_radio_index = None;
         self.active_radio_station_name = None;
         self.active_radio_title = None;
+        self.active_radio_title_is_live = false;
         self.radio_started_at = None;
         self.last_radio_title_lookup_at = None;
         self.radio_title_receiver = None;
+        self.radio_metadata_receiver = None;
         self.pending_track_switch = None;
         self.crossfade_started_for_path = None;
         self.last_playback = None;
@@ -2583,6 +2652,7 @@ impl eframe::App for AudioOrbitApp {
         self.process_media_key_events();
         self.process_escape_navigation(context);
         self.process_keyboard_shortcuts(context);
+        self.process_radio_metadata_events();
         self.process_radio_title_events();
         self.refresh_radio_title_periodically();
         self.process_pending_profile_apply();
@@ -3522,21 +3592,22 @@ impl AudioOrbitApp {
                 for (index, station) in visible_stations {
                     let active = self.active_radio_index == Some(index);
                     let selected = active || (self.radio_selection_was_user_set && self.state.selected_radio_index == Some(index));
-                    let display_stream_title = station
-                        .last_stream_title
+                    let display_station_name = station
+                        .last_station_name
                         .as_deref()
-                        .filter(|title| !title.trim().is_empty() && !title.eq_ignore_ascii_case(&station.name));
-                    let primary_title = display_stream_title.unwrap_or(station.name.as_str());
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or(station.name.as_str());
+                    let display_stream_title = station.last_stream_title.as_deref().filter(|title| {
+                        !title.trim().is_empty()
+                            && !title.eq_ignore_ascii_case(display_station_name)
+                            && !title.eq_ignore_ascii_case(&station.name)
+                    });
                     let station_title = if active {
-                        format!("{} {}", ui_icons::icon(Icon::Play), primary_title)
+                        format!("{} {}", ui_icons::icon(Icon::Play), display_station_name)
                     } else {
-                        primary_title.to_owned()
+                        display_station_name.to_owned()
                     };
-                    let station_info = if display_stream_title.is_some() {
-                        station.name.clone()
-                    } else {
-                        String::new()
-                    };
+                    let station_info = display_stream_title.unwrap_or("").to_owned();
 
                     let row_hovered = next_row_pointer_hovered(ui, row_width, 34.0);
                     let row_response = ui.allocate_ui_with_layout(
@@ -3584,7 +3655,9 @@ impl AudioOrbitApp {
                             let info_width = if station_info.is_empty() {
                                 0.0
                             } else {
-                                text_width(ui, &station_info, info_font.clone(), info_color).ceil()
+                                text_width(ui, &station_info, info_font.clone(), info_color)
+                                    .ceil()
+                                    .min(body_width * 0.45)
                             };
                             let info_gap = if station_info.is_empty() { 0.0 } else { 6.0 };
                             let title_left = body_rect.left() + body_padding;
