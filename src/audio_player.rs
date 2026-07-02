@@ -127,18 +127,44 @@ pub struct RadioVisualizerFrame {
 
 struct RadioVisualizerState {
     peaks: VecDeque<RadioVisualizerBucket>,
+    display_floor: f32,
+    display_peak: f32,
 }
 
 impl Default for RadioVisualizerState {
     fn default() -> Self {
         Self {
             peaks: VecDeque::new(),
+            display_floor: 0.025,
+            display_peak: 0.42,
         }
     }
 }
 
 type RadioVisualizerHandle = Arc<Mutex<RadioVisualizerState>>;
 
+fn fill_radio_waveform_gaps(values: &mut [f32]) {
+    let mut previous: Option<(usize, f32)> = None;
+
+    for index in 0..values.len() {
+        if values[index] <= 0.0005 {
+            continue;
+        }
+
+        if let Some((previous_index, previous_value)) = previous {
+            let gap = index.saturating_sub(previous_index + 1);
+            if gap > 0 && gap <= 8 {
+                let current_value = values[index];
+                for offset in 1..=gap {
+                    let mix = offset as f32 / (gap + 1) as f32;
+                    values[previous_index + offset] = previous_value * (1.0 - mix) + current_value * mix;
+                }
+            }
+        }
+
+        previous = Some((index, values[index]));
+    }
+}
 
 struct LiveFileSource<S> {
     inner: S,
@@ -642,6 +668,7 @@ impl AudioPlayer {
         }
 
         let mut slot_peaks = vec![0.0_f32; requested_points];
+        let mut has_audio = false;
         for bucket in &state.peaks {
             let age_seconds = now.duration_since(bucket.at).as_secs_f32();
             if age_seconds > max_age {
@@ -652,22 +679,65 @@ impl AudioPlayer {
                 continue;
             }
             let slot = requested_points - 1 - slot_from_right;
-            slot_peaks[slot] = slot_peaks[slot].max(bucket.peak.clamp(0.0, 1.0));
+            let peak = bucket.peak.clamp(0.0, 1.0);
+            if peak > 0.0005 {
+                has_audio = true;
+            }
+            slot_peaks[slot] = slot_peaks[slot].max(peak);
         }
+
+        if !has_audio {
+            return RadioVisualizerFrame {
+                bars: slot_peaks
+                    .into_iter()
+                    .map(|_| RadioVisualizerBar { peak: 0.0 })
+                    .collect(),
+            };
+        }
+
+        // The local track strip looks good because it is normalized from a full
+        // waveform overview. For live radio we only have a rolling history, so
+        // keep a slow-moving display floor/peak in the audio player instead of
+        // stretching the visible window every frame. This avoids both the old
+        // solid-rectangle look and the later pumping/jitter.
+        let mut nonzero = slot_peaks
+            .iter()
+            .copied()
+            .filter(|value| *value > 0.0005)
+            .collect::<Vec<_>>();
+        nonzero.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+        let last = nonzero.len().saturating_sub(1);
+        let target_floor = nonzero[((last as f32 * 0.05) as usize).min(last)].min(0.20);
+        let target_peak = nonzero[((last as f32 * 0.985) as usize).min(last)].max(target_floor + 0.16);
+
+        let floor_blend = if target_floor > state.display_floor { 0.035 } else { 0.14 };
+        state.display_floor = (state.display_floor * (1.0 - floor_blend) + target_floor * floor_blend)
+            .clamp(0.0, 0.24);
+
+        let peak_blend = if target_peak > state.display_peak { 0.18 } else { 0.035 };
+        state.display_peak = (state.display_peak * (1.0 - peak_blend) + target_peak * peak_blend)
+            .max(state.display_floor + 0.12)
+            .clamp(0.18, 1.0);
+
+        let display_floor = state.display_floor;
+        let display_range = (state.display_peak - display_floor).max(0.10);
+        fill_radio_waveform_gaps(&mut slot_peaks);
 
         let mut previous_peak = 0.0_f32;
         let bars = slot_peaks
             .into_iter()
-            .enumerate()
-            .map(|(slot, peak)| {
-                let shaped = if peak > previous_peak {
-                    previous_peak * 0.22 + peak * 0.78
+            .map(|peak| {
+                let normalized = ((peak.clamp(0.0, 1.0) - display_floor) / display_range)
+                    .clamp(0.0, 1.0)
+                    .powf(0.88);
+                let shaped = if normalized > previous_peak {
+                    previous_peak * 0.18 + normalized * 0.82
                 } else {
-                    previous_peak * 0.70 + peak * 0.30
+                    previous_peak * 0.58 + normalized * 0.42
                 };
                 previous_peak = shaped;
                 RadioVisualizerBar {
-                    peak: shaped.clamp(0.0, 1.0),
+                    peak: shaped.clamp(0.0, 0.98),
                 }
             })
             .collect();

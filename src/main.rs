@@ -33,8 +33,10 @@ use std::{
 };
 
 const RADIO_WAVEFORM_PIXELS_PER_SECOND: f32 = 64.0;
+const RADIO_WAVEFORM_POINTS_PER_SECOND: f32 = 64.0;
 const RADIO_WAVEFORM_MIN_VISIBLE_SECONDS: f32 = 4.0;
 const RADIO_WAVEFORM_MAX_VISIBLE_SECONDS: f32 = 60.0;
+const RADIO_METADATA_REFRESH_INTERVAL_SECONDS: u64 = 8;
 
 fn min_window_size_for_mode(player_only_mode: bool) -> egui::Vec2 {
     if player_only_mode {
@@ -1044,7 +1046,7 @@ impl AudioOrbitApp {
         let Some(last_lookup) = self.last_radio_title_lookup_at else {
             return;
         };
-        if last_lookup.elapsed() < Duration::from_secs(15) {
+        if last_lookup.elapsed() < Duration::from_secs(RADIO_METADATA_REFRESH_INTERVAL_SECONDS) {
             return;
         }
         let Some(station) = self.state.radio_stations.get(index) else {
@@ -2961,17 +2963,19 @@ impl AudioOrbitApp {
 
         if self.active_radio_index.is_some() {
             let available_width = ui.available_width().max(96.0);
-            let requested_points = available_width.round().clamp(96.0, 4096.0) as usize;
             let visible_seconds = (available_width / RADIO_WAVEFORM_PIXELS_PER_SECOND)
                 .clamp(RADIO_WAVEFORM_MIN_VISIBLE_SECONDS, RADIO_WAVEFORM_MAX_VISIBLE_SECONDS);
+            let requested_points = (visible_seconds * RADIO_WAVEFORM_POINTS_PER_SECOND)
+                .round()
+                .clamp(96.0, 4096.0) as usize;
             let frame = self
                 .player
                 .as_ref()
                 .map(|player| player.radio_visualizer_frame(requested_points, visible_seconds))
                 .unwrap_or_default();
-            let response = draw_radio_visualizer(ui, &frame);
+            let response = draw_radio_waveform_strip(ui, &frame);
             response.on_hover_text(format!(
-                "Internet radio streams are live: the waveform scrolls at a constant speed and this panel currently shows about {:.0}s of history.",
+                "Internet radio streams are live: this is a rolling waveform history of about {:.0}s. It is not seekable.",
                 visible_seconds
             ));
         } else if has_now_playing {
@@ -5425,42 +5429,45 @@ fn paint_sticky_folder_header(
     (rect, icon_rect)
 }
 
-fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egui::Response {
+fn draw_radio_waveform_strip(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egui::Response {
     let desired_size = egui::vec2(ui.available_width(), 46.0);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
     let painter = ui.painter();
 
     painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(210));
 
-    let bar_count = rect.width().floor().clamp(96.0, 4096.0) as usize;
-    let center_y = rect.center().y.round();
-    let left = rect.left().round();
-    let top = rect.top().round();
-    let bottom = rect.bottom().round();
-    let right = rect.right().round();
-
-    let empty_color = egui::Color32::from_rgb(58, 63, 74);
+    let center_y = rect.center().y;
+    let empty_color = egui::Color32::from_rgb(92, 98, 110);
     let live_color = egui::Color32::from_rgb(78, 148, 255);
 
-    // Draw the already-slotted frame directly. Re-bucketing by age here caused
-    // rounding drift while the live stream was scrolling, and per-frame dynamic
-    // normalization made the whole strip pulse when a loud bucket entered or left
-    // the visible history. A fixed gain gives the radio strip the same stable,
-    // AIMP-like feel as the local waveform.
-    for index in 0..bar_count {
-        let x1 = left + index as f32;
-        let x2 = if index + 1 == bar_count { right } else { x1 + 1.0 };
-        if x1 >= right {
+    if frame.bars.is_empty() {
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(rect.left(), center_y - 0.5),
+                egui::pos2(rect.right(), center_y + 0.5),
+            ),
+            0.0,
+            empty_color,
+        );
+        return response;
+    }
+
+    let rendered_points = frame.bars.len().max(1);
+    let bar_width = rect.width() / rendered_points as f32;
+
+    for (bar_index, bar) in frame.bars.iter().enumerate() {
+        let x1 = rect.left() + bar_index as f32 * bar_width;
+        let x2 = if bar_index + 1 == rendered_points {
+            rect.right()
+        } else {
+            rect.left() + (bar_index + 1) as f32 * bar_width
+        };
+        if x1 >= rect.right() {
             break;
         }
 
-        let value = frame
-            .bars
-            .get(index)
-            .map(|bar| bar.peak.clamp(0.0, 1.0))
-            .unwrap_or(0.0);
-
-        if value <= 0.004 {
+        let value = bar.peak.clamp(0.0, 1.0);
+        if value <= 0.006 {
             painter.rect_filled(
                 egui::Rect::from_min_max(
                     egui::pos2(x1, center_y - 0.5),
@@ -5472,9 +5479,8 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
             continue;
         }
 
-        let normalized = (value * 2.85).clamp(0.018, 1.0);
-        let eased = normalized.sqrt();
-        let height = (rect.height() * 0.84 * eased).max(2.0).min(rect.height() - 4.0).round();
+        let eased = value.powf(1.08).clamp(0.018, 1.0);
+        let height = (rect.height() * 0.84 * eased).max(2.0).min(rect.height() - 4.0);
         painter.rect_filled(
             egui::Rect::from_min_max(
                 egui::pos2(x1, center_y - height * 0.5),
@@ -5485,11 +5491,15 @@ fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egu
         );
     }
 
-    let live_edge = egui::Rect::from_min_max(
-        egui::pos2((right - 2.0).max(left), top + 4.0),
-        egui::pos2(right, bottom - 4.0),
+    let live_edge_x = rect.right() - bar_width.max(1.0);
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(live_edge_x, rect.top() + 4.0),
+            egui::pos2(rect.right(), rect.bottom() - 4.0),
+        ),
+        0.0,
+        egui::Color32::WHITE.linear_multiply(0.82),
     );
-    painter.rect_filled(live_edge, 0.0, egui::Color32::WHITE.linear_multiply(0.85));
 
     response
 }
