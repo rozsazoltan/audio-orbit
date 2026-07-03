@@ -179,7 +179,7 @@ Use the heart button next to a track to add or remove it from Favorites. Favorit
 
 Open **Settings**, then use **Backup and data**.
 
-Export creates a compressed ZIP backup of the full app state. Import restores the state from a ZIP backup.
+Export creates a compressed ZIP backup of the full app state and suggests a filename that includes the app version and UTC timestamp. Import restores the state from a ZIP backup.
 
 ### Identify the current song
 

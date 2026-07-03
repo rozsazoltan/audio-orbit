@@ -13,7 +13,7 @@ mod updater;
 use crate::{
     audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo, PreparedPlayback, RadioVisualizerFrame},
     config::{
-        app_data_dir, app_version_label, collect_audio_files_from_folder, display_file_name, export_state_zip,
+        app_data_dir, app_version_label, collect_audio_files_from_folder, default_backup_file_name, display_file_name, export_state_zip,
         import_state_zip, load_state, same_path, save_state, LastPlayedTrack, PlaybackSession, Playlist, PlaylistKind, RadioStation, RepeatMode, SavedState,
         Track, WindowGeometry, FAVORITES_PLAYLIST_NAME,
     },
@@ -1399,7 +1399,7 @@ impl AudioOrbitApp {
     fn export_app_backup(&mut self) {
         let Some(path) = FileDialog::new()
             .add_filter("Audio Orbit backup", &["zip"])
-            .set_file_name("audio-orbit-backup.zip")
+            .set_file_name(default_backup_file_name())
             .save_file()
         else {
             return;

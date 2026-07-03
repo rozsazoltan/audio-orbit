@@ -9,6 +9,7 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
 
@@ -22,6 +23,60 @@ pub fn app_version_label() -> &'static str {
     } else {
         concat!("v", env!("CARGO_PKG_VERSION"))
     }
+}
+
+pub fn default_backup_file_name() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let (year, month, day, hour, minute, second) = utc_timestamp_parts(seconds);
+    let version = sanitize_file_name_segment(app_version_label());
+    format!(
+        "audio-orbit-backup-{version}-{year:04}-{month:02}-{day:02}-{hour:02}-{minute:02}-{second:02}.zip"
+    )
+}
+
+fn sanitize_file_name_segment(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|character| match character {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
+            character if character.is_control() => '-',
+            character => character,
+        })
+        .collect::<String>()
+        .trim_matches(|character| character == '.' || character == ' ')
+        .to_owned();
+
+    if sanitized.is_empty() {
+        "unknown".to_owned()
+    } else {
+        sanitized
+    }
+}
+
+fn utc_timestamp_parts(seconds: u64) -> (i32, u32, u32, u32, u32, u32) {
+    let days = (seconds / 86_400) as i64;
+    let seconds_of_day = seconds % 86_400;
+    let hour = (seconds_of_day / 3_600) as u32;
+    let minute = ((seconds_of_day % 3_600) / 60) as u32;
+    let second = (seconds_of_day % 60) as u32;
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe as i32 + era as i32 * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = (mp + if mp < 10 { 3 } else { -9 }) as u32;
+    if month <= 2 {
+        year += 1;
+    }
+
+    (year, month, day, hour, minute, second)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
