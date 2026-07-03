@@ -7333,13 +7333,18 @@ fn reveal_in_file_manager(path: &Path) -> anyhow::Result<()> {
 
     #[cfg(windows)]
     {
+        let explorer_folder = explorer_compatible_path(&folder);
         if looks_like_file {
+            let explorer_target = explorer_compatible_path(&target);
             Command::new("explorer.exe")
-                .arg(format!(r#"/select,"{}""#, target.display()))
+                .current_dir(&explorer_folder)
+                .arg("/select,")
+                .arg(&explorer_target)
                 .spawn()?;
         } else {
             Command::new("explorer.exe")
-                .arg(folder)
+                .current_dir(&explorer_folder)
+                .arg(&explorer_folder)
                 .spawn()?;
         }
         return Ok(());
@@ -7350,5 +7355,17 @@ fn reveal_in_file_manager(path: &Path) -> anyhow::Result<()> {
         Command::new("xdg-open").arg(folder).spawn()?;
         Ok(())
     }
+}
+
+#[cfg(windows)]
+fn explorer_compatible_path(path: &Path) -> PathBuf {
+    let path_text = path.as_os_str().to_string_lossy();
+    if let Some(stripped) = path_text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{stripped}"));
+    }
+    if let Some(stripped) = path_text.strip_prefix(r"\\?\") {
+        return PathBuf::from(stripped);
+    }
+    path.to_path_buf()
 }
 
