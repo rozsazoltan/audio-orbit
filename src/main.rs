@@ -280,6 +280,8 @@ struct AudioOrbitApp {
     radio_started_at: Option<Instant>,
     last_radio_title_lookup_at: Option<Instant>,
     radio_title_receiver: Option<mpsc::Receiver<(usize, Option<RadioStreamMetadata>)>>,
+    dragging_track_index: Option<usize>,
+    dragging_radio_index: Option<usize>,
     collapsed_groups: BTreeSet<String>,
     pending_folder_path: Option<PathBuf>,
     pending_playlist_name: String,
@@ -360,6 +362,8 @@ impl AudioOrbitApp {
                     radio_started_at: None,
                     last_radio_title_lookup_at: None,
                     radio_title_receiver: None,
+                    dragging_track_index: None,
+                    dragging_radio_index: None,
                     collapsed_groups: BTreeSet::new(),
                     pending_folder_path: None,
                     pending_playlist_name,
@@ -427,6 +431,8 @@ impl AudioOrbitApp {
                 radio_started_at: None,
                 last_radio_title_lookup_at: None,
                 radio_title_receiver: None,
+                dragging_track_index: None,
+                dragging_radio_index: None,
                 collapsed_groups: BTreeSet::new(),
                 pending_folder_path: None,
                 pending_playlist_name,
@@ -1488,6 +1494,23 @@ impl AudioOrbitApp {
         self.save_state_silently();
     }
 
+    fn move_track_to_index_in_current_playlist(&mut self, from: usize, to: usize) {
+        self.persist_repeat_selection_for_current_playlist();
+        let selected_path = self.selected_track_path();
+        let Some(playlist) = self.current_playlist_mut() else {
+            return;
+        };
+        if from >= playlist.tracks.len() || to >= playlist.tracks.len() || from == to {
+            return;
+        }
+        let track = playlist.tracks.remove(from);
+        let insert_at = if from < to { to.saturating_sub(1) } else { to };
+        playlist.tracks.insert(insert_at.min(playlist.tracks.len()), track);
+        self.restore_track_selection_after_reorder(selected_path);
+        self.status_message = "Moved track in playlist order.".to_owned();
+        self.save_state_silently();
+    }
+
 
     fn move_folder_group_in_current_playlist(&mut self, group: &str, delta: isize) {
         self.persist_repeat_selection_for_current_playlist();
@@ -1584,6 +1607,31 @@ impl AudioOrbitApp {
             return;
         }
         self.state.radio_stations.swap(index, to);
+        self.active_radio_index = active_url.as_ref().and_then(|url| {
+            self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
+        });
+        self.state.selected_radio_index = selected_url.as_ref().and_then(|url| {
+            self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
+        });
+        self.radio_selection_was_user_set = self.state.selected_radio_index.is_some();
+        self.status_message = "Moved radio station.".to_owned();
+        self.save_state_silently();
+    }
+
+    fn move_radio_station_to_index(&mut self, from: usize, to: usize) {
+        if from >= self.state.radio_stations.len() || to >= self.state.radio_stations.len() || from == to {
+            return;
+        }
+        let active_url = self
+            .active_radio_index
+            .and_then(|active_index| self.state.radio_stations.get(active_index).map(|station| station.url.clone()));
+        let selected_url = self
+            .state
+            .selected_radio_index
+            .and_then(|selected_index| self.state.radio_stations.get(selected_index).map(|station| station.url.clone()));
+        let station = self.state.radio_stations.remove(from);
+        let insert_at = if from < to { to.saturating_sub(1) } else { to };
+        self.state.radio_stations.insert(insert_at.min(self.state.radio_stations.len()), station);
         self.active_radio_index = active_url.as_ref().and_then(|url| {
             self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
         });
@@ -3211,7 +3259,7 @@ impl AudioOrbitApp {
                 .clamp(1.0, RADIO_WAVEFORM_MAX_VISIBLE_SECONDS);
             let requested_points = (available_width / RADIO_WAVEFORM_BAR_PITCH_PIXELS)
                 .floor()
-                .clamp(1.0, 900.0) as usize;
+                .clamp(1.0, 900.0) as usize + 1;
             let frame = self
                 .player
                 .as_ref()
@@ -3766,6 +3814,7 @@ impl AudioOrbitApp {
         let mut remove_radio_index: Option<usize> = None;
         let mut play_radio_index: Option<usize> = None;
         let mut favorite_toggle_index: Option<usize> = None;
+        let mut reorder_radio_station: Option<(usize, usize)> = None;
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -3884,7 +3933,7 @@ impl AudioOrbitApp {
                     let context_response = ui.interact(
                         row_response.response.rect.expand(2.0),
                         ui.make_persistent_id(("radio_station_context", index)),
-                        egui::Sense::click(),
+                        egui::Sense::click_and_drag(),
                     );
                     if context_response.clicked() {
                         self.state.selected_radio_index = Some(index);
@@ -3895,6 +3944,16 @@ impl AudioOrbitApp {
                         self.state.selected_radio_index = Some(index);
                         self.radio_selection_was_user_set = true;
                         play_radio_index = Some(index);
+                    }
+                    if context_response.drag_started() {
+                        self.dragging_radio_index = Some(index);
+                    }
+                    if context_response.hovered() && ui.input(|input| input.pointer.any_released()) {
+                        if let Some(from) = self.dragging_radio_index.take() {
+                            if from != index {
+                                reorder_radio_station = Some((from, index));
+                            }
+                        }
                     }
                     if row_response.response.secondary_clicked() || context_response.secondary_clicked() {
                         self.state.selected_radio_index = Some(index);
@@ -3931,6 +3990,12 @@ impl AudioOrbitApp {
                 }
             });
 
+        if !ui.input(|input| input.pointer.primary_down()) {
+            self.dragging_radio_index = None;
+        }
+        if let Some((from, to)) = reorder_radio_station {
+            self.move_radio_station_to_index(from, to);
+        }
         if let Some(index) = favorite_toggle_index {
             if let Some(station) = self.state.radio_stations.get_mut(index) {
                 station.favorite = !station.favorite;
@@ -4139,6 +4204,7 @@ impl AudioOrbitApp {
         let mut last_group = String::new();
         let row_width = (ui.available_width() - 22.0).max(320.0);
         let scroll_height = ui.available_height();
+        let mut reorder_track: Option<(usize, usize)> = None;
         let scroll_output = egui::ScrollArea::vertical()
             .id_salt("track_list_scroll")
             .vertical_scroll_offset(self.state.ui.playlist_scroll_offset_y.max(0.0))
@@ -4371,7 +4437,7 @@ impl AudioOrbitApp {
                     let context_response = ui.interact(
                         context_rect,
                         ui.make_persistent_id(("track_context", index)),
-                        egui::Sense::click(),
+                        egui::Sense::click_and_drag(),
                     );
                     if context_response.clicked() {
                         self.selected_track_index = Some(index);
@@ -4379,6 +4445,16 @@ impl AudioOrbitApp {
                     if context_response.double_clicked() {
                         self.selected_track_index = Some(index);
                         self.play_path(path.clone(), Some(index), 0.0);
+                    }
+                    if context_response.drag_started() {
+                        self.dragging_track_index = Some(index);
+                    }
+                    if context_response.hovered() && ui.input(|input| input.pointer.any_released()) {
+                        if let Some(from) = self.dragging_track_index.take() {
+                            if from != index {
+                                reorder_track = Some((from, index));
+                            }
+                        }
                     }
                     if row_response.response.secondary_clicked() || context_response.secondary_clicked() {
                         self.selected_track_index = Some(index);
@@ -4429,6 +4505,12 @@ impl AudioOrbitApp {
                 }
             });
         self.state.ui.playlist_scroll_offset_y = scroll_output.state.offset.y.max(0.0);
+        if !ui.input(|input| input.pointer.primary_down()) {
+            self.dragging_track_index = None;
+        }
+        if let Some((from, to)) = reorder_track {
+            self.move_track_to_index_in_current_playlist(from, to);
+        }
     }
 
     fn render_track_row_context_menu(
@@ -4654,29 +4736,27 @@ impl AudioOrbitApp {
                 .on_hover_text("AIMP-style silence removal for local music files. Internet radio streams stay live and are not silence-skipped.")
                 .changed();
             if profile.settings.skip_silence_enabled {
-                ui.indent("silence_removal_settings", |ui| {
-                    profile_changed |= ui
-                        .add(
-                            egui::Slider::new(&mut profile.settings.silence_trigger_millis, 250u16..=10000u16)
-                                .text("Activation delay (ms)"),
-                        )
-                        .on_hover_text("A continuous silent section must last at least this long before Audio Orbit removes it. AIMP default: 2000 ms.")
-                        .changed();
-                    profile_changed |= ui
-                        .add(
-                            egui::Slider::new(&mut profile.settings.silence_threshold_db, -90i16..=-20i16)
-                                .text("Detection threshold (dB)"),
-                        )
-                        .on_hover_text("Audio below this level is treated as silence. AIMP default shown in your screenshot: -60 dB.")
-                        .changed();
-                    profile_changed |= ui
-                        .checkbox(
-                            &mut profile.settings.silence_trim_end_regardless_of_duration,
-                            "Remove silence at track end regardless of duration",
-                        )
-                        .on_hover_text("Matches AIMP's option for trimming ending silence even when the silent tail is shorter than the activation delay.")
-                        .changed();
-                });
+                profile_changed |= ui
+                    .add(
+                        egui::Slider::new(&mut profile.settings.silence_trigger_millis, 250u16..=10000u16)
+                            .text("Activation delay (ms)"),
+                    )
+                    .on_hover_text("A continuous silent section must last at least this long before Audio Orbit removes it. AIMP default: 2000 ms.")
+                    .changed();
+                profile_changed |= ui
+                    .add(
+                        egui::Slider::new(&mut profile.settings.silence_threshold_db, -90i16..=-20i16)
+                            .text("Detection threshold (dB)"),
+                    )
+                    .on_hover_text("Audio below this level is treated as silence. AIMP default shown in your screenshot: -60 dB.")
+                    .changed();
+                profile_changed |= ui
+                    .checkbox(
+                        &mut profile.settings.silence_trim_end_regardless_of_duration,
+                        "Remove silence at track end regardless of duration",
+                    )
+                    .on_hover_text("Matches AIMP's option for trimming ending silence even when the silent tail is shorter than the activation delay.")
+                    .changed();
             }
         }
         if profile_changed {
@@ -5154,29 +5234,27 @@ impl AudioOrbitApp {
                 .on_hover_text("AIMP-style silence removal for local music files. Internet radio streams stay live and are not silence-skipped.")
                 .changed();
             if profile.settings.skip_silence_enabled {
-                ui.indent("silence_removal_settings", |ui| {
-                    profile_changed |= ui
-                        .add(
-                            egui::Slider::new(&mut profile.settings.silence_trigger_millis, 250u16..=10000u16)
-                                .text("Activation delay (ms)"),
-                        )
-                        .on_hover_text("A continuous silent section must last at least this long before Audio Orbit removes it. AIMP default: 2000 ms.")
-                        .changed();
-                    profile_changed |= ui
-                        .add(
-                            egui::Slider::new(&mut profile.settings.silence_threshold_db, -90i16..=-20i16)
-                                .text("Detection threshold (dB)"),
-                        )
-                        .on_hover_text("Audio below this level is treated as silence. AIMP default shown in your screenshot: -60 dB.")
-                        .changed();
-                    profile_changed |= ui
-                        .checkbox(
-                            &mut profile.settings.silence_trim_end_regardless_of_duration,
-                            "Remove silence at track end regardless of duration",
-                        )
-                        .on_hover_text("Matches AIMP's option for trimming ending silence even when the silent tail is shorter than the activation delay.")
-                        .changed();
-                });
+                profile_changed |= ui
+                    .add(
+                        egui::Slider::new(&mut profile.settings.silence_trigger_millis, 250u16..=10000u16)
+                            .text("Activation delay (ms)"),
+                    )
+                    .on_hover_text("A continuous silent section must last at least this long before Audio Orbit removes it. AIMP default: 2000 ms.")
+                    .changed();
+                profile_changed |= ui
+                    .add(
+                        egui::Slider::new(&mut profile.settings.silence_threshold_db, -90i16..=-20i16)
+                            .text("Detection threshold (dB)"),
+                    )
+                    .on_hover_text("Audio below this level is treated as silence. AIMP default shown in your screenshot: -60 dB.")
+                    .changed();
+                profile_changed |= ui
+                    .checkbox(
+                        &mut profile.settings.silence_trim_end_regardless_of_duration,
+                        "Remove silence at track end regardless of duration",
+                    )
+                    .on_hover_text("Matches AIMP's option for trimming ending silence even when the silent tail is shorter than the activation delay.")
+                    .changed();
             }
         }
         if profile_changed {
@@ -5238,13 +5316,26 @@ impl AudioOrbitApp {
     }
 
     fn modal_info_footer_reserved_height(&self) -> f32 {
-        if !self.has_modal_info_message() {
-            0.0
-        } else if self.error_message.is_some() {
-            112.0
-        } else {
-            58.0
+        if let Some(error) = &self.error_message {
+            let estimated_lines = error
+                .lines()
+                .map(|line| (line.chars().count() as f32 / 92.0).ceil().max(1.0))
+                .sum::<f32>()
+                .max(1.0);
+            return 34.0 + (estimated_lines * 18.0).min(48.0);
         }
+
+        if !self.status_message.is_empty() {
+            let estimated_lines = self
+                .status_message
+                .lines()
+                .map(|line| (line.chars().count() as f32 / 110.0).ceil().max(1.0))
+                .sum::<f32>()
+                .max(1.0);
+            return 34.0 + (estimated_lines * 18.0).min(24.0);
+        }
+
+        0.0
     }
 
     fn render_modal_info_footer_fixed(&self, context: &egui::Context, id: &'static str, modal_rect: egui::Rect) {
@@ -5274,7 +5365,7 @@ impl AudioOrbitApp {
                             .inner_margin(egui::Margin::symmetric(10, 6))
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
-                                let max_text_height = if self.error_message.is_some() { 62.0 } else { 24.0 };
+                                let max_text_height = if self.error_message.is_some() { 48.0 } else { 24.0 };
                                 egui::ScrollArea::vertical()
                                     .max_height(max_text_height)
                                     .auto_shrink([false, false])
@@ -5371,7 +5462,7 @@ impl AudioOrbitApp {
                     .show(ui, |ui| {
                         ui.set_width(width);
                         egui::ScrollArea::vertical()
-                            .max_height(108.0)
+                            .max_height(82.0)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
@@ -5877,16 +5968,15 @@ fn draw_radio_waveform_strip(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) ->
         return response;
     }
 
-    let rendered_points = frame.bars.len().max(1);
-    let bar_pitch = (rect.width() / rendered_points as f32).max(WAVEFORM_BAR_WIDTH_PIXELS + 1.0);
-    let draw_width = WAVEFORM_BAR_WIDTH_PIXELS;
     let center_y = rect.center().y.round();
     let live_color = egui::Color32::from_rgb(78, 148, 255);
-    let start_x = rect.left().round();
+    let start_x = rect.left().round() + 0.5;
+    let right_x = rect.right().round() - 0.5;
+    let stroke = egui::Stroke::new(WAVEFORM_BAR_WIDTH_PIXELS, live_color);
 
     for (bar_index, bar) in frame.bars.iter().enumerate() {
-        let x = (start_x + (bar_index as f32 * bar_pitch)).round();
-        if x + draw_width > rect.right() + 0.5 {
+        let x = start_x + bar_index as f32 * RADIO_WAVEFORM_BAR_PITCH_PIXELS;
+        if x > right_x {
             break;
         }
 
@@ -5899,11 +5989,13 @@ fn draw_radio_waveform_strip(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) ->
         let height = (rect.height() * 0.72 * eased)
             .max(1.5)
             .min(rect.height() - 5.0);
-        let bar_rect = egui::Rect::from_min_max(
-            egui::pos2(x, center_y - height * 0.5),
-            egui::pos2(x + draw_width, center_y + height * 0.5),
+        painter.line_segment(
+            [
+                egui::pos2(x, center_y - height * 0.5),
+                egui::pos2(x, center_y + height * 0.5),
+            ],
+            stroke,
         );
-        painter.rect_filled(bar_rect, 0.0, live_color);
     }
 
     response
@@ -5933,9 +6025,6 @@ fn draw_waveform_seek(
         .floor()
         .clamp(1.0, 2048.0) as usize;
     let step = (waveform.len() as f32 / target_points.max(1) as f32).ceil().max(1.0) as usize;
-    let rendered_points = ((waveform.len() + step - 1) / step).max(1);
-    let bar_pitch = (rect.width() / rendered_points as f32).max(WAVEFORM_BAR_WIDTH_PIXELS + 1.0);
-    let draw_width = WAVEFORM_BAR_WIDTH_PIXELS;
     let peak = waveform.iter().copied().fold(0.0_f32, f32::max).max(0.08);
     let mut sorted = waveform.to_vec();
     sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
@@ -5947,22 +6036,19 @@ fn draw_waveform_seek(
     let played_color = egui::Color32::from_rgb(78, 148, 255);
     let silence_color = egui::Color32::from_rgb(238, 194, 74);
     let center_y = rect.center().y.round();
-    let start_x = rect.left().round();
+    let start_x = rect.left().round() + 0.5;
+    let right_x = rect.right().round() - 0.5;
 
     for (bar_index, chunk) in waveform.chunks(step).enumerate() {
         let value = chunk.iter().copied().fold(0.0_f32, f32::max);
         let normalized = ((value - noise_floor) / dynamic_range).clamp(0.018, 1.0);
         let eased = normalized.powf(1.08);
-        let x = (start_x + (bar_index as f32 * bar_pitch)).round();
-        if x + draw_width > rect.right() + 0.5 {
+        let x = start_x + bar_index as f32 * RADIO_WAVEFORM_BAR_PITCH_PIXELS;
+        if x > right_x {
             break;
         }
 
         let height = (rect.height() * 0.84 * eased).max(2.0).min(rect.height() - 4.0);
-        let bar_rect = egui::Rect::from_min_max(
-            egui::pos2(x, center_y - height * 0.5),
-            egui::pos2(x + draw_width, center_y + height * 0.5),
-        );
         let bar_start_seconds = if duration_seconds > 0.0 {
             (bar_index * step) as f32 / waveform.len().max(1) as f32 * duration_seconds
         } else {
@@ -5983,14 +6069,24 @@ fn draw_waveform_seek(
         } else {
             unplayed_color
         };
-        painter.rect_filled(bar_rect, 0.0, color);
+        painter.line_segment(
+            [
+                egui::pos2(x, center_y - height * 0.5),
+                egui::pos2(x, center_y + height * 0.5),
+            ],
+            egui::Stroke::new(WAVEFORM_BAR_WIDTH_PIXELS, color),
+        );
     }
 
-    let playhead = egui::Rect::from_min_max(
-        egui::pos2(progress_x - 1.0, rect.top() + 4.0),
-        egui::pos2(progress_x + 1.0, rect.bottom() - 4.0),
-    );
-    painter.rect_filled(playhead, 0.0, egui::Color32::WHITE.linear_multiply(0.85));
+    if response.hovered() || response.dragged() {
+        painter.line_segment(
+            [
+                egui::pos2(progress_x.round() + 0.5, rect.top() + 4.0),
+                egui::pos2(progress_x.round() + 0.5, rect.bottom() - 4.0),
+            ],
+            egui::Stroke::new(1.0, egui::Color32::WHITE.linear_multiply(0.75)),
+        );
+    }
 
     response
 }
