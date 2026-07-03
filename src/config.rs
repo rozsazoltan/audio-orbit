@@ -5,7 +5,7 @@ use lofty::file::AudioFile;
 use lucide_icons::Icon;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -169,6 +169,8 @@ pub struct LastPlayedTrack {
 pub struct PlaybackSession {
     #[serde(default)]
     pub was_active: bool,
+    #[serde(default)]
+    pub was_paused: bool,
     #[serde(default = "default_playback_session_source")]
     pub source: String,
     #[serde(default)]
@@ -185,6 +187,7 @@ impl Default for PlaybackSession {
     fn default() -> Self {
         Self {
             was_active: false,
+            was_paused: false,
             source: default_playback_session_source(),
             playlist_index: None,
             track_path: None,
@@ -503,6 +506,8 @@ pub struct UiSettings {
     pub player_only_window_geometry: Option<WindowGeometry>,
     #[serde(default)]
     pub playlist_scroll_offset_y: f32,
+    #[serde(default)]
+    pub playlist_scroll_offsets: BTreeMap<String, f32>,
 }
 
 impl Default for UiSettings {
@@ -517,6 +522,7 @@ impl Default for UiSettings {
             full_layout_window_geometry: None,
             player_only_window_geometry: None,
             playlist_scroll_offset_y: 0.0,
+            playlist_scroll_offsets: BTreeMap::new(),
         }
     }
 }

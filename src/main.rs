@@ -625,6 +625,7 @@ impl AudioOrbitApp {
         }
 
         self.persist_repeat_selection_for_current_playlist();
+        self.remember_current_playlist_scroll_offset(self.state.ui.playlist_scroll_offset_y);
         self.state.selected_playlist_index = index;
         self.restore_repeat_selection_for_current_playlist();
         self.selected_track_index = self.eligible_track_indexes().first().copied();
@@ -668,6 +669,28 @@ impl AudioOrbitApp {
 
         if let Some(playlist) = self.current_playlist_mut() {
             playlist.repeat_selection = selected_paths;
+        }
+    }
+
+    fn current_playlist_scroll_key(&self) -> Option<String> {
+        self.state
+            .playlists
+            .get(self.state.selected_playlist_index)
+            .map(|playlist| playlist_scroll_key(self.state.selected_playlist_index, playlist))
+    }
+
+    fn current_playlist_scroll_offset_y(&self) -> f32 {
+        self.current_playlist_scroll_key()
+            .and_then(|key| self.state.ui.playlist_scroll_offsets.get(&key).copied())
+            .unwrap_or(self.state.ui.playlist_scroll_offset_y)
+            .max(0.0)
+    }
+
+    fn remember_current_playlist_scroll_offset(&mut self, offset_y: f32) {
+        let offset_y = offset_y.max(0.0);
+        self.state.ui.playlist_scroll_offset_y = offset_y;
+        if let Some(key) = self.current_playlist_scroll_key() {
+            self.state.ui.playlist_scroll_offsets.insert(key, offset_y);
         }
     }
 
@@ -775,7 +798,7 @@ impl AudioOrbitApp {
                 self.state.selected_radio_index = Some(radio_index);
                 self.radio_selection_was_user_set = true;
                 self.scroll_to_active_radio_requested = true;
-                if session.was_active {
+                if session.was_active && !session.was_paused {
                     self.play_radio_station(radio_index);
                 }
             }
@@ -787,7 +810,7 @@ impl AudioOrbitApp {
                 self.state.selected_playlist_index = playlist_index;
                 self.selected_track_index = Some(track_index);
                 self.scroll_to_active_track_requested = true;
-                if session.was_active {
+                if session.was_active && !session.was_paused {
                     let start_seconds = session.position_seconds.max(0.0);
                     self.play_path(path, Some(track_index), start_seconds);
                 }
@@ -846,6 +869,7 @@ impl AudioOrbitApp {
                 && self.active_radio_index.is_some();
             session.source = "radio".to_owned();
             session.was_active = is_active;
+            session.was_paused = self.player.as_ref().map(|player| player.is_paused()).unwrap_or(false);
             session.radio_index = Some(radio_index);
             self.state.selected_radio_index = Some(radio_index);
             self.state.playback_session = session;
@@ -868,14 +892,26 @@ impl AudioOrbitApp {
                 .map(|player| player.is_playing() || player.is_paused())
                 .unwrap_or(false)
                 && self.active_track_path.is_some();
+            let player_is_paused = self.player.as_ref().map(|player| player.is_paused()).unwrap_or(false);
+            let preserved_paused_session_position = (!is_active
+                && self.state.playback_session.was_paused
+                && self
+                    .state
+                    .playback_session
+                    .track_path
+                    .as_ref()
+                    .map(|saved_path| same_path(saved_path, &path))
+                    .unwrap_or(false))
+            .then_some(self.state.playback_session.position_seconds.max(0.0));
             session.source = "track".to_owned();
-            session.was_active = is_active;
+            session.was_active = is_active || preserved_paused_session_position.is_some();
+            session.was_paused = player_is_paused || preserved_paused_session_position.is_some();
             session.playlist_index = Some(playlist_index);
             session.track_path = Some(path.clone());
             session.position_seconds = if is_active {
                 self.displayed_playback_position_seconds().max(0.0)
             } else {
-                0.0
+                preserved_paused_session_position.unwrap_or(0.0)
             };
             self.state.last_played_track = Some(LastPlayedTrack {
                 playlist_index,
@@ -1823,7 +1859,21 @@ impl AudioOrbitApp {
             return;
         };
 
-        self.play_path(path, self.selected_track_index, 0.0);
+        let start_seconds = self.saved_paused_resume_position_for_track(&path).unwrap_or(0.0);
+        self.play_path(path, self.selected_track_index, start_seconds);
+    }
+
+    fn saved_paused_resume_position_for_track(&self, path: &Path) -> Option<f32> {
+        let session = &self.state.playback_session;
+        if !session.was_paused || session.source != "track" {
+            return None;
+        }
+        let session_path = session.track_path.as_ref()?;
+        if same_path(session_path, path) {
+            Some(session.position_seconds.max(0.0))
+        } else {
+            None
+        }
     }
 
     fn play_path(&mut self, path: PathBuf, index: Option<usize>, start_seconds: f32) {
@@ -2620,6 +2670,8 @@ impl AudioOrbitApp {
                 self.status_message = "Playback resumed.".to_owned();
             }
         }
+        self.persist_playback_session();
+        self.save_state_silently();
     }
 
     fn refresh_output_device(&mut self) {
@@ -2755,6 +2807,7 @@ impl AudioOrbitApp {
 
     fn save_state_silently(&mut self) {
         self.persist_repeat_selection_for_current_playlist();
+        self.remember_current_playlist_scroll_offset(self.state.ui.playlist_scroll_offset_y);
         if let Err(error) = save_state(&self.state) {
             self.error_message = Some(error.to_string());
         }
@@ -3914,9 +3967,12 @@ impl AudioOrbitApp {
                 });
 
             if next_group != selected_group {
+                self.remember_current_playlist_scroll_offset(self.state.ui.playlist_scroll_offset_y);
                 if let Some(playlist) = self.current_playlist_mut() {
                     playlist.set_selected_group(next_group);
                 }
+                let restored_offset = self.current_playlist_scroll_offset_y();
+                self.state.ui.playlist_scroll_offset_y = restored_offset;
                 self.ensure_selected_track_visible();
                 self.save_state_silently();
             }
@@ -4201,8 +4257,10 @@ impl AudioOrbitApp {
                             }
                         },
                     );
+                    let mut context_rect = row_response.response.rect.expand(2.0);
+                    context_rect.min.x += 34.0;
                     let context_response = ui.interact(
-                        row_response.response.rect.expand(2.0),
+                        context_rect,
                         ui.make_persistent_id(("radio_station_context", index)),
                         egui::Sense::click_and_drag(),
                     );
@@ -4525,7 +4583,7 @@ impl AudioOrbitApp {
         let mut next_track_drop_target_index: Option<usize> = self.track_drop_target_index;
         let scroll_output = egui::ScrollArea::vertical()
             .id_salt("track_list_scroll")
-            .vertical_scroll_offset(self.state.ui.playlist_scroll_offset_y.max(0.0))
+            .vertical_scroll_offset(self.current_playlist_scroll_offset_y())
             .auto_shrink([false, false])
             .max_height(scroll_height)
             .show_viewport(ui, |ui, _viewport| {
@@ -4825,7 +4883,7 @@ impl AudioOrbitApp {
                     }
                 }
 
-                if show_group_headers && self.state.ui.playlist_scroll_offset_y > 2.0 {
+                if show_group_headers && self.current_playlist_scroll_offset_y() > 2.0 {
                     if let Some(group) = viewport_group {
                         let sticky_height = 24.0;
                         let push_offset_y = next_group_header_top
@@ -4857,7 +4915,7 @@ impl AudioOrbitApp {
                     }
                 }
             });
-        self.state.ui.playlist_scroll_offset_y = scroll_output.state.offset.y.max(0.0);
+        self.remember_current_playlist_scroll_offset(scroll_output.state.offset.y);
         self.track_drop_target_index = next_track_drop_target_index;
         if !ui.input(|input| input.pointer.primary_down()) {
             self.dragging_track_index = None;
@@ -5955,14 +6013,14 @@ fn fetch_radio_stream_metadata(url: &str) -> Option<RadioStreamMetadata> {
         .get("icy-name")
         .or_else(|| headers.get("x-audiocast-name"))
         .or_else(|| headers.get("icy-description"))
-        .and_then(|value| value.to_str().ok())
-        .map(clean_radio_metadata_value)
+        .map(|value| decode_radio_text_bytes(value.as_bytes()))
+        .map(|value| clean_radio_metadata_value(&value))
         .filter(|value| !value.is_empty());
 
     let stream_title = headers
         .get("icy-title")
-        .and_then(|value| value.to_str().ok())
-        .map(clean_radio_metadata_value)
+        .map(|value| decode_radio_text_bytes(value.as_bytes()))
+        .map(|value| clean_radio_metadata_value(&value))
         .filter(|value| !value.is_empty())
         .or_else(|| {
             let metadata_interval = headers
@@ -6006,13 +6064,142 @@ fn read_icy_stream_title<R: Read>(reader: &mut R, metadata_interval: usize) -> O
 
         let mut metadata = vec![0_u8; metadata_length];
         reader.read_exact(&mut metadata).ok()?;
-        let metadata = String::from_utf8_lossy(&metadata);
+        let metadata = decode_radio_text_bytes(&metadata);
         if let Some(title) = parse_icy_stream_title(&metadata) {
             return Some(title);
         }
     }
 
     None
+}
+
+fn playlist_scroll_key(index: usize, playlist: &Playlist) -> String {
+    let group = playlist.selected_group.as_deref().unwrap_or("__all__");
+    let source = playlist
+        .source_folder
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!("{index}|{}|{}|{}", playlist.name, source, group)
+}
+
+fn decode_radio_text_bytes(bytes: &[u8]) -> String {
+    if let Ok(value) = std::str::from_utf8(bytes) {
+        return value.to_owned();
+    }
+
+    bytes
+        .iter()
+        .map(|byte| match *byte {
+            0x80 => '€',
+            0x82 => '‚',
+            0x84 => '„',
+            0x85 => '…',
+            0x86 => '†',
+            0x87 => '‡',
+            0x89 => '‰',
+            0x8A => 'Š',
+            0x8B => '‹',
+            0x8C => 'Ś',
+            0x8D => 'Ť',
+            0x8E => 'Ž',
+            0x8F => 'Ź',
+            0x91 => '‘',
+            0x92 => '’',
+            0x93 => '“',
+            0x94 => '”',
+            0x95 => '•',
+            0x96 => '–',
+            0x97 => '—',
+            0x99 => '™',
+            0x9A => 'š',
+            0x9B => '›',
+            0x9C => 'ś',
+            0x9D => 'ť',
+            0x9E => 'ž',
+            0x9F => 'ź',
+            0xA1 => 'ˇ',
+            0xA2 => '˘',
+            0xA3 => 'Ł',
+            0xA5 => 'Ą',
+            0xAA => 'Ş',
+            0xAF => 'Ż',
+            0xB2 => '˛',
+            0xB3 => 'ł',
+            0xB9 => 'ą',
+            0xBA => 'ş',
+            0xBC => 'Ľ',
+            0xBD => '˝',
+            0xBE => 'ľ',
+            0xBF => 'ż',
+            0xC0 => 'Ŕ',
+            0xC1 => 'Á',
+            0xC2 => 'Â',
+            0xC3 => 'Ă',
+            0xC4 => 'Ä',
+            0xC5 => 'Ĺ',
+            0xC6 => 'Ć',
+            0xC7 => 'Ç',
+            0xC8 => 'Č',
+            0xC9 => 'É',
+            0xCA => 'Ę',
+            0xCB => 'Ë',
+            0xCC => 'Ě',
+            0xCD => 'Í',
+            0xCE => 'Î',
+            0xCF => 'Ď',
+            0xD0 => 'Đ',
+            0xD1 => 'Ń',
+            0xD2 => 'Ň',
+            0xD3 => 'Ó',
+            0xD4 => 'Ô',
+            0xD5 => 'Ő',
+            0xD6 => 'Ö',
+            0xD7 => '×',
+            0xD8 => 'Ř',
+            0xD9 => 'Ů',
+            0xDA => 'Ú',
+            0xDB => 'Ű',
+            0xDC => 'Ü',
+            0xDD => 'Ý',
+            0xDE => 'Ţ',
+            0xDF => 'ß',
+            0xE0 => 'ŕ',
+            0xE1 => 'á',
+            0xE2 => 'â',
+            0xE3 => 'ă',
+            0xE4 => 'ä',
+            0xE5 => 'ĺ',
+            0xE6 => 'ć',
+            0xE7 => 'ç',
+            0xE8 => 'č',
+            0xE9 => 'é',
+            0xEA => 'ę',
+            0xEB => 'ë',
+            0xEC => 'ě',
+            0xED => 'í',
+            0xEE => 'î',
+            0xEF => 'ď',
+            0xF0 => 'đ',
+            0xF1 => 'ń',
+            0xF2 => 'ň',
+            0xF3 => 'ó',
+            0xF4 => 'ô',
+            0xF5 => 'ő',
+            0xF6 => 'ö',
+            0xF7 => '÷',
+            0xF8 => 'ř',
+            0xF9 => 'ů',
+            0xFA => 'ú',
+            0xFB => 'ű',
+            0xFC => 'ü',
+            0xFD => 'ý',
+            0xFE => 'ţ',
+            0xFF => '˙',
+            0x00..=0x7F => *byte as char,
+            _ => ' ',
+        })
+        .collect()
 }
 
 fn parse_icy_stream_title(metadata: &str) -> Option<String> {
@@ -6318,6 +6505,10 @@ fn ensure_state_is_valid(state: &mut SavedState) {
     if !state.ui.playlist_scroll_offset_y.is_finite() || state.ui.playlist_scroll_offset_y < 0.0 {
         state.ui.playlist_scroll_offset_y = 0.0;
     }
+    state
+        .ui
+        .playlist_scroll_offsets
+        .retain(|_, offset| offset.is_finite() && *offset >= 0.0);
 }
 
 fn next_valid_track_index(previous_index: usize, remaining_len: usize) -> Option<usize> {
