@@ -4650,17 +4650,33 @@ impl AudioOrbitApp {
         let mut profile_changed = false;
         if let Some(profile) = self.state.profiles.get_mut(profile_index) {
             profile_changed |= ui
-                .checkbox(&mut profile.settings.skip_silence_enabled, "Skip long silence")
+                .checkbox(&mut profile.settings.skip_silence_enabled, "Enable silence removal")
+                .on_hover_text("AIMP-style silence removal for local music files. Internet radio streams stay live and are not silence-skipped.")
                 .changed();
             if profile.settings.skip_silence_enabled {
-                profile_changed |= ui
-                    .add(
-                        egui::Slider::new(&mut profile.settings.silence_threshold_seconds, 2u8..=30u8)
-                            .text("Skip gaps longer than (sec)"),
-                    )
-                    .on_hover_text("One continuous near-silent gap must last this long before Audio Orbit skips it.")
-                    .changed();
-                ui.small("Audio Orbit detects the near-silence level automatically, so this behaves like AIMP-style gap skipping without a manual gate control.");
+                ui.indent("silence_removal_settings", |ui| {
+                    profile_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut profile.settings.silence_trigger_millis, 250u16..=10000u16)
+                                .text("Activation delay (ms)"),
+                        )
+                        .on_hover_text("A continuous silent section must last at least this long before Audio Orbit removes it. AIMP default: 2000 ms.")
+                        .changed();
+                    profile_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut profile.settings.silence_threshold_db, -90i16..=-20i16)
+                                .text("Detection threshold (dB)"),
+                        )
+                        .on_hover_text("Audio below this level is treated as silence. AIMP default shown in your screenshot: -60 dB.")
+                        .changed();
+                    profile_changed |= ui
+                        .checkbox(
+                            &mut profile.settings.silence_trim_end_regardless_of_duration,
+                            "Remove silence at track end regardless of duration",
+                        )
+                        .on_hover_text("Matches AIMP's option for trimming ending silence even when the silent tail is shorter than the activation delay.")
+                        .changed();
+                });
             }
         }
         if profile_changed {
@@ -5134,17 +5150,33 @@ impl AudioOrbitApp {
         let mut profile_changed = false;
         if let Some(profile) = self.state.profiles.get_mut(profile_index) {
             profile_changed |= ui
-                .checkbox(&mut profile.settings.skip_silence_enabled, "Skip long silence")
+                .checkbox(&mut profile.settings.skip_silence_enabled, "Enable silence removal")
+                .on_hover_text("AIMP-style silence removal for local music files. Internet radio streams stay live and are not silence-skipped.")
                 .changed();
             if profile.settings.skip_silence_enabled {
-                profile_changed |= ui
-                    .add(
-                        egui::Slider::new(&mut profile.settings.silence_threshold_seconds, 2u8..=30u8)
-                            .text("Skip gaps longer than (sec)"),
-                    )
-                    .on_hover_text("One continuous near-silent gap must last this long before Audio Orbit skips it.")
-                    .changed();
-                ui.small("Audio Orbit detects the near-silence level automatically, so this behaves like AIMP-style gap skipping without a manual gate control.");
+                ui.indent("silence_removal_settings", |ui| {
+                    profile_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut profile.settings.silence_trigger_millis, 250u16..=10000u16)
+                                .text("Activation delay (ms)"),
+                        )
+                        .on_hover_text("A continuous silent section must last at least this long before Audio Orbit removes it. AIMP default: 2000 ms.")
+                        .changed();
+                    profile_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut profile.settings.silence_threshold_db, -90i16..=-20i16)
+                                .text("Detection threshold (dB)"),
+                        )
+                        .on_hover_text("Audio below this level is treated as silence. AIMP default shown in your screenshot: -60 dB.")
+                        .changed();
+                    profile_changed |= ui
+                        .checkbox(
+                            &mut profile.settings.silence_trim_end_regardless_of_duration,
+                            "Remove silence at track end regardless of duration",
+                        )
+                        .on_hover_text("Matches AIMP's option for trimming ending silence even when the silent tail is shorter than the activation delay.")
+                        .changed();
+                });
             }
         }
         if profile_changed {

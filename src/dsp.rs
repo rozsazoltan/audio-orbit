@@ -40,6 +40,12 @@ pub struct DspSettings {
     pub silence_threshold_seconds: u8,
     #[serde(default = "default_silence_level_threshold_percent")]
     pub silence_level_threshold_percent: u8,
+    #[serde(default = "default_silence_trigger_millis")]
+    pub silence_trigger_millis: u16,
+    #[serde(default = "default_silence_threshold_db")]
+    pub silence_threshold_db: i16,
+    #[serde(default = "default_silence_trim_end_regardless")]
+    pub silence_trim_end_regardless_of_duration: bool,
 }
 
 impl Default for DspSettings {
@@ -55,6 +61,9 @@ impl Default for DspSettings {
             skip_silence_enabled: false,
             silence_threshold_seconds: default_silence_threshold_seconds(),
             silence_level_threshold_percent: default_silence_level_threshold_percent(),
+            silence_trigger_millis: default_silence_trigger_millis(),
+            silence_threshold_db: default_silence_threshold_db(),
+            silence_trim_end_regardless_of_duration: default_silence_trim_end_regardless(),
         }
     }
 }
@@ -64,11 +73,23 @@ fn default_orbit_enabled() -> bool {
 }
 
 fn default_silence_threshold_seconds() -> u8 {
-    3
+    2
 }
 
 fn default_silence_level_threshold_percent() -> u8 {
     1
+}
+
+fn default_silence_trigger_millis() -> u16 {
+    2000
+}
+
+fn default_silence_threshold_db() -> i16 {
+    -60
+}
+
+fn default_silence_trim_end_regardless() -> bool {
+    true
 }
 
 #[derive(Clone, Debug)]
@@ -125,13 +146,18 @@ pub fn render_orbit_to_stereo_with_cached_waveform(
         .unwrap_or_else(|| spectrum_waveform(&mono, sample_rate, WAVEFORM_POINTS));
 
     let output_level = settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
-    let silence_floor = automatic_silence_floor(&mono);
     let skip_ranges = if settings.skip_silence_enabled {
+        let trigger_millis = if settings.silence_trigger_millis == 0 {
+            settings.silence_threshold_seconds.max(1) as u16 * 1000
+        } else {
+            settings.silence_trigger_millis
+        };
         detect_silence_ranges(
             &mono,
             sample_rate,
-            settings.silence_threshold_seconds,
-            silence_floor,
+            trigger_millis,
+            settings.silence_threshold_db,
+            settings.silence_trim_end_regardless_of_duration,
         )
     } else {
         Vec::new()
@@ -302,6 +328,7 @@ pub fn render_orbit_to_stereo_with_cached_waveform(
     )
 }
 
+#[allow(dead_code)]
 fn automatic_silence_floor(samples: &[f32]) -> f32 {
     if samples.is_empty() {
         return 0.006;
@@ -327,10 +354,6 @@ fn automatic_silence_floor(samples: &[f32]) -> f32 {
     let p12 = percentile(0.12);
     let p25 = percentile(0.25);
 
-    // Be conservative: gap skipping should catch encoded/dithered silence, not
-    // quiet intros, fades, ambience, or sparse musical passages. Earlier builds
-    // used the 35th percentile too strongly, which could raise the gate too far
-    // on dynamic tracks.
     (0.004_f32
         .max(p05 * 6.0)
         .max(p12 * 3.0)
@@ -339,70 +362,76 @@ fn automatic_silence_floor(samples: &[f32]) -> f32 {
         .clamp(0.0025, 0.020)
 }
 
+fn db_to_linear_threshold(db: i16) -> f32 {
+    10.0_f32.powf(db.clamp(-96, -12) as f32 / 20.0)
+}
+
 fn detect_silence_ranges(
     mono: &[f32],
     sample_rate: u32,
-    threshold_seconds: u8,
-    silence_floor: f32,
+    trigger_millis: u16,
+    threshold_db: i16,
+    trim_end_regardless_of_duration: bool,
 ) -> Vec<(usize, usize)> {
     if mono.is_empty() || sample_rate == 0 {
         return Vec::new();
     }
 
     let sample_rate_usize = sample_rate.max(1) as usize;
-    let window_frames = (sample_rate_usize / 20).max(512); // about 50 ms at common sample rates
-    let min_silent_windows = ((threshold_seconds.max(1) as f32 * sample_rate as f32) / window_frames as f32)
-        .ceil()
-        .max(1.0) as usize;
-    let bridge_tolerance_windows = ((sample_rate as f32 * 0.12) / window_frames as f32)
-        .ceil()
-        .max(1.0) as usize;
-    let edge_padding_frames = ((sample_rate as f32 * 0.080) as usize).max(1);
+    let window_frames = (sample_rate_usize / 50).max(256); // about 20 ms at common sample rates
+    let min_silent_frames = ((trigger_millis.max(1) as f32 / 1000.0) * sample_rate as f32)
+        .round()
+        .max(window_frames as f32) as usize;
+    let bridge_tolerance_frames = ((sample_rate as f32 * 0.060) as usize).max(window_frames);
+    let edge_padding_frames = ((sample_rate as f32 * 0.020) as usize).max(1);
+    let silence_rms_gate = db_to_linear_threshold(threshold_db);
+    let silence_peak_gate = (silence_rms_gate * 3.2).min(0.25);
 
     let mut ranges = Vec::new();
     let mut candidate_start: Option<usize> = None;
     let mut candidate_last_silent_end = 0usize;
-    let mut bridge_windows = 0usize;
+    let mut bridge_frames = 0usize;
 
     for (window_index, chunk) in mono.chunks(window_frames).enumerate() {
         let start = window_index * window_frames;
         let end = (start + chunk.len()).min(mono.len());
         let rms = (chunk.iter().map(|sample| sample * sample).sum::<f32>() / chunk.len().max(1) as f32).sqrt();
         let peak = chunk.iter().map(|sample| sample.abs()).fold(0.0_f32, f32::max);
-        let peak_gate = (silence_floor * 6.0).max(0.008);
-        let silent = rms <= silence_floor && peak <= peak_gate;
+        let silent = rms <= silence_rms_gate && peak <= silence_peak_gate;
 
         if silent {
             if candidate_start.is_none() {
                 candidate_start = Some(start);
             }
             candidate_last_silent_end = end;
-            bridge_windows = 0;
+            bridge_frames = 0;
             continue;
         }
 
         if candidate_start.is_some()
-            && bridge_windows < bridge_tolerance_windows
-            && rms <= silence_floor * 1.35
-            && peak <= peak_gate * 1.50
+            && bridge_frames < bridge_tolerance_frames
+            && rms <= silence_rms_gate * 1.25
+            && peak <= silence_peak_gate * 1.35
         {
-            bridge_windows += 1;
+            bridge_frames += chunk.len();
             continue;
         }
 
         if let Some(start) = candidate_start.take() {
-            let silent_windows = candidate_last_silent_end.saturating_sub(start) / window_frames;
-            if silent_windows >= min_silent_windows {
+            let silent_frames = candidate_last_silent_end.saturating_sub(start);
+            if silent_frames >= min_silent_frames {
                 push_silence_range(&mut ranges, start, candidate_last_silent_end, edge_padding_frames);
             }
         }
         candidate_last_silent_end = 0;
-        bridge_windows = 0;
+        bridge_frames = 0;
     }
 
     if let Some(start) = candidate_start.take() {
-        let silent_windows = mono.len().saturating_sub(start) / window_frames;
-        if silent_windows >= min_silent_windows {
+        let silent_frames = mono.len().saturating_sub(start);
+        if silent_frames >= min_silent_frames
+            || (trim_end_regardless_of_duration && candidate_last_silent_end >= mono.len().saturating_sub(window_frames))
+        {
             push_silence_range(&mut ranges, start, mono.len(), edge_padding_frames);
         }
     }
