@@ -40,16 +40,29 @@ cargo dev
 
 ```text
 src/
+├─ app/                   # AudioOrbitApp implementation split by feature area
+│  ├─ core.rs             # startup state, window mode, modal navigation, status lifecycle
+│  ├─ input.rs            # keyboard shortcuts and media key command dispatch
+│  ├─ library_backup.rs   # file import, folder scans, backup export/import actions
+│  ├─ lifecycle.rs        # eframe update loop and shutdown persistence
+│  ├─ ordering.rs         # playlist/radio ordering, drag/drop, sorting, undo snapshots
+│  ├─ playback.rs         # local playback, seek, crossfade, profiles, output devices
+│  ├─ playlist_state.rs   # playlist selection, playback session, favorites, metadata state
+│  ├─ radio.rs            # radio stations, metadata lookup, recording actions
+│  ├─ updates.rs          # updater UI actions and background updater jobs
+│  └─ ui_*.rs             # focused egui rendering modules for player, modals, lists, status
 ├─ bin/audio-orbit-dev.rs # local polling dev runner used by `cargo dev`
-├─ audio_player.rs        # playback, seek, crossfade, output device handling
+├─ audio_player.rs        # playback engine, seek, crossfade, output device handling
 ├─ config.rs              # saved state, playlists, metadata, backups, app data path
 ├─ dsp.rs                 # stereo/orbit rendering and silence handling
 ├─ icon.rs                # app icon loading
-├─ main.rs                # egui app state and UI composition
+├─ main.rs                # app entrypoint, shared app state/types, startup wiring
 ├─ media_keys.rs          # Windows global media key listener
 ├─ ui_icons.rs            # Lucide icon font setup
 └─ updater.rs             # GitHub release checks and Windows self-update
 ```
+
+Keep new feature work close to the feature module that owns it. Prefer adding small helpers to the relevant `src/app/*.rs` file over expanding `main.rs` with unrelated UI, playback, or persistence behavior.
 
 ## Commit messages
 
