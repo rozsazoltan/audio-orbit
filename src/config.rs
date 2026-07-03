@@ -81,9 +81,7 @@ pub struct Track {
     pub group: String,
     #[serde(default)]
     pub metadata: TrackMetadata,
-    // Runtime waveform cache. This is intentionally not serialized because thousands of tracks can
-    // turn the app state into a huge JSON file and make save/backup/update operations feel frozen.
-    #[serde(skip)]
+    #[serde(default)]
     pub waveform: Vec<f32>,
     #[serde(default)]
     pub waveform_brightness: Vec<f32>,
@@ -392,6 +390,24 @@ pub fn default_recording_output_folder() -> Option<PathBuf> {
 }
 
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UpdateSettings {
+    #[serde(default)]
+    pub include_prereleases: bool,
+    #[serde(default)]
+    pub last_auto_check_unix_seconds: u64,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            include_prereleases: false,
+            last_auto_check_unix_seconds: 0,
+        }
+    }
+}
+
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepeatMode {
     Off,
@@ -546,6 +562,8 @@ pub struct SavedState {
     #[serde(default)]
     pub last_played_track: Option<LastPlayedTrack>,
     #[serde(default)]
+    pub update_settings: UpdateSettings,
+    #[serde(default)]
     pub playback_session: PlaybackSession,
     #[serde(default)]
     pub playback: PlaybackSettings,
@@ -575,6 +593,7 @@ impl Default for SavedState {
             radio_stations: Vec::new(),
             selected_radio_index: None,
             last_played_track: None,
+            update_settings: UpdateSettings::default(),
             playback_session: PlaybackSession::default(),
             playback: PlaybackSettings::default(),
             recording: RecordingSettings::default(),
@@ -584,13 +603,6 @@ impl Default for SavedState {
 }
 
 pub fn app_data_dir() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("AUDIO_ORBIT_APP_DATA_DIR")
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty())
-    {
-        return Some(path);
-    }
-
     std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join(".audio-orbit-data")))

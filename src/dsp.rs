@@ -1,9 +1,6 @@
 use crate::spectrum_waveform::spectrum_waveform;
 use serde::{Deserialize, Serialize};
-use std::{
-    f32::consts::PI,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::f32::consts::PI;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrbitMode {
@@ -142,7 +139,7 @@ pub fn render_orbit_to_stereo_with_cached_waveform(
 ) -> (Vec<f32>, RenderInfo) {
     let channels = input_channels.max(1) as usize;
     let frame_count = input_samples.len() / channels;
-    let mono = downmix_to_mono(input_samples, channels, frame_count, cancel)?;
+    let mono = downmix_to_mono(input_samples, channels, frame_count);
     let mut start_frame = ((start_seconds.max(0.0) * sample_rate as f32) as usize).min(frame_count);
     let (waveform, waveform_brightness) = cached_waveform
         .filter(|(waveform, waveform_brightness)| !waveform.is_empty() && !waveform_brightness.is_empty())
@@ -194,8 +191,7 @@ pub fn render_orbit_to_stereo_with_cached_waveform(
             sample_rate,
             output_level,
             &skip_ranges,
-            cancel,
-        )?;
+        );
 
         let original_duration_seconds = if sample_rate == 0 {
             0.0
@@ -203,7 +199,7 @@ pub fn render_orbit_to_stereo_with_cached_waveform(
             frame_count as f32 / sample_rate as f32
         };
 
-        return Ok((
+        return (
             output,
             RenderInfo {
                 original_duration_seconds,
@@ -214,7 +210,7 @@ pub fn render_orbit_to_stereo_with_cached_waveform(
                 waveform_brightness,
                 silence_ranges,
             },
-        ));
+        );
     }
 
     let width = settings.stereo_width_percent.min(100) as f32 / 100.0;
@@ -231,9 +227,7 @@ pub fn render_orbit_to_stereo_with_cached_waveform(
     let mut smoothed_backness = 0.0_f32;
     let mut rear_low_pass_state = 0.0_f32;
     let mut front_presence_state = 0.0_f32;
-    let requested_capacity = frame_count.saturating_sub(start_frame).saturating_mul(2);
-    let mut output = Vec::new();
-    reserve_audio_buffer(&mut output, requested_capacity)?;
+    let mut output = Vec::with_capacity((frame_count.saturating_sub(start_frame)) * 2);
     let mut skip_index = skip_ranges
         .iter()
         .position(|(_, end)| *end > start_frame)
@@ -241,10 +235,6 @@ pub fn render_orbit_to_stereo_with_cached_waveform(
     let mut frame_index = start_frame;
 
     while frame_index < frame_count {
-        if (frame_index & 16_383) == 0 && is_cancelled(cancel) {
-            bail!("playback preparation was cancelled");
-        }
-
         while let Some((_, end)) = skip_ranges.get(skip_index) {
             if frame_index < *end {
                 break;
@@ -324,7 +314,7 @@ pub fn render_orbit_to_stereo_with_cached_waveform(
         (output.len() / 2) as f32 / sample_rate as f32
     };
 
-    Ok((
+    (
         output,
         RenderInfo {
             original_duration_seconds,
@@ -335,21 +325,7 @@ pub fn render_orbit_to_stereo_with_cached_waveform(
             waveform_brightness,
             silence_ranges,
         },
-    ))
-}
-
-fn reserve_audio_buffer(buffer: &mut Vec<f32>, additional: usize) -> Result<()> {
-    buffer.try_reserve_exact(additional).map_err(|_| {
-        anyhow::anyhow!(
-            "not enough memory to prepare audio safely without risking an allocator abort"
-        )
-    })
-}
-
-fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
-    cancel
-        .map(|flag| flag.load(Ordering::Relaxed))
-        .unwrap_or(false)
+    )
 }
 
 #[allow(dead_code)]
@@ -367,16 +343,11 @@ fn automatic_silence_floor(samples: &[f32]) -> f32 {
         return 0.006;
     }
 
-    let percentile = |fraction: f32, histogram: &[usize; BINS], count: usize| -> f32 {
-        let target = ((count.saturating_sub(1)) as f32 * fraction.clamp(0.0, 1.0)).round() as usize;
-        let mut seen = 0usize;
-        for (index, amount) in histogram.iter().copied().enumerate() {
-            seen = seen.saturating_add(amount);
-            if seen > target {
-                return index as f32 / (BINS as f32 - 1.0);
-            }
-        }
-        1.0
+    levels.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let peak = levels.last().copied().unwrap_or(0.0).max(0.001);
+    let percentile = |fraction: f32| -> f32 {
+        let index = ((levels.len().saturating_sub(1)) as f32 * fraction.clamp(0.0, 1.0)) as usize;
+        levels.get(index).copied().unwrap_or(0.0)
     };
 
     let p05 = percentile(0.05);
@@ -493,12 +464,9 @@ fn render_plain_stereo(
     sample_rate: u32,
     output_level: f32,
     skip_ranges: &[(usize, usize)],
-    cancel: Option<&AtomicBool>,
-) -> Result<(Vec<f32>, f32)> {
+) -> (Vec<f32>, f32) {
     let frame_count = mono.len();
-    let requested_capacity = frame_count.saturating_sub(start_frame).saturating_mul(2);
-    let mut output = Vec::new();
-    reserve_audio_buffer(&mut output, requested_capacity)?;
+    let mut output = Vec::with_capacity((frame_count.saturating_sub(start_frame)) * 2);
     let mut skip_index = skip_ranges
         .iter()
         .position(|(_, end)| *end > start_frame)
@@ -506,10 +474,6 @@ fn render_plain_stereo(
     let mut frame_index = start_frame;
 
     while frame_index < frame_count {
-        if (frame_index & 16_383) == 0 && is_cancelled(cancel) {
-            bail!("playback preparation was cancelled");
-        }
-
         while let Some((_, end)) = skip_ranges.get(skip_index) {
             if frame_index < *end {
                 break;
@@ -549,7 +513,7 @@ fn render_plain_stereo(
         (output.len() / 2) as f32 / sample_rate as f32
     };
 
-    Ok((output, rendered_duration_seconds))
+    (output, rendered_duration_seconds)
 }
 
 fn apply_skip_boundary_smoothing(
@@ -690,19 +654,10 @@ fn render_surround_frame(
     )
 }
 
-fn downmix_to_mono(
-    input_samples: &[f32],
-    channels: usize,
-    frame_count: usize,
-    cancel: Option<&AtomicBool>,
-) -> Result<Vec<f32>> {
-    let mut mono = Vec::new();
-    reserve_audio_buffer(&mut mono, frame_count)?;
+fn downmix_to_mono(input_samples: &[f32], channels: usize, frame_count: usize) -> Vec<f32> {
+    let mut mono = Vec::with_capacity(frame_count);
 
-    for (index, frame) in input_samples.chunks_exact(channels).enumerate() {
-        if (index & 16_383) == 0 && is_cancelled(cancel) {
-            bail!("playback preparation was cancelled");
-        }
+    for frame in input_samples.chunks_exact(channels) {
         let sum: f32 = frame.iter().copied().sum();
         mono.push(sum / channels as f32);
     }
