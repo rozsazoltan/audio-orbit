@@ -227,6 +227,25 @@ struct RadioStreamMetadata {
     stream_title: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+enum OrderUndoSnapshot {
+    Playlist {
+        playlist_index: usize,
+        playlist: Playlist,
+        selected_track_index: Option<usize>,
+        selected_track_indexes: BTreeSet<usize>,
+        active_playlist_index: Option<usize>,
+        active_track_index: Option<usize>,
+        active_track_path: Option<PathBuf>,
+    },
+    Radio {
+        stations: Vec<RadioStation>,
+        selected_radio_index: Option<usize>,
+        active_radio_index: Option<usize>,
+        radio_selection_was_user_set: bool,
+    },
+}
+
 struct AudioOrbitApp {
     player: Option<AudioPlayer>,
     state: SavedState,
@@ -282,6 +301,9 @@ struct AudioOrbitApp {
     radio_title_receiver: Option<mpsc::Receiver<(usize, Option<RadioStreamMetadata>)>>,
     dragging_track_index: Option<usize>,
     dragging_radio_index: Option<usize>,
+    track_drop_target_index: Option<usize>,
+    radio_drop_target_index: Option<usize>,
+    order_undo_stack: Vec<OrderUndoSnapshot>,
     collapsed_groups: BTreeSet<String>,
     pending_folder_path: Option<PathBuf>,
     pending_playlist_name: String,
@@ -364,6 +386,9 @@ impl AudioOrbitApp {
                     radio_title_receiver: None,
                     dragging_track_index: None,
                     dragging_radio_index: None,
+                    track_drop_target_index: None,
+                    radio_drop_target_index: None,
+                    order_undo_stack: Vec::new(),
                     collapsed_groups: BTreeSet::new(),
                     pending_folder_path: None,
                     pending_playlist_name,
@@ -433,6 +458,9 @@ impl AudioOrbitApp {
                 radio_title_receiver: None,
                 dragging_track_index: None,
                 dragging_radio_index: None,
+                track_drop_target_index: None,
+                radio_drop_target_index: None,
+                order_undo_stack: Vec::new(),
                 collapsed_groups: BTreeSet::new(),
                 pending_folder_path: None,
                 pending_playlist_name,
@@ -1430,6 +1458,115 @@ impl AudioOrbitApp {
     }
 
 
+    fn push_playlist_order_undo(&mut self) {
+        let playlist_index = self.state.selected_playlist_index;
+        let Some(playlist) = self.state.playlists.get(playlist_index).cloned() else {
+            return;
+        };
+
+        self.order_undo_stack.push(OrderUndoSnapshot::Playlist {
+            playlist_index,
+            playlist,
+            selected_track_index: self.selected_track_index,
+            selected_track_indexes: self.selected_track_indexes.clone(),
+            active_playlist_index: self.active_playlist_index,
+            active_track_index: self.active_track_index,
+            active_track_path: self.active_track_path.clone(),
+        });
+        self.trim_order_undo_stack();
+    }
+
+    fn push_radio_order_undo(&mut self) {
+        self.order_undo_stack.push(OrderUndoSnapshot::Radio {
+            stations: self.state.radio_stations.clone(),
+            selected_radio_index: self.state.selected_radio_index,
+            active_radio_index: self.active_radio_index,
+            radio_selection_was_user_set: self.radio_selection_was_user_set,
+        });
+        self.trim_order_undo_stack();
+    }
+
+    fn trim_order_undo_stack(&mut self) {
+        const MAX_ORDER_UNDO_STEPS: usize = 50;
+        if self.order_undo_stack.len() > MAX_ORDER_UNDO_STEPS {
+            let excess = self.order_undo_stack.len() - MAX_ORDER_UNDO_STEPS;
+            self.order_undo_stack.drain(0..excess);
+        }
+    }
+
+    fn undo_last_order_change(&mut self) {
+        let Some(snapshot) = self.order_undo_stack.pop() else {
+            self.status_message = "Nothing to undo.".to_owned();
+            return;
+        };
+
+        match snapshot {
+            OrderUndoSnapshot::Playlist {
+                playlist_index,
+                playlist,
+                selected_track_index,
+                selected_track_indexes,
+                active_playlist_index,
+                active_track_index,
+                active_track_path,
+            } => {
+                if playlist_index < self.state.playlists.len() {
+                    self.state.playlists[playlist_index] = playlist;
+                    self.state.selected_playlist_index = playlist_index;
+                    self.selected_track_index = selected_track_index
+                        .filter(|index| self.current_playlist().map(|playlist| *index < playlist.tracks.len()).unwrap_or(false));
+                    self.selected_track_indexes = selected_track_indexes
+                        .into_iter()
+                        .filter(|index| self.current_playlist().map(|playlist| *index < playlist.tracks.len()).unwrap_or(false))
+                        .collect();
+                    self.active_playlist_index = active_playlist_index;
+                    self.active_track_index = active_track_index;
+                    self.active_track_path = active_track_path;
+                    self.restore_repeat_selection_for_current_playlist();
+                    self.status_message = "Undid playlist order change.".to_owned();
+                }
+            }
+            OrderUndoSnapshot::Radio {
+                stations,
+                selected_radio_index,
+                active_radio_index,
+                radio_selection_was_user_set,
+            } => {
+                self.state.radio_stations = stations;
+                self.state.selected_radio_index = selected_radio_index
+                    .filter(|index| *index < self.state.radio_stations.len());
+                self.active_radio_index = active_radio_index
+                    .filter(|index| *index < self.state.radio_stations.len());
+                self.radio_selection_was_user_set = radio_selection_was_user_set;
+                self.status_message = "Undid radio order change.".to_owned();
+            }
+        }
+
+        self.dragging_track_index = None;
+        self.dragging_radio_index = None;
+        self.track_drop_target_index = None;
+        self.radio_drop_target_index = None;
+        self.save_state_silently();
+    }
+
+    fn valid_drop_target(from: usize, to: usize) -> bool {
+        from != to && from + 1 != to
+    }
+
+    fn current_track_drop_target_is_valid(&self) -> bool {
+        self.dragging_track_index
+            .zip(self.track_drop_target_index)
+            .map(|(from, to)| Self::valid_drop_target(from, to))
+            .unwrap_or(false)
+    }
+
+    fn current_radio_drop_target_is_valid(&self) -> bool {
+        self.dragging_radio_index
+            .zip(self.radio_drop_target_index)
+            .map(|(from, to)| Self::valid_drop_target(from, to))
+            .unwrap_or(false)
+    }
+
     fn restore_track_selection_after_reorder(&mut self, selected_path: Option<PathBuf>) {
         if let Some(selected_path) = selected_path {
             if let Some(index) = self
@@ -1454,6 +1591,10 @@ impl AudioOrbitApp {
     fn sort_current_playlist_by_name(&mut self, ascending: bool) {
         self.persist_repeat_selection_for_current_playlist();
         let selected_path = self.selected_track_path();
+        let should_sort = self.current_playlist().map(|playlist| playlist.tracks.len() > 1).unwrap_or(false);
+        if should_sort {
+            self.push_playlist_order_undo();
+        }
         if let Some(playlist) = self.current_playlist_mut() {
             playlist.tracks.sort_by(|left, right| {
                 let ordering = naturalish_key(&left.group)
@@ -1475,20 +1616,24 @@ impl AudioOrbitApp {
     fn move_track_in_current_playlist(&mut self, index: usize, delta: isize) {
         self.persist_repeat_selection_for_current_playlist();
         let selected_path = self.selected_track_path();
-        let Some(playlist) = self.current_playlist_mut() else {
+        let Some(track_count) = self.current_playlist().map(|playlist| playlist.tracks.len()) else {
             return;
         };
-        if index >= playlist.tracks.len() {
+        if index >= track_count {
             return;
         }
         let to = if delta < 0 {
             index.saturating_sub(1)
         } else {
-            (index + 1).min(playlist.tracks.len() - 1)
+            (index + 1).min(track_count - 1)
         };
         if index == to {
             return;
         }
+        self.push_playlist_order_undo();
+        let Some(playlist) = self.current_playlist_mut() else {
+            return;
+        };
         playlist.tracks.swap(index, to);
         self.restore_track_selection_after_reorder(selected_path);
         self.status_message = "Moved track in playlist order.".to_owned();
@@ -1498,12 +1643,16 @@ impl AudioOrbitApp {
     fn move_track_to_index_in_current_playlist(&mut self, from: usize, to: usize) {
         self.persist_repeat_selection_for_current_playlist();
         let selected_path = self.selected_track_path();
+        let Some(track_count) = self.current_playlist().map(|playlist| playlist.tracks.len()) else {
+            return;
+        };
+        if from >= track_count || to > track_count {
+            return;
+        }
+        self.push_playlist_order_undo();
         let Some(playlist) = self.current_playlist_mut() else {
             return;
         };
-        if from >= playlist.tracks.len() || to > playlist.tracks.len() {
-            return;
-        }
         let track = playlist.tracks.remove(from);
         let insert_at = if from < to { to.saturating_sub(1) } else { to };
         playlist.tracks.insert(insert_at.min(playlist.tracks.len()), track);
@@ -1516,7 +1665,7 @@ impl AudioOrbitApp {
     fn move_folder_group_in_current_playlist(&mut self, group: &str, delta: isize) {
         self.persist_repeat_selection_for_current_playlist();
         let selected_path = self.selected_track_path();
-        let Some(playlist) = self.current_playlist_mut() else {
+        let Some(playlist) = self.current_playlist() else {
             return;
         };
 
@@ -1540,6 +1689,10 @@ impl AudioOrbitApp {
             return;
         }
 
+        self.push_playlist_order_undo();
+        let Some(playlist) = self.current_playlist_mut() else {
+            return;
+        };
         group_order.swap(position, to);
         let old_tracks = std::mem::take(&mut playlist.tracks);
         let mut reordered = Vec::with_capacity(old_tracks.len());
@@ -1558,6 +1711,9 @@ impl AudioOrbitApp {
     }
 
     fn sort_radio_stations_by_name(&mut self, ascending: bool) {
+        if self.state.radio_stations.len() > 1 {
+            self.push_radio_order_undo();
+        }
         let active_url = self
             .active_radio_index
             .and_then(|index| self.state.radio_stations.get(index).map(|station| station.url.clone()));
@@ -1607,6 +1763,7 @@ impl AudioOrbitApp {
         if index == to {
             return;
         }
+        self.push_radio_order_undo();
         self.state.radio_stations.swap(index, to);
         self.active_radio_index = active_url.as_ref().and_then(|url| {
             self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
@@ -1623,6 +1780,7 @@ impl AudioOrbitApp {
         if from >= self.state.radio_stations.len() || to > self.state.radio_stations.len() {
             return;
         }
+        self.push_radio_order_undo();
         let active_url = self
             .active_radio_index
             .and_then(|active_index| self.state.radio_stations.get(active_index).map(|station| station.url.clone()));
@@ -2197,8 +2355,9 @@ impl AudioOrbitApp {
             return;
         }
 
-        let (space, enter, stop, next, previous, seek_forward, seek_backward, search, player_only, library, profiles) = context.input(|input| {
+        let (undo_order, space, enter, stop, next, previous, seek_forward, seek_backward, search, player_only, library, profiles) = context.input(|input| {
             (
+                input.key_pressed(egui::Key::Z) && input.modifiers.ctrl,
                 input.key_pressed(egui::Key::Space),
                 input.key_pressed(egui::Key::Enter),
                 input.key_pressed(egui::Key::S),
@@ -2212,6 +2371,11 @@ impl AudioOrbitApp {
                 input.key_pressed(egui::Key::P) && input.modifiers.ctrl,
             )
         });
+
+        if undo_order {
+            self.undo_last_order_change();
+            return;
+        }
 
         if space {
             let is_active = self
@@ -3821,8 +3985,10 @@ impl AudioOrbitApp {
         let mut play_radio_index: Option<usize> = None;
         let mut favorite_toggle_index: Option<usize> = None;
         let mut reorder_radio_station: Option<(usize, usize)> = None;
-        let mut radio_drag_source_rect: Option<egui::Rect> = None;
-        let mut radio_drop_indicator: Option<(egui::Rect, f32)> = None;
+        let mut next_radio_drop_target_index: Option<usize> = None;
+        let active_radio_drop_target = self
+            .radio_drop_target_index
+            .filter(|_| self.current_radio_drop_target_is_valid());
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -3956,22 +4122,18 @@ impl AudioOrbitApp {
                     }
                     if context_response.drag_started() {
                         self.dragging_radio_index = Some(index);
+                        self.radio_drop_target_index = None;
                     }
-                    if self.dragging_radio_index == Some(index) {
-                        radio_drag_source_rect = Some(row_response.response.rect);
+                    if self.dragging_radio_index == Some(index) && self.current_radio_drop_target_is_valid() {
+                        paint_dragged_row_fade(ui, row_response.response.rect);
                     }
                     if let Some(from) = self.dragging_radio_index {
                         if row_response.response.hovered() || context_response.hovered() {
                             let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|position| position.y)).unwrap_or(row_response.response.rect.center().y);
                             let drop_after = pointer_y >= row_response.response.rect.center().y;
                             let to = if drop_after { index + 1 } else { index };
-                            if from != to && from + 1 != to {
-                                let y = if drop_after {
-                                    row_response.response.rect.bottom()
-                                } else {
-                                    row_response.response.rect.top()
-                                };
-                                radio_drop_indicator = Some((row_response.response.rect, y));
+                            if Self::valid_drop_target(from, to) {
+                                next_radio_drop_target_index = Some(to);
                             }
                         }
                     }
@@ -3979,7 +4141,7 @@ impl AudioOrbitApp {
                         if let Some(from) = self.dragging_radio_index.take() {
                             let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|position| position.y)).unwrap_or(row_response.response.rect.center().y);
                             let to = if pointer_y >= row_response.response.rect.center().y { index + 1 } else { index };
-                            if from != to && from + 1 != to {
+                            if Self::valid_drop_target(from, to) {
                                 reorder_radio_station = Some((from, to));
                             }
                         }
@@ -4016,22 +4178,18 @@ impl AudioOrbitApp {
                         self.scroll_to_active_radio_requested = false;
                     }
                     if visible_row_index + 1 < visible_station_len {
-                        ui.separator();
+                        paint_list_separator(ui, row_width, active_radio_drop_target == Some(index + 1));
                     }
                 }
             });
 
-        if let Some((rect, y)) = radio_drop_indicator {
-            if let Some(source_rect) = radio_drag_source_rect {
-                paint_dragged_row_fade(ui, source_rect);
-            }
-            paint_drop_indicator(ui, rect, y);
-        }
-
+        self.radio_drop_target_index = next_radio_drop_target_index;
         if !ui.input(|input| input.pointer.primary_down()) {
             self.dragging_radio_index = None;
+            self.radio_drop_target_index = None;
         }
         if let Some((from, to)) = reorder_radio_station {
+            self.radio_drop_target_index = None;
             self.move_radio_station_to_index(from, to);
         }
         if let Some(index) = favorite_toggle_index {
@@ -4255,8 +4413,10 @@ impl AudioOrbitApp {
         let row_width = (ui.available_width() - 22.0).max(320.0);
         let scroll_height = ui.available_height();
         let mut reorder_track: Option<(usize, usize)> = None;
-        let mut track_drag_source_rect: Option<egui::Rect> = None;
-        let mut track_drop_indicator: Option<(egui::Rect, f32)> = None;
+        let mut next_track_drop_target_index: Option<usize> = None;
+        let active_track_drop_target = self
+            .track_drop_target_index
+            .filter(|_| self.current_track_drop_target_is_valid());
         let scroll_output = egui::ScrollArea::vertical()
             .id_salt("track_list_scroll")
             .vertical_scroll_offset(self.state.ui.playlist_scroll_offset_y.max(0.0))
@@ -4501,22 +4661,18 @@ impl AudioOrbitApp {
                     }
                     if context_response.drag_started() {
                         self.dragging_track_index = Some(index);
+                        self.track_drop_target_index = None;
                     }
-                    if self.dragging_track_index == Some(index) {
-                        track_drag_source_rect = Some(row_response.response.rect);
+                    if self.dragging_track_index == Some(index) && self.current_track_drop_target_is_valid() {
+                        paint_dragged_row_fade(ui, row_response.response.rect);
                     }
                     if let Some(from) = self.dragging_track_index {
                         if row_response.response.hovered() || context_response.hovered() {
                             let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|position| position.y)).unwrap_or(row_response.response.rect.center().y);
                             let drop_after = pointer_y >= row_response.response.rect.center().y;
                             let to = if drop_after { index + 1 } else { index };
-                            if from != to && from + 1 != to {
-                                let y = if drop_after {
-                                    row_response.response.rect.bottom()
-                                } else {
-                                    row_response.response.rect.top()
-                                };
-                                track_drop_indicator = Some((row_response.response.rect, y));
+                            if Self::valid_drop_target(from, to) {
+                                next_track_drop_target_index = Some(to);
                             }
                         }
                     }
@@ -4524,7 +4680,7 @@ impl AudioOrbitApp {
                         if let Some(from) = self.dragging_track_index.take() {
                             let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|position| position.y)).unwrap_or(row_response.response.rect.center().y);
                             let to = if pointer_y >= row_response.response.rect.center().y { index + 1 } else { index };
-                            if from != to && from + 1 != to {
+                            if Self::valid_drop_target(from, to) {
                                 reorder_track = Some((from, to));
                             }
                         }
@@ -4543,7 +4699,7 @@ impl AudioOrbitApp {
                         self.scroll_to_active_track_requested = false;
                     }
                     if visible_row_index + 1 < visible_track_len {
-                        ui.separator();
+                        paint_list_separator(ui, row_width, active_track_drop_target == Some(index + 1));
                     }
                 }
 
@@ -4580,16 +4736,13 @@ impl AudioOrbitApp {
                 }
             });
         self.state.ui.playlist_scroll_offset_y = scroll_output.state.offset.y.max(0.0);
-        if let Some((rect, y)) = track_drop_indicator {
-            if let Some(source_rect) = track_drag_source_rect {
-                paint_dragged_row_fade(ui, source_rect);
-            }
-            paint_drop_indicator(ui, rect, y);
-        }
+        self.track_drop_target_index = next_track_drop_target_index;
         if !ui.input(|input| input.pointer.primary_down()) {
             self.dragging_track_index = None;
+            self.track_drop_target_index = None;
         }
         if let Some((from, to)) = reorder_track {
+            self.track_drop_target_index = None;
             self.move_track_to_index_in_current_playlist(from, to);
         }
     }
@@ -5388,6 +5541,7 @@ impl AudioOrbitApp {
         ui.label("Left / Right — Seek 10 seconds backward / forward");
         ui.label("Ctrl + Left / Ctrl + Right — Previous / next track");
         ui.label("Ctrl + F — Show or hide track search");
+        ui.label("Ctrl + Z — Undo last track/radio order change");
         ui.label("M — Player-only / full layout");
         ui.label("Ctrl + L — Show or hide Library panel");
         ui.label("Ctrl + P — Show or hide Sound profiles panel");
@@ -6100,14 +6254,18 @@ fn paint_dragged_row_fade(ui: &egui::Ui, rect: egui::Rect) {
     );
 }
 
-fn paint_drop_indicator(ui: &egui::Ui, rect: egui::Rect, y: f32) {
-    let color = egui::Color32::from_rgb(78, 148, 255);
-    let y = y.round() + 0.5;
-    let left = rect.left();
-    let right = rect.right();
+fn paint_list_separator(ui: &mut egui::Ui, width: f32, highlighted: bool) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
+    let color = if highlighted {
+        egui::Color32::from_rgb(78, 148, 255)
+    } else {
+        ui.visuals().widgets.noninteractive.bg_stroke.color
+    };
+    let stroke_width = if highlighted { 2.0 } else { 1.0 };
+    let y = rect.center().y.round() + 0.5;
     ui.painter().line_segment(
-        [egui::pos2(left, y), egui::pos2(right, y)],
-        egui::Stroke::new(2.5, color),
+        [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+        egui::Stroke::new(stroke_width, color),
     );
 }
 
