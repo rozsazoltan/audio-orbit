@@ -22,7 +22,7 @@ use eframe::egui;
 use lucide_icons::Icon;
 use rfd::FileDialog;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -651,7 +651,7 @@ impl AudioOrbitApp {
     }
 
     fn visible_track_indexes(&self) -> Vec<usize> {
-        let query = self.track_search_query.trim().to_lowercase();
+        let query = self.track_search_query.trim();
         let Some(playlist) = self.current_playlist() else {
             return Vec::new();
         };
@@ -663,12 +663,7 @@ impl AudioOrbitApp {
                 playlist
                     .tracks
                     .get(*index)
-                    .map(|track| {
-                        query.is_empty()
-                            || track.title.to_lowercase().contains(&query)
-                            || track.group.to_lowercase().contains(&query)
-                            || track.path.to_string_lossy().to_lowercase().contains(&query)
-                    })
+                    .map(|track| track_matches_search_query(track, query))
                     .unwrap_or(false)
             })
             .collect()
@@ -1424,6 +1419,179 @@ impl AudioOrbitApp {
         } else if self.state.selected_playlist_index == to {
             self.state.selected_playlist_index = from;
         }
+        self.save_state_silently();
+    }
+
+
+    fn restore_track_selection_after_reorder(&mut self, selected_path: Option<PathBuf>) {
+        if let Some(selected_path) = selected_path {
+            if let Some(index) = self
+                .current_playlist()
+                .and_then(|playlist| playlist.tracks.iter().position(|track| same_path(&track.path, &selected_path)))
+            {
+                self.selected_track_index = Some(index);
+            }
+        }
+
+        if let (Some(active_playlist_index), Some(active_path)) = (self.active_playlist_index, self.active_track_path.clone()) {
+            if active_playlist_index == self.state.selected_playlist_index {
+                self.active_track_index = self
+                    .current_playlist()
+                    .and_then(|playlist| playlist.tracks.iter().position(|track| same_path(&track.path, &active_path)));
+            }
+        }
+
+        self.restore_repeat_selection_for_current_playlist();
+    }
+
+    fn sort_current_playlist_by_name(&mut self, ascending: bool) {
+        self.persist_repeat_selection_for_current_playlist();
+        let selected_path = self.selected_track_path();
+        if let Some(playlist) = self.current_playlist_mut() {
+            playlist.tracks.sort_by(|left, right| {
+                let ordering = naturalish_key(&left.group)
+                    .cmp(&naturalish_key(&right.group))
+                    .then_with(|| naturalish_key(&left.title).cmp(&naturalish_key(&right.title)))
+                    .then_with(|| left.path.cmp(&right.path));
+                if ascending { ordering } else { ordering.reverse() }
+            });
+        }
+        self.restore_track_selection_after_reorder(selected_path);
+        self.status_message = if ascending {
+            "Sorted current playlist A to Z.".to_owned()
+        } else {
+            "Sorted current playlist Z to A.".to_owned()
+        };
+        self.save_state_silently();
+    }
+
+    fn move_track_in_current_playlist(&mut self, index: usize, delta: isize) {
+        self.persist_repeat_selection_for_current_playlist();
+        let selected_path = self.selected_track_path();
+        let Some(playlist) = self.current_playlist_mut() else {
+            return;
+        };
+        if index >= playlist.tracks.len() {
+            return;
+        }
+        let to = if delta < 0 {
+            index.saturating_sub(1)
+        } else {
+            (index + 1).min(playlist.tracks.len() - 1)
+        };
+        if index == to {
+            return;
+        }
+        playlist.tracks.swap(index, to);
+        self.restore_track_selection_after_reorder(selected_path);
+        self.status_message = "Moved track in playlist order.".to_owned();
+        self.save_state_silently();
+    }
+
+
+    fn move_folder_group_in_current_playlist(&mut self, group: &str, delta: isize) {
+        self.persist_repeat_selection_for_current_playlist();
+        let selected_path = self.selected_track_path();
+        let Some(playlist) = self.current_playlist_mut() else {
+            return;
+        };
+
+        let mut group_order: Vec<String> = Vec::new();
+        for track in &playlist.tracks {
+            if group_order.last().map(|current| current != &track.group).unwrap_or(true)
+                && !group_order.iter().any(|current| current == &track.group)
+            {
+                group_order.push(track.group.clone());
+            }
+        }
+        let Some(position) = group_order.iter().position(|current| current == group) else {
+            return;
+        };
+        let to = if delta < 0 {
+            position.saturating_sub(1)
+        } else {
+            (position + 1).min(group_order.len().saturating_sub(1))
+        };
+        if position == to {
+            return;
+        }
+
+        group_order.swap(position, to);
+        let old_tracks = std::mem::take(&mut playlist.tracks);
+        let mut reordered = Vec::with_capacity(old_tracks.len());
+        for ordered_group in &group_order {
+            reordered.extend(
+                old_tracks
+                    .iter()
+                    .filter(|track| &track.group == ordered_group)
+                    .cloned(),
+            );
+        }
+        playlist.tracks = reordered;
+        self.restore_track_selection_after_reorder(selected_path);
+        self.status_message = format!("Moved folder group: {group}.");
+        self.save_state_silently();
+    }
+
+    fn sort_radio_stations_by_name(&mut self, ascending: bool) {
+        let active_url = self
+            .active_radio_index
+            .and_then(|index| self.state.radio_stations.get(index).map(|station| station.url.clone()));
+        let selected_url = self
+            .state
+            .selected_radio_index
+            .and_then(|index| self.state.radio_stations.get(index).map(|station| station.url.clone()));
+
+        self.state.radio_stations.sort_by(|left, right| {
+            let ordering = naturalish_key(&left.name)
+                .cmp(&naturalish_key(&right.name))
+                .then_with(|| left.url.cmp(&right.url));
+            if ascending { ordering } else { ordering.reverse() }
+        });
+
+        self.active_radio_index = active_url.as_ref().and_then(|url| {
+            self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
+        });
+        self.state.selected_radio_index = selected_url.as_ref().and_then(|url| {
+            self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
+        });
+        self.radio_selection_was_user_set = self.state.selected_radio_index.is_some();
+        self.status_message = if ascending {
+            "Sorted radio stations A to Z.".to_owned()
+        } else {
+            "Sorted radio stations Z to A.".to_owned()
+        };
+        self.save_state_silently();
+    }
+
+    fn move_radio_station(&mut self, index: usize, delta: isize) {
+        if index >= self.state.radio_stations.len() {
+            return;
+        }
+        let active_url = self
+            .active_radio_index
+            .and_then(|active_index| self.state.radio_stations.get(active_index).map(|station| station.url.clone()));
+        let selected_url = self
+            .state
+            .selected_radio_index
+            .and_then(|selected_index| self.state.radio_stations.get(selected_index).map(|station| station.url.clone()));
+        let to = if delta < 0 {
+            index.saturating_sub(1)
+        } else {
+            (index + 1).min(self.state.radio_stations.len() - 1)
+        };
+        if index == to {
+            return;
+        }
+        self.state.radio_stations.swap(index, to);
+        self.active_radio_index = active_url.as_ref().and_then(|url| {
+            self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
+        });
+        self.state.selected_radio_index = selected_url.as_ref().and_then(|url| {
+            self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
+        });
+        self.radio_selection_was_user_set = self.state.selected_radio_index.is_some();
+        self.status_message = "Moved radio station.".to_owned();
         self.save_state_silently();
     }
 
@@ -3517,6 +3685,15 @@ impl AudioOrbitApp {
             }
         });
 
+        ui.horizontal(|ui| {
+            if ui.small_button("A-Z").on_hover_text("Sort radio stations A to Z").clicked() {
+                self.sort_radio_stations_by_name(true);
+            }
+            if ui.small_button("Z-A").on_hover_text("Sort radio stations Z to A").clicked() {
+                self.sort_radio_stations_by_name(false);
+            }
+        });
+
         if self.show_radio_search {
             ui.horizontal(|ui| {
                 ui.label(ui_icons::icon(Icon::Search));
@@ -3733,6 +3910,14 @@ impl AudioOrbitApp {
                             self.details_modal = Some(DetailsModal::Radio(index));
                             ui.close_menu();
                         }
+                        if ui.button("Move up").clicked() {
+                            self.move_radio_station(index, -1);
+                            ui.close_menu();
+                        }
+                        if ui.button("Move down").clicked() {
+                            self.move_radio_station(index, 1);
+                            ui.close_menu();
+                        }
                         if ui.button(ui_icons::label(Icon::Trash2, "Remove station")).clicked() {
                             remove_radio_index = Some(index);
                             ui.close_menu();
@@ -3897,10 +4082,21 @@ impl AudioOrbitApp {
             }
         }
 
-        if self.state.playback.repeat_mode == RepeatMode::Selection {
-            let repeat_order = if self.state.playback.shuffle_enabled { "random playback" } else { "playlist order" };
-            ui.small(format!("Repeat selection mode: tick the tracks that should repeat in {repeat_order}."));
-        }
+        ui.horizontal(|ui| {
+            if self.state.playback.repeat_mode == RepeatMode::Selection {
+                let repeat_order = if self.state.playback.shuffle_enabled { "random playback" } else { "playlist order" };
+                ui.small(format!("Repeat selection mode: tick tracks or whole folders for {repeat_order}."));
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Z-A").on_hover_text("Sort current playlist Z to A").clicked() {
+                    self.sort_current_playlist_by_name(false);
+                }
+                if ui.small_button("A-Z").on_hover_text("Sort current playlist A to Z").clicked() {
+                    self.sort_current_playlist_by_name(true);
+                }
+            });
+        });
 
         ui.separator();
 
@@ -3924,6 +4120,13 @@ impl AudioOrbitApp {
                     .collect()
             })
             .unwrap_or_default();
+
+        let group_track_indexes: BTreeMap<String, Vec<usize>> = visible_tracks
+            .iter()
+            .fold(BTreeMap::new(), |mut groups, (index, track)| {
+                groups.entry(track.group.clone()).or_default().push(*index);
+                groups
+            });
 
         let add_targets: Vec<(usize, String, PlaylistKind)> = self
             .state
@@ -3953,12 +4156,60 @@ impl AudioOrbitApp {
                         let group = track.group.clone();
                         let collapsed = self.collapsed_groups.contains(&group);
                         let mut toggle_group = false;
+                        let repeat_selection_mode = self.state.playback.repeat_mode == RepeatMode::Selection;
+                        let group_indexes = group_track_indexes.get(&group).cloned().unwrap_or_default();
                         let header_response = ui.horizontal(|ui| {
                             let icon = if collapsed { Icon::ChevronRight } else { Icon::ChevronDown };
                             if ui.small_button(ui_icons::icon(icon)).on_hover_text("Collapse/expand folder").clicked() {
                                 toggle_group = true;
                             }
+                            if repeat_selection_mode {
+                                let mut checked = !group_indexes.is_empty()
+                                    && group_indexes.iter().all(|index| self.selected_track_indexes.contains(index));
+                                if ui.checkbox(&mut checked, "").on_hover_text("Include this whole folder in repeat selection").changed() {
+                                    if checked {
+                                        for index in &group_indexes {
+                                            self.selected_track_indexes.insert(*index);
+                                        }
+                                    } else {
+                                        for index in &group_indexes {
+                                            self.selected_track_indexes.remove(index);
+                                        }
+                                    }
+                                    self.persist_repeat_selection_for_current_playlist();
+                                    self.save_state_silently();
+                                }
+                            }
                             ui.label(egui::RichText::new(group.as_str()).size(13.0).strong());
+                        });
+                        header_response.response.context_menu(|ui| {
+                            if self.state.playback.repeat_mode == RepeatMode::Selection {
+                                if ui.button("Select folder for repeat").clicked() {
+                                    for index in &group_indexes {
+                                        self.selected_track_indexes.insert(*index);
+                                    }
+                                    self.persist_repeat_selection_for_current_playlist();
+                                    self.save_state_silently();
+                                    ui.close_menu();
+                                }
+                                if ui.button("Remove folder from repeat").clicked() {
+                                    for index in &group_indexes {
+                                        self.selected_track_indexes.remove(index);
+                                    }
+                                    self.persist_repeat_selection_for_current_playlist();
+                                    self.save_state_silently();
+                                    ui.close_menu();
+                                }
+                                ui.separator();
+                            }
+                            if ui.button("Move folder up").clicked() {
+                                self.move_folder_group_in_current_playlist(&group, -1);
+                                ui.close_menu();
+                            }
+                            if ui.button("Move folder down").clicked() {
+                                self.move_folder_group_in_current_playlist(&group, 1);
+                                ui.close_menu();
+                            }
                         });
                         if toggle_group {
                             self.toggle_folder_group_collapsed_and_focus(&group);
@@ -4020,6 +4271,7 @@ impl AudioOrbitApp {
                                     } else {
                                         self.selected_track_indexes.remove(&index);
                                     }
+                                    self.persist_repeat_selection_for_current_playlist();
                                     self.save_state_silently();
                                 }
                             }
@@ -4144,7 +4396,7 @@ impl AudioOrbitApp {
                     ui.separator();
                 }
 
-                if show_group_headers {
+                if show_group_headers && self.state.ui.playlist_scroll_offset_y > 2.0 {
                     if let Some(group) = viewport_group {
                         let sticky_height = 24.0;
                         let push_offset_y = next_group_header_top
@@ -4193,6 +4445,14 @@ impl AudioOrbitApp {
         }
         if ui.button(ui_icons::label(Icon::Info, "Details")).clicked() {
             self.details_modal = Some(DetailsModal::Track(path.clone()));
+            ui.close_menu();
+        }
+        if ui.button("Move up").clicked() {
+            self.move_track_in_current_playlist(index, -1);
+            ui.close_menu();
+        }
+        if ui.button("Move down").clicked() {
+            self.move_track_in_current_playlist(index, 1);
             ui.close_menu();
         }
         if ui.button(ui_icons::label(Icon::ExternalLink, "Show in File Explorer")).clicked() {
@@ -5406,6 +5666,49 @@ fn fallback_radio_station_name(url: &str) -> String {
     }
 }
 
+fn normalize_search_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() {
+                ch.to_lowercase().next().unwrap_or(ch)
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn track_matches_search_query(track: &Track, query: &str) -> bool {
+    let query = normalize_search_text(query);
+    if query.is_empty() {
+        return true;
+    }
+
+    let haystack = normalize_search_text(&format!(
+        "{} {} {} {}",
+        track.title,
+        track.group,
+        track.path.display(),
+        display_parent(&track.path)
+    ));
+
+    query
+        .split_whitespace()
+        .all(|token| haystack.contains(token))
+}
+
+fn naturalish_key(value: &str) -> String {
+    normalize_search_text(value)
+}
+
+fn same_text(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
 fn ensure_state_is_valid(state: &mut SavedState) {
     if !state.playlists.iter().any(|playlist| playlist.kind == PlaylistKind::Favorites) {
         state.playlists.insert(0, Playlist::favorites());
@@ -5417,7 +5720,6 @@ fn ensure_state_is_valid(state: &mut SavedState) {
         } else if playlist.source_folder.is_some() {
             playlist.kind = PlaylistKind::Folder;
         }
-        playlist.sort_tracks();
         playlist.set_selected_group(playlist.selected_group.clone());
         let track_paths: Vec<PathBuf> = playlist.tracks.iter().map(|track| track.path.clone()).collect();
         playlist
@@ -5815,7 +6117,11 @@ fn detail_row(ui: &mut egui::Ui, label: &str, value: &str) {
 }
 
 fn reveal_in_file_manager(path: &Path) -> anyhow::Result<()> {
-    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    };
     let looks_like_file = target.is_file() || (!target.is_dir() && path.extension().is_some());
     let folder = if looks_like_file {
         target.parent().map(Path::to_path_buf).unwrap_or_else(|| target.clone())
@@ -5827,7 +6133,7 @@ fn reveal_in_file_manager(path: &Path) -> anyhow::Result<()> {
     {
         if looks_like_file {
             Command::new("explorer.exe")
-                .arg(format!("/select,{}", target.display()))
+                .arg(format!("/select,"{}"", target.display()))
                 .spawn()?;
         } else {
             Command::new("explorer.exe")
