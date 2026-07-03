@@ -1,0 +1,870 @@
+use crate::*;
+
+impl AudioOrbitApp {
+    pub(crate) fn add_profile(&mut self) {
+        let settings = self.current_settings();
+        let number = self.state.profiles.len() + 1;
+        self.state
+            .profiles
+            .push(config::DspProfile::new(format!("Profile {number}"), settings));
+        self.state.selected_profile_index = self.state.profiles.len() - 1;
+        self.status_message = "Created a new sound profile from the current settings.".to_owned();
+        self.save_state_silently();
+    }
+    pub(crate) fn remove_current_profile(&mut self) {
+        if self.state.profiles.len() <= 1 {
+            self.error_message = Some("At least one sound profile is required.".to_owned());
+            return;
+        }
+
+        self.state.profiles.remove(self.state.selected_profile_index);
+        self.state.selected_profile_index = self.state.selected_profile_index.saturating_sub(1);
+        self.status_message = "Removed sound profile.".to_owned();
+        self.save_state_silently();
+        self.schedule_current_profile_apply();
+    }
+    pub(crate) fn play_selected_or_first_track(&mut self) {
+        if !self.selected_track_is_visible() {
+            self.selected_track_index = self.eligible_track_indexes().first().copied();
+        }
+
+        let Some(path) = self.selected_track_path() else {
+            self.error_message = Some("Select a track first.".to_owned());
+            return;
+        };
+
+        let start_seconds = self.saved_paused_resume_position_for_track(&path).unwrap_or(0.0);
+        self.play_path(path, self.selected_track_index, start_seconds);
+    }
+    pub(crate) fn saved_paused_resume_position_for_track(&self, path: &Path) -> Option<f32> {
+        let session = &self.state.playback_session;
+        if !session.was_paused || session.source != "track" {
+            return None;
+        }
+        let session_path = session.track_path.as_ref()?;
+        if same_path(session_path, path) {
+            Some(session.position_seconds.max(0.0))
+        } else {
+            None
+        }
+    }
+    pub(crate) fn play_path(&mut self, path: PathBuf, index: Option<usize>, start_seconds: f32) {
+        let crossfade_seconds = if start_seconds <= 0.05 {
+            self.configured_manual_crossfade_seconds()
+        } else {
+            0.0
+        };
+        self.play_path_with_crossfade(path, index, start_seconds, crossfade_seconds);
+    }
+    pub(crate) fn play_path_with_crossfade(
+        &mut self,
+        path: PathBuf,
+        index: Option<usize>,
+        start_seconds: f32,
+        crossfade_seconds: f32,
+    ) {
+        self.prepare_track_playback(path, index, start_seconds, crossfade_seconds, false);
+    }
+    pub(crate) fn cached_track_for_path(&self, index: Option<usize>, path: &Path) -> Option<&Track> {
+        let playlist = self.current_playlist()?;
+        index
+            .and_then(|index| playlist.tracks.get(index))
+            .filter(|track| same_path(&track.path, path))
+            .or_else(|| playlist.tracks.iter().find(|track| same_path(&track.path, path)))
+    }
+    pub(crate) fn cached_waveform_for_track(&self, index: Option<usize>, path: &Path) -> Option<(Vec<f32>, Vec<f32>)> {
+        let track = self.cached_track_for_path(index, path)?;
+
+        if track.waveform.is_empty() || track.waveform_brightness.is_empty() {
+            None
+        } else {
+            Some((track.waveform.clone(), track.waveform_brightness.clone()))
+        }
+    }
+    pub(crate) fn known_duration_for_track(&self, index: Option<usize>, path: &Path) -> Option<f32> {
+        self.cached_track_for_path(index, path)
+            .and_then(|track| track.metadata.duration_seconds)
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+    }
+    pub(crate) fn prepare_track_playback(
+        &mut self,
+        path: PathBuf,
+        index: Option<usize>,
+        start_seconds: f32,
+        crossfade_seconds: f32,
+        live_position_compensation: bool,
+    ) {
+        if self.player.is_none() {
+            self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+            return;
+        }
+
+        let settings = self.current_settings();
+        let playlist_index = self.state.selected_playlist_index;
+        let cached_waveform = self.cached_waveform_for_track(index, &path);
+        let known_duration_seconds = self.known_duration_for_track(index, &path);
+
+        if !settings.skip_silence_enabled {
+            self.pending_prepared_track_receiver = None;
+            let result = self
+                .player
+                .as_mut()
+                .expect("audio player was checked above")
+                .play_file_streaming_with_cached_waveform_and_crossfade(
+                    &path,
+                    settings,
+                    start_seconds,
+                    cached_waveform,
+                    known_duration_seconds,
+                    crossfade_seconds,
+                );
+
+            match result {
+                Ok(info) => {
+                    let mode_label = if settings.orbit_enabled {
+                        settings.mode.label()
+                    } else {
+                        "normal stereo playback"
+                    };
+                    self.active_tab = MainContentTab::Music;
+                    self.active_radio_index = None;
+                    self.active_radio_station_name = None;
+                    self.active_radio_title = None;
+                    self.radio_started_at = None;
+                    self.last_radio_title_lookup_at = None;
+                    self.radio_title_receiver = None;
+                    self.active_playlist_index = Some(playlist_index);
+                    self.selected_track_index = index;
+                    self.active_track_index = index;
+                    self.active_track_path = Some(info.path.clone());
+                    self.pending_track_switch = None;
+                    self.crossfade_started_for_path = None;
+                    self.store_playback_metadata(&info);
+                    self.remember_last_played_track(index, &info.path);
+                    self.last_playback = Some(info.clone());
+                    self.status_message = if live_position_compensation {
+                        format!("Applied sound profile and continued {} through {}.", display_file_name(&info.path), mode_label)
+                    } else if crossfade_seconds > 0.05 {
+                        format!(
+                            "Crossfading to {} through {}; previous source is fading out.",
+                            display_file_name(&info.path),
+                            mode_label
+                        )
+                    } else {
+                        format!("Playing {} through {}.", display_file_name(&info.path), mode_label)
+                    };
+                    self.persist_playback_session();
+                    self.save_state_silently();
+                    self.error_message = None;
+                }
+                Err(error) => {
+                    self.error_message = Some(error.to_string());
+                    self.status_message = "Playback failed.".to_owned();
+                }
+            }
+            return;
+        }
+
+        let fast_result = self
+            .player
+            .as_mut()
+            .expect("audio player was checked above")
+            .play_file_streaming_with_cached_waveform_and_crossfade(
+                &path,
+                settings,
+                start_seconds,
+                cached_waveform.clone(),
+                known_duration_seconds,
+                crossfade_seconds,
+            );
+
+        let mut quick_started = false;
+        let mut requested_at = Instant::now();
+        match fast_result {
+            Ok(info) => {
+                quick_started = true;
+                requested_at = Instant::now();
+                let mode_label = if settings.orbit_enabled {
+                    settings.mode.label()
+                } else {
+                    "normal stereo playback"
+                };
+                self.active_tab = MainContentTab::Music;
+                self.active_radio_index = None;
+                self.active_radio_station_name = None;
+                self.active_radio_title = None;
+                self.radio_started_at = None;
+                self.last_radio_title_lookup_at = None;
+                self.radio_title_receiver = None;
+                self.active_playlist_index = Some(playlist_index);
+                self.selected_track_index = index;
+                self.active_track_index = index;
+                self.active_track_path = Some(info.path.clone());
+                self.pending_track_switch = None;
+                self.crossfade_started_for_path = None;
+                self.store_playback_metadata(&info);
+                self.remember_last_played_track(index, &info.path);
+                self.last_playback = Some(info.clone());
+                self.status_message = if crossfade_seconds > 0.05 {
+                    format!(
+                        "Crossfading to {} immediately through {}; preparing silence skip in the background.",
+                        display_file_name(&info.path),
+                        mode_label
+                    )
+                } else {
+                    format!(
+                        "Playing {} immediately through {}; preparing silence skip in the background.",
+                        display_file_name(&info.path),
+                        mode_label
+                    )
+                };
+                self.persist_playback_session();
+                self.save_state_silently();
+                self.error_message = None;
+            }
+            Err(error) => {
+                self.status_message = if live_position_compensation {
+                    "Fast playback failed; preparing updated playback without stopping the current audio...".to_owned()
+                } else if crossfade_seconds > 0.05 {
+                    format!(
+                        "Fast playback failed; preparing crossfade for {:.1} second(s)...",
+                        crossfade_seconds
+                    )
+                } else {
+                    format!("Fast playback failed; preparing {}...", display_file_name(&path))
+                };
+                self.error_message = Some(error.to_string());
+            }
+        }
+
+        let background_crossfade_seconds = if quick_started { 0.0 } else { crossfade_seconds };
+        let background_live_position_compensation = quick_started || live_position_compensation;
+        let background_upgrade = quick_started;
+        let (sender, receiver) = mpsc::channel();
+        let path_for_thread = path.clone();
+
+        self.pending_prepared_track_receiver = Some(receiver);
+        self.error_message = if quick_started { None } else { self.error_message.take() };
+
+        thread::spawn(move || {
+            let result = AudioPlayer::prepare_file_with_cached_waveform(path_for_thread, settings, start_seconds, cached_waveform)
+                .map(|prepared| PreparedTrackPlayback {
+                    playlist_index,
+                    index,
+                    crossfade_seconds: background_crossfade_seconds,
+                    live_position_compensation: background_live_position_compensation,
+                    background_upgrade,
+                    prepared,
+                    requested_at,
+                })
+                .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+    }
+    pub(crate) fn process_prepared_track_playback(&mut self) {
+        let Some(receiver) = &self.pending_prepared_track_receiver else {
+            return;
+        };
+
+        let message = match receiver.try_recv() {
+            Ok(message) => message,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.pending_prepared_track_receiver = None;
+                return;
+            }
+        };
+
+        self.pending_prepared_track_receiver = None;
+        let prepared = match message {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.error_message = Some(error);
+                self.status_message = "Playback preparation failed.".to_owned();
+                return;
+            }
+        };
+
+        let PreparedTrackPlayback {
+            playlist_index,
+            index,
+            crossfade_seconds,
+            live_position_compensation,
+            background_upgrade,
+            prepared: prepared_audio,
+            requested_at,
+        } = prepared;
+
+        let Some(player) = &mut self.player else {
+            self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+            return;
+        };
+
+        let render_elapsed_seconds = requested_at.elapsed().as_secs_f32();
+        let was_playing = player.is_playing();
+        let result = if crossfade_seconds > 0.05 {
+            player.crossfade_to_prepared(prepared_audio, crossfade_seconds)
+        } else if live_position_compensation && was_playing {
+            player.play_prepared_from_live_position(prepared_audio, render_elapsed_seconds)
+        } else {
+            player.play_prepared(prepared_audio)
+        };
+
+        match result {
+            Ok(info) => {
+                let settings = self.current_settings();
+                let mode_label = if settings.orbit_enabled {
+                    settings.mode.label()
+                } else {
+                    "normal stereo playback"
+                };
+                self.active_tab = MainContentTab::Music;
+                self.active_radio_index = None;
+                self.active_radio_station_name = None;
+                self.active_radio_title = None;
+                self.radio_started_at = None;
+                self.last_radio_title_lookup_at = None;
+                self.radio_title_receiver = None;
+                self.active_playlist_index = Some(playlist_index);
+                self.selected_track_index = index;
+
+                self.active_track_index = index;
+                self.active_track_path = Some(info.path.clone());
+                self.pending_track_switch = None;
+                self.crossfade_started_for_path = None;
+                self.store_playback_metadata(&info);
+                self.remember_last_played_track(index, &info.path);
+                self.last_playback = Some(info.clone());
+                self.status_message = if background_upgrade {
+                    format!("Silence-skip preparation finished for {}.", display_file_name(&info.path))
+                } else if live_position_compensation {
+                    format!("Applied sound profile and continued {} through {}.", display_file_name(&info.path), mode_label)
+                } else if crossfade_seconds > 0.05 {
+                    format!(
+                        "Crossfading to {} through {}; previous source is fading out.",
+                        display_file_name(&info.path),
+                        mode_label
+                    )
+                } else {
+                    format!("Playing {} through {}.", display_file_name(&info.path), mode_label)
+                };
+                self.persist_playback_session();
+                self.save_state_silently();
+                self.error_message = None;
+            }
+            Err(error) => {
+                self.error_message = Some(error.to_string());
+                self.status_message = "Playback failed.".to_owned();
+            }
+        }
+    }
+    pub(crate) fn play_next_track(&mut self) {
+        let crossfade_seconds = self.configured_manual_crossfade_seconds();
+        self.play_next_track_with_crossfade(crossfade_seconds);
+    }
+    pub(crate) fn play_next_track_with_crossfade(&mut self, crossfade_seconds: f32) {
+        let Some((next_index, path)) = self.next_track_candidate() else {
+            return;
+        };
+
+        self.selected_track_index = Some(next_index);
+        self.play_path_with_crossfade(path, Some(next_index), 0.0, crossfade_seconds);
+    }
+    pub(crate) fn next_track_candidate(&self) -> Option<(usize, PathBuf)> {
+        let indexes = self.playback_sequence_indexes();
+        if indexes.is_empty() {
+            return None;
+        }
+
+        let current_index = self.active_track_index.or(self.selected_track_index);
+        let next_index = if self.state.playback.repeat_mode == RepeatMode::Track {
+            current_index.unwrap_or(indexes[0])
+        } else if self.state.playback.shuffle_enabled {
+            self.random_sequence_index(&indexes, current_index)?
+        } else {
+            let current_position = current_index.and_then(|index| indexes.iter().position(|candidate| *candidate == index));
+            let next_position = current_position.map(|position| (position + 1) % indexes.len()).unwrap_or(0);
+            indexes[next_position]
+        };
+
+        let path = self
+            .current_playlist()?
+            .tracks
+            .get(next_index)?
+            .path
+            .clone();
+
+        Some((next_index, path))
+    }
+    pub(crate) fn configured_manual_crossfade_seconds(&self) -> f32 {
+        let is_currently_playing = self
+            .player
+            .as_ref()
+            .map(AudioPlayer::is_playing)
+            .unwrap_or(false);
+
+        if self.state.playback.crossfade_enabled && is_currently_playing {
+            self.state.playback.crossfade_seconds.max(1) as f32
+        } else {
+            0.0
+        }
+    }
+    pub(crate) fn play_previous_track(&mut self) {
+        let indexes = self.playback_sequence_indexes();
+        if indexes.is_empty() {
+            return;
+        }
+
+        let current_index = self.active_track_index.or(self.selected_track_index);
+        let previous_index = if self.state.playback.repeat_mode == RepeatMode::Track {
+            current_index.unwrap_or(indexes[0])
+        } else {
+            let current_position = current_index.and_then(|index| indexes.iter().position(|candidate| *candidate == index));
+            let previous_position = current_position
+                .map(|position| if position == 0 { indexes.len() - 1 } else { position - 1 })
+                .unwrap_or(0);
+            indexes[previous_position]
+        };
+
+        let Some(path) = self
+            .current_playlist()
+            .and_then(|playlist| playlist.tracks.get(previous_index))
+            .map(|track| track.path.clone())
+        else {
+            return;
+        };
+
+        self.selected_track_index = Some(previous_index);
+        let crossfade_seconds = self.configured_manual_crossfade_seconds();
+        self.play_path_with_crossfade(path, Some(previous_index), 0.0, crossfade_seconds);
+    }
+    pub(crate) fn current_waveform_for_seek(&self) -> Option<(Vec<f32>, Vec<f32>)> {
+        if let Some(playback) = &self.last_playback {
+            if !playback.waveform.is_empty() && !playback.waveform_brightness.is_empty() {
+                return Some((playback.waveform.clone(), playback.waveform_brightness.clone()));
+            }
+        }
+
+        let path = self.active_track_path.as_ref()?;
+        self.cached_waveform_for_track(self.active_track_index, path)
+    }
+    pub(crate) fn seek_current(&mut self, seconds: f32) {
+        let settings = self
+            .player
+            .as_ref()
+            .and_then(AudioPlayer::current_settings)
+            .unwrap_or_else(|| self.current_settings());
+        if settings.skip_silence_enabled {
+            let Some(path) = self.active_track_path.clone() else {
+                return;
+            };
+            self.waveform_drag_position_seconds = None;
+            self.prepare_track_playback(path, self.active_track_index, seconds, 0.0, false);
+            return;
+        }
+
+        let cached_waveform = self.current_waveform_for_seek();
+        let known_duration_seconds = self
+            .last_playback
+            .as_ref()
+            .map(|playback| playback.original_duration_seconds)
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+            .or_else(|| {
+                self.active_track_path
+                    .as_ref()
+                    .and_then(|path| self.known_duration_for_track(self.active_track_index, path))
+            });
+        let Some(player) = &mut self.player else {
+            return;
+        };
+
+        match player.seek_current_with_cached_waveform(seconds, cached_waveform, known_duration_seconds) {
+            Ok(Some(info)) => {
+                self.status_message = format!("Seeked to {}.", format_duration(seconds));
+                self.store_playback_metadata(&info);
+                self.last_playback = Some(info);
+                self.waveform_drag_position_seconds = None;
+                self.persist_playback_session();
+                self.save_state_silently();
+                self.error_message = None;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.error_message = Some(error.to_string());
+            }
+        }
+    }
+    pub(crate) fn schedule_current_profile_apply(&mut self) {
+        self.pending_profile_apply_at = Some(Instant::now() + Duration::from_secs(3));
+        self.profile_apply_applied_until = None;
+    }
+    pub(crate) fn process_pending_profile_apply(&mut self) {
+        if let Some(until) = self.profile_apply_applied_until {
+            if Instant::now() >= until {
+                self.profile_apply_applied_until = None;
+            }
+        }
+
+        let Some(apply_at) = self.pending_profile_apply_at else {
+            return;
+        };
+
+        if Instant::now() < apply_at {
+            return;
+        }
+
+        self.pending_profile_apply_at = None;
+        self.profile_apply_applied_until = Some(Instant::now() + Duration::from_secs(2));
+        self.save_state_silently();
+        self.apply_current_profile_live();
+    }
+    pub(crate) fn profile_apply_status_text(&self) -> Option<String> {
+        let now = Instant::now();
+        if let Some(apply_at) = self.pending_profile_apply_at {
+            let seconds = apply_at.saturating_duration_since(now).as_secs_f32().ceil().max(1.0) as u64;
+            return Some(format!("Apply in {seconds}s..."));
+        }
+        if self
+            .profile_apply_applied_until
+            .map(|until| now < until)
+            .unwrap_or(false)
+        {
+            return Some("Sound profile applied.".to_owned());
+        }
+        None
+    }
+    pub(crate) fn apply_current_profile_live(&mut self) {
+        let settings = self.current_settings();
+
+        if let Some(radio_index) = self.active_radio_index {
+            let Some(station) = self.state.radio_stations.get(radio_index).cloned() else {
+                return;
+            };
+            let crossfade_seconds = self.configured_manual_crossfade_seconds();
+            let play_result = {
+                let Some(player) = &mut self.player else {
+                    return;
+                };
+
+                if !(player.is_playing() || player.is_paused()) {
+                    return;
+                }
+
+                player.play_radio_stream_with_crossfade(&station.url, settings, crossfade_seconds)
+            };
+
+            match play_result {
+                Ok(()) => {
+                    self.active_tab = MainContentTab::Radio;
+                    self.active_radio_station_name = station.last_station_name.clone();
+                    self.active_radio_title = station.last_stream_title.clone();
+                    self.radio_started_at = Some(Instant::now());
+                    self.last_radio_title_lookup_at = Some(Instant::now());
+                    self.error_message = None;
+                    self.persist_playback_session();
+                    self.save_state_silently();
+                    self.start_radio_title_lookup(radio_index, station.url);
+                }
+                Err(error) => {
+                    self.error_message = Some(error.to_string());
+                }
+            }
+            return;
+        }
+
+        let position = self.displayed_playback_position_seconds();
+        let Some(path) = self.active_track_path.clone() else {
+            return;
+        };
+        let (is_active, live_position_compensation) = {
+            let Some(player) = &self.player else {
+                return;
+            };
+            (player.is_playing() || player.is_paused(), player.is_playing())
+        };
+
+        if !is_active {
+            return;
+        }
+
+        self.prepare_track_playback(path, self.active_track_index, position, 0.0, live_position_compensation);
+    }
+    pub(crate) fn process_pending_track_switch(&mut self) {
+        let Some(pending) = self.pending_track_switch.clone() else {
+            return;
+        };
+
+        if Instant::now() < pending.switch_at {
+            return;
+        }
+
+        self.pending_track_switch = None;
+        self.active_track_index = pending.index;
+        self.active_playlist_index = Some(pending.playlist_index);
+        self.active_track_path = Some(pending.info.path.clone());
+        self.selected_track_index = pending.index;
+        self.crossfade_started_for_path = None;
+        self.remember_last_played_track(pending.index, &pending.info.path);
+        self.store_playback_metadata(&pending.info);
+        self.last_playback = Some(pending.info);
+        self.persist_playback_session();
+        self.save_state_silently();
+    }
+    pub(crate) fn displayed_playback_position_seconds(&self) -> f32 {
+        if let Some(pending) = &self.pending_track_switch {
+            let elapsed = pending.started_at.elapsed().as_secs_f32();
+            return (pending.previous_position + elapsed).min(pending.previous_duration);
+        }
+
+        let Some(player) = self.player.as_ref() else {
+            return 0.0;
+        };
+
+        let rendered_position = player.playback_position_seconds();
+        let render_start = player.current_start_offset_seconds();
+        if let Some(playback) = &self.last_playback {
+            rendered_to_original_position(rendered_position, render_start, playback)
+        } else {
+            rendered_position
+        }
+    }
+    pub(crate) fn displayed_playback_duration_seconds(&self) -> f32 {
+        if let Some(pending) = &self.pending_track_switch {
+            return pending.previous_duration;
+        }
+
+        self.last_playback
+            .as_ref()
+            .map(|playback| playback.original_duration_seconds)
+            .or_else(|| self.player.as_ref().and_then(AudioPlayer::playback_duration_seconds))
+            .unwrap_or(0.0)
+    }
+    pub(crate) fn stop(&mut self) {
+        if let Some(player) = &mut self.player {
+            player.stop();
+        }
+
+        self.active_track_index = None;
+        self.active_playlist_index = None;
+        self.active_track_path = None;
+        self.active_radio_index = None;
+        self.active_radio_station_name = None;
+        self.active_radio_title = None;
+        self.radio_started_at = None;
+        self.last_radio_title_lookup_at = None;
+        self.radio_title_receiver = None;
+        self.pending_track_switch = None;
+        self.crossfade_started_for_path = None;
+        self.last_playback = None;
+        self.status_message = "Playback stopped.".to_owned();
+        self.persist_playback_session();
+        self.save_state_silently();
+    }
+    pub(crate) fn pause_or_resume(&mut self) {
+        if let Some(player) = &mut self.player {
+            player.pause_or_resume();
+
+            if player.is_paused() {
+                self.status_message = "Playback paused.".to_owned();
+            } else if player.is_playing() {
+                self.status_message = "Playback resumed.".to_owned();
+            }
+        }
+        self.persist_playback_session();
+        self.save_state_silently();
+    }
+    pub(crate) fn refresh_output_device(&mut self) {
+        let resume_path = self.active_track_path.clone();
+        let resume_position = self.player.as_ref().map(AudioPlayer::playback_position_seconds).unwrap_or(0.0);
+        let resume_index = self.active_track_index;
+
+        if let Some(player) = &mut self.player {
+            player.stop();
+        }
+
+        match AudioPlayer::new() {
+            Ok(mut player) => {
+                player.set_volume_percent(self.effective_volume_percent());
+                let output_name = player.output_device_name().to_owned();
+                self.player = Some(player);
+                self.detected_output_change = None;
+                self.last_known_output_name = output_name.clone();
+                self.status_message = format!("Output refreshed: {output_name}.");
+                self.error_message = None;
+
+                if let Some(path) = resume_path {
+                    self.play_path(path, resume_index, resume_position);
+                }
+            }
+            Err(error) => {
+                self.player = None;
+                self.error_message = Some(error.to_string());
+                self.status_message = "Could not refresh output device.".to_owned();
+            }
+        }
+    }
+    pub(crate) fn effective_volume_percent(&self) -> u8 {
+        if self.state.playback.muted {
+            0
+        } else {
+            self.state.playback.volume_percent
+        }
+    }
+    pub(crate) fn apply_effective_volume_to_player(&mut self) {
+        let effective_volume = self.effective_volume_percent();
+        if let Some(player) = &mut self.player {
+            player.set_volume_percent(effective_volume);
+        }
+    }
+    pub(crate) fn set_volume_percent(&mut self, volume_percent: u8) {
+        let next_volume = volume_percent.clamp(0, 100);
+        let next_muted = next_volume == 0;
+        if self.state.playback.volume_percent == next_volume && self.state.playback.muted == next_muted {
+            return;
+        }
+
+        self.state.playback.volume_percent = next_volume;
+        self.state.playback.muted = next_muted;
+        self.apply_effective_volume_to_player();
+        self.status_message = if self.state.playback.muted {
+            "Volume muted.".to_owned()
+        } else {
+            format!("Volume: {next_volume}%.")
+        };
+        self.save_state_silently();
+    }
+    pub(crate) fn toggle_mute(&mut self) {
+        if self.state.playback.muted || self.state.playback.volume_percent == 0 {
+            if self.state.playback.volume_percent == 0 {
+                self.state.playback.volume_percent = 50;
+            }
+            self.state.playback.muted = false;
+            self.status_message = format!("Volume: {}%.", self.state.playback.volume_percent);
+        } else {
+            self.state.playback.muted = true;
+            self.status_message = "Volume muted.".to_owned();
+        }
+        self.apply_effective_volume_to_player();
+        self.save_state_silently();
+    }
+    pub(crate) fn adjust_volume(&mut self, delta_percent: i16) {
+        let current = if self.state.playback.muted {
+            0
+        } else {
+            self.state.playback.volume_percent as i16
+        };
+        let next = (current + delta_percent).clamp(0, 100) as u8;
+        self.set_volume_percent(next);
+    }
+    pub(crate) fn handle_top_panel_volume_wheel(&mut self, response: &egui::Response, context: &egui::Context) {
+        if !response.hovered() {
+            return;
+        }
+
+        let scroll_y = context.input(|input| input.raw_scroll_delta.y + input.smooth_scroll_delta.y);
+        if scroll_y.abs() < 0.5 {
+            return;
+        }
+
+        let steps = (scroll_y / 80.0).round() as i16;
+        let steps = if steps == 0 { scroll_y.signum() as i16 } else { steps };
+        self.adjust_volume(steps * 2);
+    }
+    pub(crate) fn seek_relative(&mut self, delta_seconds: f32) {
+        let Some(player) = self.player.as_ref() else {
+            return;
+        };
+
+        if !(player.is_playing() || player.is_paused()) {
+            return;
+        }
+
+        let current = self.displayed_playback_position_seconds();
+        let duration = self.displayed_playback_duration_seconds().max(current.max(0.0));
+        let next = (current + delta_seconds).clamp(0.0, duration.max(0.0));
+        self.seek_current(next);
+    }
+    pub(crate) fn update_playback_status(&mut self) {
+        if self.maybe_start_crossfade_to_next_track() {
+            return;
+        }
+
+        let finished = self
+            .player
+            .as_ref()
+            .map(AudioPlayer::has_finished)
+            .unwrap_or(false);
+
+        if finished && self.active_track_index.is_some() {
+            if self.state.playback.auto_advance || self.state.playback.repeat_mode != RepeatMode::Off {
+                self.play_next_track_with_crossfade(0.0);
+            } else {
+                self.active_track_index = None;
+                self.active_playlist_index = None;
+                self.active_track_path = None;
+                self.crossfade_started_for_path = None;
+            }
+        }
+    }
+    pub(crate) fn maybe_start_crossfade_to_next_track(&mut self) -> bool {
+        if !(self.state.playback.auto_advance || self.state.playback.repeat_mode != RepeatMode::Off)
+            || !self.state.playback.crossfade_enabled
+        {
+            return false;
+        }
+
+        let Some(player) = self.player.as_ref() else {
+            return false;
+        };
+        if !player.is_playing() {
+            return false;
+        }
+
+        let Some(active_path) = self.active_track_path.clone() else {
+            return false;
+        };
+        if self
+            .crossfade_started_for_path
+            .as_ref()
+            .map(|path| same_path(path, &active_path))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+
+        let Some(duration) = player.playback_duration_seconds() else {
+            return false;
+        };
+        let position = player.playback_position_seconds();
+        if duration <= 0.0 || position <= 0.25 {
+            return false;
+        }
+
+        let requested_fade = self.state.playback.crossfade_seconds.max(1) as f32;
+        let effective_fade = requested_fade.min((duration * 0.45).max(0.25));
+        let remaining = duration - position;
+
+        if remaining <= effective_fade {
+            self.crossfade_started_for_path = Some(active_path);
+            self.play_next_track_with_crossfade(effective_fade);
+            return true;
+        }
+
+        false
+    }
+    pub(crate) fn poll_output_device_change(&mut self) {
+        if self.last_output_check.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+
+        self.last_output_check = Instant::now();
+        let current_output = current_default_output_device_name();
+
+        if current_output != self.last_known_output_name {
+            self.detected_output_change = Some(current_output.clone());
+            self.status_message = format!(
+                "Output device changed to {current_output}. Refresh output to continue on the new device."
+            );
+        }
+    }
+}
