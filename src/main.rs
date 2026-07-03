@@ -1858,18 +1858,28 @@ impl AudioOrbitApp {
         self.prepare_track_playback(path, index, start_seconds, crossfade_seconds, false);
     }
 
-    fn cached_waveform_for_track(&self, index: Option<usize>, path: &Path) -> Option<(Vec<f32>, Vec<f32>)> {
+    fn cached_track_for_path(&self, index: Option<usize>, path: &Path) -> Option<&Track> {
         let playlist = self.current_playlist()?;
-        let track = index
+        index
             .and_then(|index| playlist.tracks.get(index))
             .filter(|track| same_path(&track.path, path))
-            .or_else(|| playlist.tracks.iter().find(|track| same_path(&track.path, path)))?;
+            .or_else(|| playlist.tracks.iter().find(|track| same_path(&track.path, path)))
+    }
+
+    fn cached_waveform_for_track(&self, index: Option<usize>, path: &Path) -> Option<(Vec<f32>, Vec<f32>)> {
+        let track = self.cached_track_for_path(index, path)?;
 
         if track.waveform.is_empty() || track.waveform_brightness.is_empty() {
             None
         } else {
             Some((track.waveform.clone(), track.waveform_brightness.clone()))
         }
+    }
+
+    fn known_duration_for_track(&self, index: Option<usize>, path: &Path) -> Option<f32> {
+        self.cached_track_for_path(index, path)
+            .and_then(|track| track.metadata.duration_seconds)
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
     }
 
     fn prepare_track_playback(
@@ -1888,6 +1898,7 @@ impl AudioOrbitApp {
         let settings = self.current_settings();
         let playlist_index = self.state.selected_playlist_index;
         let cached_waveform = self.cached_waveform_for_track(index, &path);
+        let known_duration_seconds = self.known_duration_for_track(index, &path);
 
         if !settings.skip_silence_enabled {
             self.pending_prepared_track_receiver = None;
@@ -1900,6 +1911,7 @@ impl AudioOrbitApp {
                     settings,
                     start_seconds,
                     cached_waveform,
+                    known_duration_seconds,
                     crossfade_seconds,
                 );
 
@@ -2171,12 +2183,36 @@ impl AudioOrbitApp {
     }
 
     fn seek_current(&mut self, seconds: f32) {
+        let settings = self
+            .player
+            .as_ref()
+            .and_then(AudioPlayer::current_settings)
+            .unwrap_or_else(|| self.current_settings());
+        if settings.skip_silence_enabled {
+            let Some(path) = self.active_track_path.clone() else {
+                return;
+            };
+            self.waveform_drag_position_seconds = None;
+            self.prepare_track_playback(path, self.active_track_index, seconds, 0.0, false);
+            return;
+        }
+
         let cached_waveform = self.current_waveform_for_seek();
+        let known_duration_seconds = self
+            .last_playback
+            .as_ref()
+            .map(|playback| playback.original_duration_seconds)
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+            .or_else(|| {
+                self.active_track_path
+                    .as_ref()
+                    .and_then(|path| self.known_duration_for_track(self.active_track_index, path))
+            });
         let Some(player) = &mut self.player else {
             return;
         };
 
-        match player.seek_current_with_cached_waveform(seconds, cached_waveform) {
+        match player.seek_current_with_cached_waveform(seconds, cached_waveform, known_duration_seconds) {
             Ok(Some(info)) => {
                 self.status_message = format!("Seeked to {}.", format_duration(seconds));
                 self.store_playback_metadata(&info);
@@ -4153,6 +4189,9 @@ impl AudioOrbitApp {
                     if self.dragging_radio_index == Some(index) && radio_drop_target_for_paint.is_some() {
                         paint_dragged_row_fade(ui, row_response.response.rect);
                     }
+                    if visible_row_index == 0 && radio_drop_target_for_paint == Some(index) {
+                        paint_list_edge_separator(ui, row_response.response.rect, row_width, false);
+                    }
                     if row_response.response.secondary_clicked() || context_response.secondary_clicked() {
                         self.state.selected_radio_index = Some(index);
                         self.radio_selection_was_user_set = true;
@@ -4187,6 +4226,8 @@ impl AudioOrbitApp {
                     if visible_row_index + 1 < visible_station_len {
                         let separator_drop_target = next_visible_station_index.unwrap_or(index + 1);
                         paint_list_separator(ui, row_width, radio_drop_target_for_paint == Some(separator_drop_target));
+                    } else if radio_drop_target_for_paint == Some(station_count) {
+                        paint_list_edge_separator(ui, row_response.response.rect, row_width, true);
                     }
                 }
             });
@@ -4700,6 +4741,9 @@ impl AudioOrbitApp {
                     if self.dragging_track_index == Some(index) && track_drop_target_for_paint.is_some() {
                         paint_dragged_row_fade(ui, row_response.response.rect);
                     }
+                    if visible_row_index == 0 && track_drop_target_for_paint == Some(index) {
+                        paint_list_edge_separator(ui, row_response.response.rect, row_width, false);
+                    }
                     if row_response.response.secondary_clicked() || context_response.secondary_clicked() {
                         self.selected_track_index = Some(index);
                     }
@@ -4716,6 +4760,8 @@ impl AudioOrbitApp {
                     if visible_row_index + 1 < visible_track_len {
                         let separator_drop_target = next_visible_track_index.unwrap_or(index + 1);
                         paint_list_separator(ui, row_width, track_drop_target_for_paint == Some(separator_drop_target));
+                    } else if track_drop_target_for_paint == Some(track_count) {
+                        paint_list_edge_separator(ui, row_response.response.rect, row_width, true);
                     }
                 }
 
@@ -6220,28 +6266,37 @@ fn paint_sticky_folder_header(
 
 fn paint_dragged_row_fade(ui: &egui::Ui, rect: egui::Rect) {
     let painter = ui.painter();
-    painter.rect_filled(rect.shrink(1.0), 4.0, egui::Color32::from_black_alpha(150));
+    painter.rect_filled(rect, 4.0, egui::Color32::from_black_alpha(150));
     painter.rect_stroke(
-        rect.shrink(1.0),
+        rect,
         4.0,
         egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color.linear_multiply(0.70)),
         egui::StrokeKind::Inside,
     );
 }
 
-fn paint_list_separator(ui: &mut egui::Ui, width: f32, highlighted: bool) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
+fn paint_list_separator_line(ui: &egui::Ui, left: f32, right: f32, y: f32, highlighted: bool) {
     let color = if highlighted {
         egui::Color32::from_rgb(78, 148, 255)
     } else {
         ui.visuals().widgets.noninteractive.bg_stroke.color
     };
     let stroke_width = if highlighted { 2.0 } else { 1.0 };
-    let y = rect.center().y.round() + 0.5;
+    let y = y.round() + 0.5;
     ui.painter().line_segment(
-        [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+        [egui::pos2(left, y), egui::pos2(right, y)],
         egui::Stroke::new(stroke_width, color),
     );
+}
+
+fn paint_list_separator(ui: &mut egui::Ui, width: f32, highlighted: bool) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
+    paint_list_separator_line(ui, rect.left(), rect.right(), rect.center().y, highlighted);
+}
+
+fn paint_list_edge_separator(ui: &egui::Ui, row_rect: egui::Rect, width: f32, after: bool) {
+    let y = if after { row_rect.bottom() } else { row_rect.top() };
+    paint_list_separator_line(ui, row_rect.left(), row_rect.left() + width, y, true);
 }
 
 fn draw_radio_waveform_strip(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egui::Response {

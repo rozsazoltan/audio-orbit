@@ -891,12 +891,14 @@ impl AudioPlayer {
         settings: DspSettings,
         start_seconds: f32,
         cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
+        known_duration_seconds: Option<f32>,
     ) -> Result<PlaybackInfo> {
         self.play_file_streaming_with_cached_waveform_and_crossfade(
             path,
             settings,
             start_seconds,
             cached_waveform,
+            known_duration_seconds,
             0.0,
         )
     }
@@ -907,6 +909,7 @@ impl AudioPlayer {
         settings: DspSettings,
         start_seconds: f32,
         cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
+        known_duration_seconds: Option<f32>,
         crossfade_seconds: f32,
     ) -> Result<PlaybackInfo> {
         if settings.skip_silence_enabled {
@@ -929,7 +932,10 @@ impl AudioPlayer {
             anyhow::bail!("the selected audio file reported an invalid sample rate");
         }
 
-        let total_duration = decoder.total_duration();
+        let total_duration = known_duration_seconds
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+            .map(Duration::from_secs_f32)
+            .or_else(|| decoder.total_duration());
         let (waveform, waveform_brightness) = cached_waveform.unwrap_or_default();
         let seek_to = Duration::from_secs_f32(start_seconds);
         let crossfade_seconds = crossfade_seconds.max(0.0);
@@ -1148,6 +1154,7 @@ impl AudioPlayer {
         &mut self,
         seconds: f32,
         cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
+        known_duration_seconds: Option<f32>,
     ) -> Result<Option<PlaybackInfo>> {
         let Some(path) = self.current_path.clone() else {
             return Ok(None);
@@ -1158,7 +1165,7 @@ impl AudioPlayer {
 
         if !settings.skip_silence_enabled {
             return self
-                .play_file_streaming_with_cached_waveform(&path, settings, seconds, cached_waveform)
+                .play_file_streaming_with_cached_waveform(&path, settings, seconds, cached_waveform, known_duration_seconds)
                 .map(Some);
         }
 
@@ -1240,6 +1247,10 @@ impl AudioPlayer {
 
     pub fn current_start_offset_seconds(&self) -> f32 {
         self.current_start_offset_seconds
+    }
+
+    pub fn current_settings(&self) -> Option<DspSettings> {
+        self.current_settings
     }
 
     fn play_processed_samples(
