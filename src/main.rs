@@ -1553,20 +1553,6 @@ impl AudioOrbitApp {
         from != to && from + 1 != to
     }
 
-    fn current_track_drop_target_is_valid(&self) -> bool {
-        self.dragging_track_index
-            .zip(self.track_drop_target_index)
-            .map(|(from, to)| Self::valid_drop_target(from, to))
-            .unwrap_or(false)
-    }
-
-    fn current_radio_drop_target_is_valid(&self) -> bool {
-        self.dragging_radio_index
-            .zip(self.radio_drop_target_index)
-            .map(|(from, to)| Self::valid_drop_target(from, to))
-            .unwrap_or(false)
-    }
-
     fn restore_track_selection_after_reorder(&mut self, selected_path: Option<PathBuf>) {
         if let Some(selected_path) = selected_path {
             if let Some(index) = self
@@ -4353,7 +4339,13 @@ impl AudioOrbitApp {
         if self.show_track_search {
             ui.horizontal(|ui| {
                 ui.label(ui_icons::icon(Icon::Search));
-                let response = ui.text_edit_singleline(&mut self.track_search_query);
+
+                let reserved_controls_width = 352.0;
+                let search_input_width = (ui.available_width() - reserved_controls_width).clamp(140.0, 360.0);
+                let response = ui.add_sized(
+                    egui::vec2(search_input_width, ui.spacing().interact_size.y),
+                    egui::TextEdit::singleline(&mut self.track_search_query).hint_text("Search tracks or folders"),
+                );
                 if self.focus_track_search {
                     response.request_focus();
                     self.focus_track_search = false;
@@ -4363,23 +4355,20 @@ impl AudioOrbitApp {
                 }
 
                 let can_jump = !visible_indexes.is_empty() && !self.track_search_query.trim().is_empty();
-                if ui
-                    .add_enabled(can_jump, egui::Button::new(ui_icons::label(Icon::ArrowDown, "Next result")))
-                    .clicked()
-                {
+                if search_icon_text_button(ui, can_jump, Icon::ArrowDown, "Next").clicked() {
                     let next = visible_indexes[self.search_cursor % visible_indexes.len()];
                     self.selected_track_index = Some(next);
                     self.search_cursor = (self.search_cursor + 1) % visible_indexes.len().max(1);
                 }
 
-                if ui.button(ui_icons::label(Icon::X, "Clear")).clicked() {
+                if search_icon_text_button(ui, true, Icon::X, "Clear").clicked() {
                     self.track_search_query.clear();
                     self.search_cursor = 0;
                 }
                 ui.separator();
                 if ui
-                    .checkbox(&mut self.search_playback_filtered_only, "Play results only")
-                    .on_hover_text("When enabled, Next/auto-play stays inside the current search results. Turn it off to keep normal playlist playback while searching.")
+                    .checkbox(&mut self.search_playback_filtered_only, "Play results")
+                    .on_hover_text("When enabled, Next/auto-play stays inside the current search results until search is closed. Turn it off to keep normal playlist playback while searching.")
                     .changed()
                 {
                     self.state.ui.search_playback_filtered_only = self.search_playback_filtered_only;
@@ -4398,14 +4387,13 @@ impl AudioOrbitApp {
             if self.state.playback.repeat_mode == RepeatMode::Selection {
                 let repeat_order = if self.state.playback.shuffle_enabled { "random playback" } else { "playlist order" };
                 let helper = format!("Repeat selection mode: tick tracks or whole folders for {repeat_order}.");
-                let response = render_ellipsized_single_line(
+                let _ = render_ellipsized_single_line(
                     ui,
                     &helper,
                     helper_width,
                     egui::TextStyle::Small.resolve(ui.style()),
                     ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.78),
                 );
-                response.on_hover_text(helper);
             } else {
                 ui.allocate_space(egui::vec2(helper_width, 18.0));
             }
@@ -5974,6 +5962,59 @@ fn clean_radio_metadata_value(value: &str) -> String {
 }
 
 
+fn search_icon_text_button(ui: &mut egui::Ui, enabled: bool, icon: Icon, text: &str) -> egui::Response {
+    let icon_text = ui_icons::icon(icon);
+    let icon_font = egui::FontId::proportional(14.0);
+    let text_font = egui::TextStyle::Button.resolve(ui.style());
+    let button_height = ui.spacing().interact_size.y;
+    let horizontal_padding = ui.spacing().button_padding.x.max(6.0);
+    let icon_width = text_width(
+        ui,
+        &icon_text,
+        icon_font.clone(),
+        ui.visuals().widgets.inactive.fg_stroke.color,
+    ).ceil();
+    let text_width = text_width(
+        ui,
+        text,
+        text_font.clone(),
+        ui.visuals().widgets.inactive.fg_stroke.color,
+    ).ceil();
+    let icon_gap = 5.0;
+    let button_width = (horizontal_padding * 2.0 + icon_width + icon_gap + text_width).ceil().max(44.0);
+
+    let response = ui.add_enabled(
+        enabled,
+        egui::Button::new("").min_size(egui::vec2(button_width, button_height)),
+    );
+    let visuals = ui.style().interact(&response);
+    let text_color = if enabled {
+        visuals.fg_stroke.color
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    let icon_left = response.rect.left() + horizontal_padding;
+    let text_left = icon_left + icon_width + icon_gap;
+    let center_y = response.rect.center().y;
+
+    ui.painter().text(
+        egui::pos2(icon_left, center_y),
+        egui::Align2::LEFT_CENTER,
+        icon_text,
+        icon_font,
+        text_color,
+    );
+    ui.painter().text(
+        egui::pos2(text_left, center_y),
+        egui::Align2::LEFT_CENTER,
+        text,
+        text_font,
+        text_color,
+    );
+
+    response
+}
+
 fn render_ellipsized_single_line(
     ui: &mut egui::Ui,
     value: &str,
@@ -6295,7 +6336,7 @@ fn paint_list_separator(ui: &mut egui::Ui, width: f32, highlighted: bool) {
 }
 
 fn paint_list_edge_separator(ui: &egui::Ui, row_rect: egui::Rect, width: f32, after: bool) {
-    let y = if after { row_rect.bottom() } else { row_rect.top() };
+    let y = if after { row_rect.bottom() } else { row_rect.top() - 1.0 };
     paint_list_separator_line(ui, row_rect.left(), row_rect.left() + width, y, true);
 }
 
