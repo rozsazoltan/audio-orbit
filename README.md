@@ -10,12 +10,12 @@
   - [Sound profiles](#sound-profiles)
   - [Backups](#backups)
   - [Radio recordings](#radio-recordings)
+  - [Updates](#updates)
 - [Get started](#get-started)
 - [Usage](#usage)
   - [Create a folder playlist](#create-a-folder-playlist)
   - [Play music](#play-music)
   - [Play internet radio](#play-internet-radio)
-  - [Copy the current radio song title](#copy-the-current-radio-song-title)
   - [Use repeat modes](#use-repeat-modes)
   - [Search tracks](#search-tracks)
   - [Manage Favorites](#manage-favorites)
@@ -82,6 +82,7 @@ Backups are ZIP files containing the full app state:
 - crossfade settings
 - silence skip settings
 - internet radio station list
+- update settings
 - UI layout settings
 
 Audio files themselves are not embedded in the backup. The backup stores library and playlist state, not your music collection.
@@ -93,11 +94,11 @@ Internet radio recordings are captured from the original stream bytes before vol
 
 Saved files use the stop-time based format `audio-orbit-records-yyyy-mm-dd-hh-mm-ss.mp3`. By default, recordings are saved next to the executable in `.audio-orbit-records/`. Right-click the microphone button to open the current recordings folder, or open/change it from **Settings > Recording**.
 
+### Updates
 
+Audio Orbit can check GitHub releases for newer Windows executable builds. Stable releases are checked by default, and prerelease builds can be included from **Settings > Updates**.
 
-
-
-
+On release builds, Audio Orbit performs a background update check at most once per hour. Manual checks are available from the Updates panel, which can also open the GitHub Releases page or download and install an available executable update.
 
 
 ## Get started
@@ -150,10 +151,6 @@ The top player bar keeps the current title left-aligned and truncates long title
 
 Open the Internet radio tab, paste a stream URL, optionally enter a readable station name, then double-click or use the station three-dot menu to play it. If the name is empty, Audio Orbit tries to read it from the stream. Radio rows use the same left-aligned list layout, search behavior, scrollbar gutter, favorite marking, and Details modal style as local tracks. The Radio tab hides local-only playback options such as shuffle, repeat, auto-play next, crossfade, playback transitions, and silence skipping, but the active sound profile's orbit processing can still be applied to the live stream.
 
-### Copy the current radio song title
-
-When an internet radio station provides `StreamTitle` metadata, Audio Orbit shows it as the current radio title. Use the copy button in the top player bar while listening to radio to copy the current song title to the clipboard.
-
 ### Use repeat modes
 
 Audio Orbit supports three repeat modes:
@@ -182,7 +179,7 @@ Use the heart button next to a track to add or remove it from Favorites. Favorit
 
 Open **Settings**, then use **Backup and data**.
 
-Export creates a compressed ZIP backup of the full app state and suggests a timestamped filename such as `audio-orbit-backup-2026-06-30-09-15-42.zip`. Import restores the state from a ZIP backup.
+Export creates a compressed ZIP backup of the full app state. Import restores the state from a ZIP backup.
 
 ### Identify the current song
 
