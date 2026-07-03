@@ -5432,6 +5432,7 @@ impl AudioOrbitApp {
         Self::render_modal_section(ui, |ui| {
             self.render_profile_panel(ui);
         });
+        ui.add_space(2.0);
     }
 
     fn modal_outer_padding(screen_rect: egui::Rect) -> egui::Vec2 {
