@@ -9,7 +9,10 @@ use std::{
     fs::File,
     io::{self, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -21,6 +24,9 @@ const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 180;
 // decoded audio itself.
 const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 64;
 const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
+const MAX_DECODED_SOURCE_SAMPLES: usize = 48_000_000;
+const MAX_RENDERED_STEREO_SAMPLES: usize = 48_000_000;
+const DECODE_RESERVE_CHUNK: usize = 262_144;
 
 #[derive(Clone, Debug)]
 pub struct PlaybackInfo {
@@ -568,6 +574,138 @@ impl<S: Source<Item = f32>> Source for LiveRadioSource<S> {
     }
 }
 
+
+struct StreamingFileOrbitSource<S> {
+    inner: S,
+    settings: DspSettings,
+    input_channels: u16,
+    sample_rate: u32,
+    frame_index: u64,
+    output_frame: [f32; 2],
+    output_channel: usize,
+}
+
+impl<S: Source<Item = f32>> StreamingFileOrbitSource<S> {
+    fn new(inner: S, settings: DspSettings) -> Self {
+        let input_channels = inner.channels().max(1);
+        let sample_rate = inner.sample_rate().max(1);
+        Self {
+            inner,
+            settings,
+            input_channels,
+            sample_rate,
+            frame_index: 0,
+            output_frame: [0.0, 0.0],
+            output_channel: 2,
+        }
+    }
+
+    fn read_input_frame(&mut self) -> Option<([f32; 2], f32)> {
+        let channels = self.input_channels.max(1) as usize;
+        let mut sum = 0.0_f32;
+        let mut count = 0usize;
+        let mut left = 0.0_f32;
+        let mut right = 0.0_f32;
+
+        for channel in 0..channels {
+            match self.inner.next() {
+                Some(sample) => {
+                    let sample = sample.clamp(-1.0, 1.0);
+                    if channel == 0 {
+                        left = sample;
+                    } else if channel == 1 {
+                        right = sample;
+                    }
+                    sum += sample;
+                    count += 1;
+                }
+                None if count == 0 => return None,
+                None => break,
+            }
+        }
+
+        if count == 0 {
+            None
+        } else {
+            if count == 1 {
+                right = left;
+            }
+            Some(([left, right], sum / count as f32))
+        }
+    }
+
+    fn process_frame(&mut self, stereo: [f32; 2], mono: f32) -> [f32; 2] {
+        let output_level = self.settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
+        if !self.settings.orbit_enabled {
+            return [
+                soft_limit_audio(stereo[0] * output_level),
+                soft_limit_audio(stereo[1] * output_level),
+            ];
+        }
+
+        let width = self.settings.stereo_width_percent.min(100) as f32 / 100.0;
+        let speed = self.settings.orbit_speed_percent.clamp(10, 200) as f32 / 100.0;
+        let time = self.frame_index as f32 / self.sample_rate as f32;
+        let pan = (2.0 * PI * 0.20 * speed * time).sin() * width;
+        let angle = (pan.clamp(-1.0, 1.0) + 1.0) * PI / 4.0;
+        let mut left_gain = angle.cos();
+        let mut right_gain = angle.sin();
+
+        if matches!(self.settings.mode, crate::dsp::OrbitMode::VirtualEightDirectionOrbit) {
+            let depth = (2.0 * PI * 0.20 * speed * time).cos();
+            let rear = (-depth).max(0.0) * (self.settings.depth_cue_percent.min(100) as f32 / 100.0);
+            let shade = 1.0 - rear * 0.22;
+            left_gain *= shade;
+            right_gain *= shade;
+        }
+
+        [
+            soft_limit_audio(mono * left_gain * output_level),
+            soft_limit_audio(mono * right_gain * output_level),
+        ]
+    }
+}
+
+impl<S: Source<Item = f32>> Iterator for StreamingFileOrbitSource<S> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.output_channel < 2 {
+            let sample = self.output_frame[self.output_channel];
+            self.output_channel += 1;
+            return Some(sample);
+        }
+
+        let (stereo, mono) = self.read_input_frame()?;
+        self.output_frame = self.process_frame(stereo, mono);
+        self.output_channel = 1;
+        self.frame_index = self.frame_index.saturating_add(1);
+        Some(self.output_frame[0])
+    }
+}
+
+impl<S: Source<Item = f32>> Source for StreamingFileOrbitSource<S> {
+    fn current_frame_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> u16 {
+        2
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
+    }
+}
+
+fn soft_limit_audio(value: f32) -> f32 {
+    (value / (1.0 + value.abs() * 0.10)).clamp(-1.0, 1.0)
+}
+
 fn soft_limit_radio(value: f32) -> f32 {
     (value / (1.0 + value.abs() * 0.12)).clamp(-1.0, 1.0)
 }
@@ -638,8 +776,9 @@ impl AudioPlayer {
     ) -> Result<()> {
         let response = reqwest::blocking::Client::builder()
             .user_agent("Audio-Orbit-Radio")
+            .connect_timeout(Duration::from_secs(6))
             .build()?
-            .get(url)
+            .get(&url)
             .send()
             .with_context(|| format!("failed to open internet radio stream: {url}"))?
             .error_for_status()
@@ -682,7 +821,7 @@ impl AudioPlayer {
         self.current_start_offset_seconds = 0.0;
         self.current_path = None;
         self.current_settings = None;
-        self.current_radio_url = Some(url.to_owned());
+        self.current_radio_url = Some(url);
 
         Ok(())
     }
@@ -878,6 +1017,10 @@ impl AudioPlayer {
                 RadioVisualizerBar {
                     peak: normalized.clamp(0.0, 1.0),
                 }
+                Some(RadioVisualizerBar {
+                    age_seconds: (requested_points - 1 - slot) as f32 * bucket_seconds,
+                    peak: shaped,
+                })
             })
             .collect();
 
@@ -1109,6 +1252,144 @@ impl AudioPlayer {
         )?;
 
         Ok(playback_info(&prepared.path, prepared.render_info))
+    }
+
+    pub fn play_file_streaming_from(
+        &mut self,
+        path: &Path,
+        settings: DspSettings,
+        start_seconds: f32,
+    ) -> Result<PlaybackInfo> {
+        let file = File::open(path)
+            .with_context(|| format!("failed to open audio file: {}", path.display()))?;
+        let decoder = Decoder::new(BufReader::new(file))
+            .with_context(|| format!("failed to decode audio file: {}", path.display()))?;
+
+        let input_channels = decoder.channels().max(1);
+        let sample_rate = decoder.sample_rate().max(1);
+        let original_duration_seconds = decoder
+            .total_duration()
+            .map(|duration| duration.as_secs_f32())
+            .unwrap_or(0.0);
+        let start_seconds = start_seconds.max(0.0).min(original_duration_seconds.max(start_seconds.max(0.0)));
+        let remaining_duration_seconds = if original_duration_seconds > 0.0 {
+            (original_duration_seconds - start_seconds).max(0.0)
+        } else {
+            0.0
+        };
+
+        self.stop();
+        let source = decoder
+            .convert_samples::<f32>()
+            .skip_duration(Duration::from_secs_f32(start_seconds));
+        let source = StreamingFileOrbitSource::new(source, settings);
+        let sink = Sink::try_new(&self.stream_handle)
+            .context("failed to create audio playback sink")?;
+        sink.set_volume(self.volume_gain());
+        sink.append(source);
+        sink.play();
+
+        self.sink = Some(sink);
+        self.started_at = Some(Instant::now());
+        self.paused_at = None;
+        self.accumulated_pause = Duration::ZERO;
+        self.current_duration = if remaining_duration_seconds > 0.0 {
+            Some(Duration::from_secs_f32(remaining_duration_seconds))
+        } else {
+            None
+        };
+        self.current_start_offset_seconds = start_seconds;
+        self.current_path = Some(path.to_path_buf());
+        self.current_settings = Some(settings);
+        self.current_radio_url = None;
+
+        Ok(PlaybackInfo {
+            path: path.to_path_buf(),
+            original_duration_seconds,
+            rendered_duration_seconds: remaining_duration_seconds,
+            input_channels,
+            sample_rate,
+            size_bytes: fs::metadata(path).ok().map(|metadata| metadata.len()),
+            waveform: Vec::new(),
+            waveform_brightness: Vec::new(),
+            silence_ranges: Vec::new(),
+        })
+    }
+
+    pub fn analyze_file_waveform_with_cancel(
+        path: PathBuf,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<PlaybackInfo> {
+        let cancel_ref = cancel.as_deref();
+        let file = File::open(&path)
+            .with_context(|| format!("failed to open audio file for waveform analysis: {}", path.display()))?;
+        let decoder = Decoder::new(BufReader::new(file))
+            .with_context(|| format!("failed to decode audio file for waveform analysis: {}", path.display()))?;
+
+        let input_channels = decoder.channels().max(1);
+        let channels = input_channels as usize;
+        let sample_rate = decoder.sample_rate().max(1);
+        let reported_duration = decoder.total_duration().map(|duration| duration.as_secs_f32()).unwrap_or(0.0);
+        let frame_limit = MAX_DECODED_SOURCE_SAMPLES / channels.max(1);
+        let mut mono = Vec::new();
+        let mut frame_accumulator = 0.0_f32;
+        let mut channel_index = 0usize;
+
+        for sample in decoder.convert_samples::<f32>() {
+            if (mono.len() & 16_383) == 0 && is_cancelled(cancel_ref) {
+                anyhow::bail!("waveform analysis was cancelled");
+            }
+            frame_accumulator += sample.clamp(-1.0, 1.0);
+            channel_index += 1;
+            if channel_index < channels {
+                continue;
+            }
+
+            if mono.len() >= frame_limit {
+                anyhow::bail!(
+                    "the selected audio file is too large for safe waveform analysis ({} mono frames limit): {}",
+                    frame_limit,
+                    path.display()
+                );
+            }
+            if mono.len() == mono.capacity() {
+                let remaining = frame_limit.saturating_sub(mono.len());
+                let reserve = remaining.min(DECODE_RESERVE_CHUNK).max(1);
+                mono.try_reserve(reserve).map_err(|_| {
+                    anyhow::anyhow!(
+                        "not enough memory to analyze waveform safely without risking an allocator abort: {}",
+                        path.display()
+                    )
+                })?;
+            }
+
+            mono.push(frame_accumulator / channels as f32);
+            frame_accumulator = 0.0;
+            channel_index = 0;
+        }
+
+        if channel_index > 0 {
+            mono.push(frame_accumulator / channel_index as f32);
+        }
+
+        let original_duration_seconds = if reported_duration > 0.0 {
+            reported_duration
+        } else {
+            mono.len() as f32 / sample_rate as f32
+        };
+        let (waveform, waveform_brightness) = spectrum_waveform(&mono, sample_rate, 2048);
+
+        Ok(PlaybackInfo {
+            path,
+            original_duration_seconds,
+            rendered_duration_seconds: original_duration_seconds,
+            input_channels,
+            sample_rate,
+            size_bytes: None,
+            waveform,
+            waveform_brightness,
+            silence_ranges: Vec::new(),
+        })
     }
 
     pub fn play_file_with_orbit_from(
@@ -1382,13 +1663,13 @@ fn render_file_data(
     let decoder = Decoder::new(BufReader::new(file))
         .with_context(|| format!("failed to decode audio file: {}", path.display()))?;
 
-    let input_channels = decoder.channels();
+    let input_channels = decoder.channels().max(1);
     let sample_rate = decoder.sample_rate();
     if sample_rate == 0 {
         anyhow::bail!("the selected audio file reported an invalid sample rate");
     }
 
-    let input_samples: Vec<f32> = decoder.convert_samples::<f32>().collect();
+    let input_samples = decode_samples_with_memory_guard(decoder, path, cancel)?;
     if input_samples.is_empty() {
         anyhow::bail!("the selected audio file did not contain any decoded samples");
     }
@@ -1407,6 +1688,49 @@ fn render_file_data(
     }
 
     Ok((processed_samples, render_info, sample_rate))
+}
+
+fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel
+        .map(|flag| flag.load(Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
+fn decode_samples_with_memory_guard(
+    decoder: Decoder<BufReader<File>>,
+    path: &Path,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<f32>> {
+    let mut samples = Vec::new();
+
+    for sample in decoder.convert_samples::<f32>() {
+        if (samples.len() & 16_383) == 0 && is_cancelled(cancel) {
+            anyhow::bail!("playback preparation was cancelled");
+        }
+
+        if samples.len() >= MAX_DECODED_SOURCE_SAMPLES {
+            anyhow::bail!(
+                "the selected audio file is too large for the current in-memory decoder ({} decoded samples limit): {}",
+                MAX_DECODED_SOURCE_SAMPLES,
+                path.display()
+            );
+        }
+
+        if samples.len() == samples.capacity() {
+            let remaining = MAX_DECODED_SOURCE_SAMPLES.saturating_sub(samples.len());
+            let reserve = remaining.min(DECODE_RESERVE_CHUNK).max(1);
+            samples.try_reserve(reserve).map_err(|_| {
+                anyhow::anyhow!(
+                    "not enough memory to decode audio safely without risking an allocator abort: {}",
+                    path.display()
+                )
+            })?;
+        }
+
+        samples.push(sample.clamp(-1.0, 1.0));
+    }
+
+    Ok(samples)
 }
 
 fn playback_info(path: &Path, render_info: RenderInfo) -> PlaybackInfo {

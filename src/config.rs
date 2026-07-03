@@ -81,7 +81,9 @@ pub struct Track {
     pub group: String,
     #[serde(default)]
     pub metadata: TrackMetadata,
-    #[serde(default)]
+    // Runtime waveform cache. This is intentionally not serialized because thousands of tracks can
+    // turn the app state into a huge JSON file and make save/backup/update operations feel frozen.
+    #[serde(skip)]
     pub waveform: Vec<f32>,
     #[serde(default)]
     pub waveform_brightness: Vec<f32>,
@@ -582,6 +584,13 @@ impl Default for SavedState {
 }
 
 pub fn app_data_dir() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("AUDIO_ORBIT_APP_DATA_DIR")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return Some(path);
+    }
+
     std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join(".audio-orbit-data")))
