@@ -3961,7 +3961,7 @@ impl AudioOrbitApp {
                         radio_drag_source_rect = Some(row_response.response.rect);
                     }
                     if let Some(from) = self.dragging_radio_index {
-                        if context_response.hovered() {
+                        if row_response.response.hovered() || context_response.hovered() {
                             let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|position| position.y)).unwrap_or(row_response.response.rect.center().y);
                             let drop_after = pointer_y >= row_response.response.rect.center().y;
                             let to = if drop_after { index + 1 } else { index };
@@ -3975,7 +3975,7 @@ impl AudioOrbitApp {
                             }
                         }
                     }
-                    if context_response.hovered() && ui.input(|input| input.pointer.any_released()) {
+                    if (row_response.response.hovered() || context_response.hovered()) && ui.input(|input| input.pointer.any_released()) {
                         if let Some(from) = self.dragging_radio_index.take() {
                             let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|position| position.y)).unwrap_or(row_response.response.rect.center().y);
                             let to = if pointer_y >= row_response.response.rect.center().y { index + 1 } else { index };
@@ -4506,7 +4506,7 @@ impl AudioOrbitApp {
                         track_drag_source_rect = Some(row_response.response.rect);
                     }
                     if let Some(from) = self.dragging_track_index {
-                        if context_response.hovered() {
+                        if row_response.response.hovered() || context_response.hovered() {
                             let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|position| position.y)).unwrap_or(row_response.response.rect.center().y);
                             let drop_after = pointer_y >= row_response.response.rect.center().y;
                             let to = if drop_after { index + 1 } else { index };
@@ -4520,7 +4520,7 @@ impl AudioOrbitApp {
                             }
                         }
                     }
-                    if context_response.hovered() && ui.input(|input| input.pointer.any_released()) {
+                    if (row_response.response.hovered() || context_response.hovered()) && ui.input(|input| input.pointer.any_released()) {
                         if let Some(from) = self.dragging_track_index.take() {
                             let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|position| position.y)).unwrap_or(row_response.response.rect.center().y);
                             let to = if pointer_y >= row_response.response.rect.center().y { index + 1 } else { index };
@@ -6091,11 +6091,11 @@ fn paint_sticky_folder_header(
 
 fn paint_dragged_row_fade(ui: &egui::Ui, rect: egui::Rect) {
     let painter = ui.painter();
-    painter.rect_filled(rect.shrink(1.0), 4.0, egui::Color32::from_black_alpha(105));
+    painter.rect_filled(rect.shrink(1.0), 4.0, egui::Color32::from_black_alpha(150));
     painter.rect_stroke(
         rect.shrink(1.0),
         4.0,
-        egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color.linear_multiply(0.45)),
+        egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color.linear_multiply(0.70)),
         egui::StrokeKind::Inside,
     );
 }
@@ -6103,11 +6103,11 @@ fn paint_dragged_row_fade(ui: &egui::Ui, rect: egui::Rect) {
 fn paint_drop_indicator(ui: &egui::Ui, rect: egui::Rect, y: f32) {
     let color = egui::Color32::from_rgb(78, 148, 255);
     let y = y.round() + 0.5;
-    let left = rect.left() + 4.0;
-    let right = rect.right() - 4.0;
+    let left = rect.left();
+    let right = rect.right();
     ui.painter().line_segment(
         [egui::pos2(left, y), egui::pos2(right, y)],
-        egui::Stroke::new(2.0, color),
+        egui::Stroke::new(2.5, color),
     );
 }
 
