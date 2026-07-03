@@ -37,7 +37,7 @@ use std::{
 // appear instead of a solid high-frequency block.
 const RADIO_WAVEFORM_PIXELS_PER_SECOND: f32 = 30.0;
 const RADIO_WAVEFORM_BAR_PITCH_PIXELS: f32 = 3.0;
-const WAVEFORM_BAR_WIDTH_PIXELS: f32 = 1.35;
+const WAVEFORM_BAR_WIDTH_PIXELS: f32 = 1.0;
 const RADIO_WAVEFORM_MAX_VISIBLE_SECONDS: f32 = 180.0;
 const RADIO_METADATA_REFRESH_INTERVAL_SECONDS: u64 = 5;
 
@@ -1861,19 +1861,59 @@ impl AudioOrbitApp {
     }
 
     fn apply_current_profile_live(&mut self) {
+        let settings = self.current_settings();
+
+        if let Some(radio_index) = self.active_radio_index {
+            let Some(station) = self.state.radio_stations.get(radio_index).cloned() else {
+                return;
+            };
+            let crossfade_seconds = self.configured_manual_crossfade_seconds();
+            let play_result = {
+                let Some(player) = &mut self.player else {
+                    return;
+                };
+
+                if !(player.is_playing() || player.is_paused()) {
+                    return;
+                }
+
+                player.play_radio_stream_with_crossfade(&station.url, settings, crossfade_seconds)
+            };
+
+            match play_result {
+                Ok(()) => {
+                    self.active_tab = MainContentTab::Radio;
+                    self.active_radio_station_name = station.last_station_name.clone();
+                    self.active_radio_title = station.last_stream_title.clone();
+                    self.radio_started_at = Some(Instant::now());
+                    self.last_radio_title_lookup_at = Some(Instant::now());
+                    self.error_message = None;
+                    self.persist_playback_session();
+                    self.save_state_silently();
+                    self.start_radio_title_lookup(radio_index, station.url);
+                }
+                Err(error) => {
+                    self.error_message = Some(error.to_string());
+                }
+            }
+            return;
+        }
+
         let position = self.displayed_playback_position_seconds();
         let Some(path) = self.active_track_path.clone() else {
             return;
         };
-        let Some(player) = &self.player else {
-            return;
+        let (is_active, live_position_compensation) = {
+            let Some(player) = &self.player else {
+                return;
+            };
+            (player.is_playing() || player.is_paused(), player.is_playing())
         };
 
-        if !(player.is_playing() || player.is_paused()) {
+        if !is_active {
             return;
         }
 
-        let live_position_compensation = player.is_playing();
         self.prepare_track_playback(path, self.active_track_index, position, 0.0, live_position_compensation);
     }
 
@@ -3002,8 +3042,8 @@ impl AudioOrbitApp {
             let visible_seconds = (available_width / RADIO_WAVEFORM_PIXELS_PER_SECOND)
                 .clamp(1.0, RADIO_WAVEFORM_MAX_VISIBLE_SECONDS);
             let requested_points = (available_width / RADIO_WAVEFORM_BAR_PITCH_PIXELS)
-                .ceil()
-                .clamp(32.0, 900.0) as usize;
+                .floor()
+                .clamp(1.0, 900.0) as usize;
             let frame = self
                 .player
                 .as_ref()
@@ -5504,15 +5544,16 @@ fn draw_radio_waveform_strip(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) ->
     }
 
     let rendered_points = frame.bars.len().max(1);
-    let bar_pitch = rect.width() / rendered_points as f32;
-    let draw_width = WAVEFORM_BAR_WIDTH_PIXELS.min(bar_pitch.max(1.0));
+    let bar_pitch = (rect.width() / rendered_points as f32).max(WAVEFORM_BAR_WIDTH_PIXELS + 1.0);
+    let draw_width = WAVEFORM_BAR_WIDTH_PIXELS;
     let center_y = rect.center().y.round();
     let live_color = egui::Color32::from_rgb(78, 148, 255);
+    let start_x = rect.left().round();
 
     for (bar_index, bar) in frame.bars.iter().enumerate() {
-        let x_center = (rect.left() + (bar_index as f32 + 0.5) * bar_pitch).round();
-        if x_center < rect.left() || x_center > rect.right() {
-            continue;
+        let x = (start_x + (bar_index as f32 * bar_pitch)).round();
+        if x + draw_width > rect.right() + 0.5 {
+            break;
         }
 
         let value = bar.peak.clamp(0.0, 1.0);
@@ -5525,8 +5566,8 @@ fn draw_radio_waveform_strip(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) ->
             .max(1.5)
             .min(rect.height() - 5.0);
         let bar_rect = egui::Rect::from_min_max(
-            egui::pos2(x_center - draw_width * 0.5, center_y - height * 0.5),
-            egui::pos2(x_center + draw_width * 0.5, center_y + height * 0.5),
+            egui::pos2(x, center_y - height * 0.5),
+            egui::pos2(x + draw_width, center_y + height * 0.5),
         );
         painter.rect_filled(bar_rect, 0.0, live_color);
     }
@@ -5555,12 +5596,12 @@ fn draw_waveform_seek(
     let progress = progress.clamp(0.0, 1.0);
     let progress_x = rect.left() + rect.width() * progress;
     let target_points = (rect.width() / RADIO_WAVEFORM_BAR_PITCH_PIXELS)
-        .ceil()
-        .clamp(32.0, 2048.0) as usize;
+        .floor()
+        .clamp(1.0, 2048.0) as usize;
     let step = (waveform.len() as f32 / target_points.max(1) as f32).ceil().max(1.0) as usize;
     let rendered_points = ((waveform.len() + step - 1) / step).max(1);
-    let bar_pitch = rect.width() / rendered_points as f32;
-    let draw_width = WAVEFORM_BAR_WIDTH_PIXELS.min(bar_pitch.max(1.0));
+    let bar_pitch = (rect.width() / rendered_points as f32).max(WAVEFORM_BAR_WIDTH_PIXELS + 1.0);
+    let draw_width = WAVEFORM_BAR_WIDTH_PIXELS;
     let peak = waveform.iter().copied().fold(0.0_f32, f32::max).max(0.08);
     let mut sorted = waveform.to_vec();
     sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
@@ -5572,20 +5613,21 @@ fn draw_waveform_seek(
     let played_color = egui::Color32::from_rgb(78, 148, 255);
     let silence_color = egui::Color32::from_rgb(238, 194, 74);
     let center_y = rect.center().y.round();
+    let start_x = rect.left().round();
 
     for (bar_index, chunk) in waveform.chunks(step).enumerate() {
         let value = chunk.iter().copied().fold(0.0_f32, f32::max);
         let normalized = ((value - noise_floor) / dynamic_range).clamp(0.018, 1.0);
         let eased = normalized.powf(1.08);
-        let x_center = (rect.left() + (bar_index as f32 + 0.5) * bar_pitch).round();
-        if x_center < rect.left() || x_center > rect.right() {
-            continue;
+        let x = (start_x + (bar_index as f32 * bar_pitch)).round();
+        if x + draw_width > rect.right() + 0.5 {
+            break;
         }
 
         let height = (rect.height() * 0.84 * eased).max(2.0).min(rect.height() - 4.0);
         let bar_rect = egui::Rect::from_min_max(
-            egui::pos2(x_center - draw_width * 0.5, center_y - height * 0.5),
-            egui::pos2(x_center + draw_width * 0.5, center_y + height * 0.5),
+            egui::pos2(x, center_y - height * 0.5),
+            egui::pos2(x + draw_width, center_y + height * 0.5),
         );
         let bar_start_seconds = if duration_seconds > 0.0 {
             (bar_index * step) as f32 / waveform.len().max(1) as f32 * duration_seconds
@@ -5602,7 +5644,7 @@ fn draw_waveform_seek(
 
         let color = if is_silence {
             silence_color
-        } else if x_center <= progress_x {
+        } else if x <= progress_x {
             played_color
         } else {
             unplayed_color
