@@ -3812,7 +3812,15 @@ impl AudioOrbitApp {
                 .as_ref()
                 .map(|playback| playback.original_duration_seconds)
                 .unwrap_or(duration);
-            let response = draw_waveform_seek(ui, waveform, waveform_brightness, progress, silence_ranges, marker_duration);
+            let response = draw_waveform_seek(
+                ui,
+                waveform,
+                waveform_brightness,
+                progress,
+                silence_ranges,
+                marker_duration,
+                waveform.is_empty(),
+            );
             if duration > 0.0 {
                 let pointer_position = response.interact_pointer_pos();
                 if response.drag_started() || response.dragged() {
@@ -3843,7 +3851,7 @@ impl AudioOrbitApp {
                 }
             }
         } else {
-            let response = draw_waveform_seek(ui, &[], &[], 0.0, &[], 0.0);
+            let response = draw_waveform_seek(ui, &[], &[], 0.0, &[], 0.0, false);
             response.on_hover_text("No track is currently playing.");
         }
 
@@ -7022,6 +7030,7 @@ fn draw_waveform_seek(
     progress: f32,
     silence_ranges: &[(f32, f32)],
     duration_seconds: f32,
+    show_loading_wave: bool,
 ) -> egui::Response {
     let desired_size = egui::vec2(ui.available_width().max(96.0).floor(), 46.0);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click_and_drag());
@@ -7030,6 +7039,10 @@ fn draw_waveform_seek(
     painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(210));
 
     if waveform.is_empty() {
+        if show_loading_wave {
+            paint_waveform_loading_wave(ui, rect);
+            ui.ctx().request_repaint_after(Duration::from_millis(33));
+        }
         return response;
     }
 
@@ -7101,6 +7114,55 @@ fn draw_waveform_seek(
     }
 
     response
+}
+
+
+fn paint_waveform_loading_wave(ui: &egui::Ui, rect: egui::Rect) {
+    let painter = ui.painter();
+    let time = ui.input(|input| input.time) as f32;
+    let center_y = rect.center().y.round();
+    let left = rect.left() + 10.0;
+    let right = rect.right() - 10.0;
+    let width = (right - left).max(1.0);
+    let amplitude = (rect.height() * 0.18).clamp(4.0, 10.0);
+    let points = 72usize;
+    let base_color = egui::Color32::from_rgb(72, 86, 108).linear_multiply(0.72);
+    let accent_color = egui::Color32::from_rgb(78, 148, 255).linear_multiply(0.85);
+
+    let mut previous: Option<egui::Pos2> = None;
+    for index in 0..points {
+        let t = index as f32 / (points.saturating_sub(1).max(1)) as f32;
+        let x = left + width * t;
+        let phase = t * std::f32::consts::TAU * 2.2 + time * 3.2;
+        let envelope = (std::f32::consts::PI * t).sin().clamp(0.0, 1.0);
+        let y = center_y + phase.sin() * amplitude * envelope;
+        let current = egui::pos2(x, y);
+        if let Some(previous) = previous {
+            painter.line_segment([previous, current], egui::Stroke::new(1.0, base_color));
+        }
+        previous = Some(current);
+    }
+
+    let pulse_center = (time * 0.42).fract();
+    let pulse_half_width = 0.18;
+    let mut previous: Option<egui::Pos2> = None;
+    for index in 0..points {
+        let t = index as f32 / (points.saturating_sub(1).max(1)) as f32;
+        let distance = (t - pulse_center).abs().min((t - pulse_center + 1.0).abs()).min((t - pulse_center - 1.0).abs());
+        if distance > pulse_half_width {
+            previous = None;
+            continue;
+        }
+        let x = left + width * t;
+        let phase = t * std::f32::consts::TAU * 2.2 + time * 3.2;
+        let envelope = (std::f32::consts::PI * t).sin().clamp(0.0, 1.0);
+        let y = center_y + phase.sin() * amplitude * envelope;
+        let current = egui::pos2(x, y);
+        if let Some(previous) = previous {
+            painter.line_segment([previous, current], egui::Stroke::new(1.25, accent_color));
+        }
+        previous = Some(current);
+    }
 }
 
 fn format_track_metadata_compact(track: &Track) -> String {
