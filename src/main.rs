@@ -3821,6 +3821,8 @@ impl AudioOrbitApp {
         let mut play_radio_index: Option<usize> = None;
         let mut favorite_toggle_index: Option<usize> = None;
         let mut reorder_radio_station: Option<(usize, usize)> = None;
+        let mut radio_drag_source_rect: Option<egui::Rect> = None;
+        let mut radio_drop_indicator: Option<(egui::Rect, f32)> = None;
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -3956,16 +3958,22 @@ impl AudioOrbitApp {
                         self.dragging_radio_index = Some(index);
                     }
                     if self.dragging_radio_index == Some(index) {
-                        paint_grabbed_row(ui, row_response.response.rect);
-                    } else if self.dragging_radio_index.is_some() && context_response.hovered() {
-                        let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|position| position.y)).unwrap_or(row_response.response.rect.center().y);
-                        let drop_after = pointer_y >= row_response.response.rect.center().y;
-                        let y = if drop_after {
-                            row_response.response.rect.bottom()
-                        } else {
-                            row_response.response.rect.top()
-                        };
-                        paint_drop_indicator(ui, row_response.response.rect, y);
+                        radio_drag_source_rect = Some(row_response.response.rect);
+                    }
+                    if let Some(from) = self.dragging_radio_index {
+                        if context_response.hovered() {
+                            let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|position| position.y)).unwrap_or(row_response.response.rect.center().y);
+                            let drop_after = pointer_y >= row_response.response.rect.center().y;
+                            let to = if drop_after { index + 1 } else { index };
+                            if from != to && from + 1 != to {
+                                let y = if drop_after {
+                                    row_response.response.rect.bottom()
+                                } else {
+                                    row_response.response.rect.top()
+                                };
+                                radio_drop_indicator = Some((row_response.response.rect, y));
+                            }
+                        }
                     }
                     if context_response.hovered() && ui.input(|input| input.pointer.any_released()) {
                         if let Some(from) = self.dragging_radio_index.take() {
@@ -4012,6 +4020,13 @@ impl AudioOrbitApp {
                     }
                 }
             });
+
+        if let Some((rect, y)) = radio_drop_indicator {
+            if let Some(source_rect) = radio_drag_source_rect {
+                paint_dragged_row_fade(ui, source_rect);
+            }
+            paint_drop_indicator(ui, rect, y);
+        }
 
         if !ui.input(|input| input.pointer.primary_down()) {
             self.dragging_radio_index = None;
@@ -4240,6 +4255,8 @@ impl AudioOrbitApp {
         let row_width = (ui.available_width() - 22.0).max(320.0);
         let scroll_height = ui.available_height();
         let mut reorder_track: Option<(usize, usize)> = None;
+        let mut track_drag_source_rect: Option<egui::Rect> = None;
+        let mut track_drop_indicator: Option<(egui::Rect, f32)> = None;
         let scroll_output = egui::ScrollArea::vertical()
             .id_salt("track_list_scroll")
             .vertical_scroll_offset(self.state.ui.playlist_scroll_offset_y.max(0.0))
@@ -4486,16 +4503,22 @@ impl AudioOrbitApp {
                         self.dragging_track_index = Some(index);
                     }
                     if self.dragging_track_index == Some(index) {
-                        paint_grabbed_row(ui, row_response.response.rect);
-                    } else if self.dragging_track_index.is_some() && context_response.hovered() {
-                        let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|position| position.y)).unwrap_or(row_response.response.rect.center().y);
-                        let drop_after = pointer_y >= row_response.response.rect.center().y;
-                        let y = if drop_after {
-                            row_response.response.rect.bottom()
-                        } else {
-                            row_response.response.rect.top()
-                        };
-                        paint_drop_indicator(ui, row_response.response.rect, y);
+                        track_drag_source_rect = Some(row_response.response.rect);
+                    }
+                    if let Some(from) = self.dragging_track_index {
+                        if context_response.hovered() {
+                            let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|position| position.y)).unwrap_or(row_response.response.rect.center().y);
+                            let drop_after = pointer_y >= row_response.response.rect.center().y;
+                            let to = if drop_after { index + 1 } else { index };
+                            if from != to && from + 1 != to {
+                                let y = if drop_after {
+                                    row_response.response.rect.bottom()
+                                } else {
+                                    row_response.response.rect.top()
+                                };
+                                track_drop_indicator = Some((row_response.response.rect, y));
+                            }
+                        }
                     }
                     if context_response.hovered() && ui.input(|input| input.pointer.any_released()) {
                         if let Some(from) = self.dragging_track_index.take() {
@@ -4557,6 +4580,12 @@ impl AudioOrbitApp {
                 }
             });
         self.state.ui.playlist_scroll_offset_y = scroll_output.state.offset.y.max(0.0);
+        if let Some((rect, y)) = track_drop_indicator {
+            if let Some(source_rect) = track_drag_source_rect {
+                paint_dragged_row_fade(ui, source_rect);
+            }
+            paint_drop_indicator(ui, rect, y);
+        }
         if !ui.input(|input| input.pointer.primary_down()) {
             self.dragging_track_index = None;
         }
@@ -6060,36 +6089,25 @@ fn paint_sticky_folder_header(
     (rect, icon_rect)
 }
 
-fn paint_grabbed_row(ui: &egui::Ui, rect: egui::Rect) {
-    let color = ui.visuals().selection.bg_fill;
+fn paint_dragged_row_fade(ui: &egui::Ui, rect: egui::Rect) {
     let painter = ui.painter();
-    painter.rect_filled(rect.shrink(1.0), 4.0, color.linear_multiply(0.16));
+    painter.rect_filled(rect.shrink(1.0), 4.0, egui::Color32::from_black_alpha(105));
     painter.rect_stroke(
         rect.shrink(1.0),
         4.0,
-        egui::Stroke::new(2.0, color),
+        egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color.linear_multiply(0.45)),
         egui::StrokeKind::Inside,
     );
 }
 
 fn paint_drop_indicator(ui: &egui::Ui, rect: egui::Rect, y: f32) {
-    let color = ui.visuals().selection.bg_fill;
+    let color = egui::Color32::from_rgb(78, 148, 255);
     let y = y.round() + 0.5;
-    let left = rect.left() + 8.0;
-    let right = rect.right() - 8.0;
-    let painter = ui.painter();
-    painter.line_segment(
+    let left = rect.left() + 4.0;
+    let right = rect.right() - 4.0;
+    ui.painter().line_segment(
         [egui::pos2(left, y), egui::pos2(right, y)],
-        egui::Stroke::new(3.0, color),
-    );
-    painter.circle_filled(egui::pos2(left, y), 3.0, color);
-    painter.circle_filled(egui::pos2(right, y), 3.0, color);
-    painter.text(
-        egui::pos2(right - 4.0, y - 4.0),
-        egui::Align2::RIGHT_BOTTOM,
-        "Drop here",
-        egui::FontId::proportional(10.0),
-        color,
+        egui::Stroke::new(2.0, color),
     );
 }
 
