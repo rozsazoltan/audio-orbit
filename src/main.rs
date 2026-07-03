@@ -151,6 +151,7 @@ struct PreparedTrackPlayback {
     index: Option<usize>,
     crossfade_seconds: f32,
     live_position_compensation: bool,
+    background_upgrade: bool,
     prepared: PreparedPlayback,
     requested_at: Instant,
 }
@@ -1947,27 +1948,95 @@ impl AudioOrbitApp {
             return;
         }
 
-        let requested_at = Instant::now();
+        let fast_result = self
+            .player
+            .as_mut()
+            .expect("audio player was checked above")
+            .play_file_streaming_with_cached_waveform_and_crossfade(
+                &path,
+                settings,
+                start_seconds,
+                cached_waveform.clone(),
+                known_duration_seconds,
+                crossfade_seconds,
+            );
+
+        let mut quick_started = false;
+        let mut requested_at = Instant::now();
+        match fast_result {
+            Ok(info) => {
+                quick_started = true;
+                requested_at = Instant::now();
+                let mode_label = if settings.orbit_enabled {
+                    settings.mode.label()
+                } else {
+                    "normal stereo playback"
+                };
+                self.active_tab = MainContentTab::Music;
+                self.active_radio_index = None;
+                self.active_radio_station_name = None;
+                self.active_radio_title = None;
+                self.radio_started_at = None;
+                self.last_radio_title_lookup_at = None;
+                self.radio_title_receiver = None;
+                self.active_playlist_index = Some(playlist_index);
+                self.selected_track_index = index;
+                self.active_track_index = index;
+                self.active_track_path = Some(info.path.clone());
+                self.pending_track_switch = None;
+                self.crossfade_started_for_path = None;
+                self.store_playback_metadata(&info);
+                self.remember_last_played_track(index, &info.path);
+                self.last_playback = Some(info.clone());
+                self.status_message = if crossfade_seconds > 0.05 {
+                    format!(
+                        "Crossfading to {} immediately through {}; preparing silence skip in the background.",
+                        display_file_name(&info.path),
+                        mode_label
+                    )
+                } else {
+                    format!(
+                        "Playing {} immediately through {}; preparing silence skip in the background.",
+                        display_file_name(&info.path),
+                        mode_label
+                    )
+                };
+                self.persist_playback_session();
+                self.save_state_silently();
+                self.error_message = None;
+            }
+            Err(error) => {
+                self.status_message = if live_position_compensation {
+                    "Fast playback failed; preparing updated playback without stopping the current audio...".to_owned()
+                } else if crossfade_seconds > 0.05 {
+                    format!(
+                        "Fast playback failed; preparing crossfade for {:.1} second(s)...",
+                        crossfade_seconds
+                    )
+                } else {
+                    format!("Fast playback failed; preparing {}...", display_file_name(&path))
+                };
+                self.error_message = Some(error.to_string());
+            }
+        }
+
+        let background_crossfade_seconds = if quick_started { 0.0 } else { crossfade_seconds };
+        let background_live_position_compensation = quick_started || live_position_compensation;
+        let background_upgrade = quick_started;
         let (sender, receiver) = mpsc::channel();
         let path_for_thread = path.clone();
 
         self.pending_prepared_track_receiver = Some(receiver);
-        self.status_message = if live_position_compensation {
-            "Preparing updated playback without stopping the current audio...".to_owned()
-        } else if crossfade_seconds > 0.05 {
-            format!("Preparing crossfade for {:.1} second(s)...", crossfade_seconds)
-        } else {
-            format!("Preparing {}...", display_file_name(&path))
-        };
-        self.error_message = None;
+        self.error_message = if quick_started { None } else { self.error_message.take() };
 
         thread::spawn(move || {
             let result = AudioPlayer::prepare_file_with_cached_waveform(path_for_thread, settings, start_seconds, cached_waveform)
                 .map(|prepared| PreparedTrackPlayback {
                     playlist_index,
                     index,
-                    crossfade_seconds,
-                    live_position_compensation,
+                    crossfade_seconds: background_crossfade_seconds,
+                    live_position_compensation: background_live_position_compensation,
+                    background_upgrade,
                     prepared,
                     requested_at,
                 })
@@ -2005,6 +2074,7 @@ impl AudioOrbitApp {
             index,
             crossfade_seconds,
             live_position_compensation,
+            background_upgrade,
             prepared: prepared_audio,
             requested_at,
         } = prepared;
@@ -2049,7 +2119,9 @@ impl AudioOrbitApp {
                 self.store_playback_metadata(&info);
                 self.remember_last_played_track(index, &info.path);
                 self.last_playback = Some(info.clone());
-                self.status_message = if live_position_compensation {
+                self.status_message = if background_upgrade {
+                    format!("Silence-skip preparation finished for {}.", display_file_name(&info.path))
+                } else if live_position_compensation {
                     format!("Applied sound profile and continued {} through {}.", display_file_name(&info.path), mode_label)
                 } else if crossfade_seconds > 0.05 {
                     format!(

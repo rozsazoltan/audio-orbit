@@ -404,7 +404,7 @@ impl<S: Source<Item = f32>> Source for LiveFileSource<S> {
     }
 
     fn total_duration(&self) -> Option<Duration> {
-        self.inner.total_duration()
+        None
     }
 }
 
@@ -912,10 +912,10 @@ impl AudioPlayer {
         known_duration_seconds: Option<f32>,
         crossfade_seconds: f32,
     ) -> Result<PlaybackInfo> {
-        if settings.skip_silence_enabled {
-            anyhow::bail!("streaming playback is not available while silence skipping is enabled");
-        }
-
+        // This streaming path intentionally starts immediately even when the selected
+        // settings include silence skipping. Silence skipping needs a full render pass,
+        // so callers can use this as the sub-second audible path and prepare the
+        // silence-skipped render in the background.
         let start_seconds = if start_seconds.is_finite() {
             start_seconds.max(0.0)
         } else {
@@ -932,10 +932,14 @@ impl AudioPlayer {
             anyhow::bail!("the selected audio file reported an invalid sample rate");
         }
 
+        // Do not call `decoder.total_duration()` on the fast streaming path. Some
+        // formats compute it by scanning metadata/frames, which makes long tracks
+        // feel slow exactly when the user is trying to start or seek immediately.
+        // Prefer the library metadata cache; if it is missing, start playback first
+        // and let background/library metadata fill the duration later.
         let total_duration = known_duration_seconds
             .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
-            .map(Duration::from_secs_f32)
-            .or_else(|| decoder.total_duration());
+            .map(Duration::from_secs_f32);
         let (waveform, waveform_brightness) = cached_waveform.unwrap_or_default();
         let seek_to = Duration::from_secs_f32(start_seconds);
         let crossfade_seconds = crossfade_seconds.max(0.0);
