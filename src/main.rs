@@ -3985,7 +3985,7 @@ impl AudioOrbitApp {
         let mut play_radio_index: Option<usize> = None;
         let mut favorite_toggle_index: Option<usize> = None;
         let mut reorder_radio_station: Option<(usize, usize)> = None;
-        let mut next_radio_drop_target_index: Option<usize> = None;
+        let mut next_radio_drop_target_index: Option<usize> = self.radio_drop_target_index;
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -4421,7 +4421,7 @@ impl AudioOrbitApp {
         let row_width = (ui.available_width() - 22.0).max(320.0);
         let scroll_height = ui.available_height();
         let mut reorder_track: Option<(usize, usize)> = None;
-        let mut next_track_drop_target_index: Option<usize> = None;
+        let mut next_track_drop_target_index: Option<usize> = self.track_drop_target_index;
         let scroll_output = egui::ScrollArea::vertical()
             .id_salt("track_list_scroll")
             .vertical_scroll_offset(self.state.ui.playlist_scroll_offset_y.max(0.0))
