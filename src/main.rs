@@ -5458,6 +5458,7 @@ impl AudioOrbitApp {
         let mut close_clicked = false;
         let row_height = 34.0;
 
+        ui.add_space(10.0);
         egui::Frame::new()
             .inner_margin(egui::Margin::symmetric(horizontal_padding as i8, 0))
             .show(ui, |ui| {
@@ -6033,6 +6034,8 @@ impl AudioOrbitApp {
         let style = context.style();
         let footer_fill = style.visuals.panel_fill;
         let footer_stroke = style.visuals.widgets.noninteractive.bg_stroke;
+        let horizontal_padding = 8.0;
+        let vertical_padding = 2.0;
 
         egui::Area::new(egui::Id::new(id))
             .order(egui::Order::Foreground)
@@ -6042,11 +6045,12 @@ impl AudioOrbitApp {
                     .fill(footer_fill)
                     .stroke(footer_stroke)
                     .corner_radius(egui::CornerRadius::same(0))
-                    .inner_margin(egui::Margin::symmetric(20, 2))
+                    .inner_margin(egui::Margin::symmetric(horizontal_padding as i8, vertical_padding as i8))
                     .show(ui, |ui| {
-                        let content_height = (footer_height - 4.0).max(18.0);
-                        ui.set_min_size(egui::vec2((modal_rect.width() - 40.0).max(180.0), content_height));
-                        ui.set_width((modal_rect.width() - 40.0).max(180.0));
+                        let content_width = (modal_rect.width() - horizontal_padding * 2.0).max(180.0);
+                        let content_height = (footer_height - vertical_padding * 2.0).max(18.0);
+                        ui.set_min_size(egui::vec2(content_width, content_height));
+                        ui.set_width(content_width);
                         ui.set_height(content_height);
                         self.render_status_panel_contents(ui, true);
                     });
