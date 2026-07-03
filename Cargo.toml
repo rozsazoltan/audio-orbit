@@ -1,5 +1,6 @@
 [package]
 name = "audio-orbit"
+default-run = "audio-orbit"
 version = "0.9.6"
 edition = "2021"
 build = "build.rs"
@@ -14,7 +15,8 @@ lofty = "0.24"
 lucide-icons = "1.21"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rfd = "0.15"
-semver = "1.0"
+rodio = { version = "0.19", features = ["symphonia-all"] }
+rustfft = "6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 zip = "2.2"
@@ -26,3 +28,11 @@ rodio = { version = "0.19", features = ["symphonia-all"] }
 
 [build-dependencies]
 winresource = "0.1"
+
+[profile.dev]
+opt-level = 1
+debug = 1
+incremental = true
+
+[profile.dev.package."*"]
+opt-level = 2

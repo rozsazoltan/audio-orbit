@@ -1,7 +1,4 @@
-use crate::{
-    dsp::{render_orbit_to_stereo, DspSettings, RenderInfo},
-    spectrum_waveform::{spectrum_waveform, LiveSpectrumAnalyzer},
-};
+use crate::dsp::{render_orbit_to_stereo_with_cached_waveform, DspSettings, RenderInfo};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait};
 use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, OutputStreamHandle, Sink, Source};
@@ -20,9 +17,12 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 20;
-const RADIO_VISUALIZER_VISIBLE_SECONDS: f32 = 15.0;
-const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 12;
+const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 180;
+// Keep the raw radio envelope at a higher resolution than the UI needs.
+// The UI then bins these live samples into one value per horizontal pixel,
+// which avoids synthetic/repeating patterns and keeps the strip tied to the
+// decoded audio itself.
+const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 64;
 const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
 const MAX_DECODED_SOURCE_SAMPLES: usize = 48_000_000;
 const MAX_RENDERED_STEREO_SAMPLES: usize = 48_000_000;
@@ -32,7 +32,6 @@ const DECODE_RESERVE_CHUNK: usize = 262_144;
 pub struct PlaybackInfo {
     pub path: PathBuf,
     pub original_duration_seconds: f32,
-    pub rendered_duration_seconds: f32,
     pub input_channels: u16,
     pub sample_rate: u32,
     pub size_bytes: Option<u64>,
@@ -41,6 +40,7 @@ pub struct PlaybackInfo {
     pub silence_ranges: Vec<(f32, f32)>,
 }
 
+#[derive(Clone, Debug)]
 pub struct PreparedPlayback {
     path: PathBuf,
     settings: DspSettings,
@@ -65,15 +65,6 @@ struct ActiveRadioRecording {
 }
 
 type RadioRecordingHandle = Arc<Mutex<Option<ActiveRadioRecording>>>;
-
-#[derive(Clone)]
-pub struct RadioRecorderHandle(RadioRecordingHandle);
-
-pub struct PreparedRadioPlayback {
-    url: String,
-    settings: DspSettings,
-    decoder: Decoder<BufReader<RadioStream<reqwest::blocking::Response>>>,
-}
 
 struct RadioStream<R> {
     inner: Mutex<R>,
@@ -128,34 +119,300 @@ impl<R> Seek for RadioStream<R> {
 #[derive(Clone, Copy)]
 struct RadioVisualizerBucket {
     at: Instant,
-    peak: f32,
+    level: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct RadioVisualizerBar {
-    pub age_seconds: f32,
     pub peak: f32,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct RadioVisualizerFrame {
     pub bars: Vec<RadioVisualizerBar>,
-    pub bucket_seconds: f32,
 }
 
 struct RadioVisualizerState {
     peaks: VecDeque<RadioVisualizerBucket>,
+    display_floor: f32,
+    display_peak: f32,
 }
 
 impl Default for RadioVisualizerState {
     fn default() -> Self {
         Self {
             peaks: VecDeque::new(),
+            // A live stream cannot be normalized against a full track. Keep a slow
+            // visual range so radio does not pump frame-by-frame, but do not smooth
+            // the actual audio buckets: the strip must be built from the live music.
+            display_floor: 0.018,
+            display_peak: 0.42,
         }
     }
 }
 
 type RadioVisualizerHandle = Arc<Mutex<RadioVisualizerState>>;
+
+struct LiveRadioWaveformAnalyzer {
+    samples_per_bucket: usize,
+    samples_in_bucket: usize,
+    sum_squares: f64,
+    peak: f32,
+}
+
+impl LiveRadioWaveformAnalyzer {
+    fn new(sample_rate: u32, buckets_per_second: usize) -> Self {
+        Self {
+            samples_per_bucket: (sample_rate as usize / buckets_per_second.max(1)).max(1),
+            samples_in_bucket: 0,
+            sum_squares: 0.0,
+            peak: 0.0,
+        }
+    }
+
+    fn push_sample(&mut self, sample: f32) -> Option<f32> {
+        let sample = sample.clamp(-1.0, 1.0);
+        let abs = sample.abs();
+        self.sum_squares += (sample as f64) * (sample as f64);
+        self.peak = self.peak.max(abs);
+        self.samples_in_bucket += 1;
+
+        if self.samples_in_bucket < self.samples_per_bucket {
+            return None;
+        }
+
+        let rms = (self.sum_squares / self.samples_in_bucket.max(1) as f64).sqrt() as f32;
+        self.samples_in_bucket = 0;
+        self.sum_squares = 0.0;
+        let peak = std::mem::take(&mut self.peak);
+
+        // Real live waveform envelope. Use the decoded audio's short-window RMS
+        // as the main shape, with only a small peak component so compressed radio
+        // streams do not turn into a full-height rectangle. No attack/release
+        // smoothing here: smoothing created the fake/repeating pattern.
+        let loudness = db_to_unit_for_radio(20.0 * rms.max(0.000_001).log10(), -52.0, -7.0, 1.18);
+        let transient = peak.clamp(0.0, 1.0).powf(0.95);
+        Some((loudness * 0.94 + transient * 0.06).clamp(0.0, 1.0))
+    }
+}
+
+fn db_to_unit_for_radio(db: f32, min_db: f32, max_db: f32, power: f32) -> f32 {
+    ((db - min_db) / (max_db - min_db).max(0.001))
+        .clamp(0.0, 1.0)
+        .powf(power)
+}
+
+struct FadeInSource<S> {
+    inner: S,
+    total_samples: u64,
+    emitted_samples: u64,
+}
+
+impl<S: Source<Item = f32>> FadeInSource<S> {
+    fn new(inner: S, fade_seconds: f32) -> Self {
+        let total_samples = if fade_seconds > 0.0 {
+            (fade_seconds * inner.sample_rate() as f32 * inner.channels().max(1) as f32)
+                .round()
+                .max(0.0) as u64
+        } else {
+            0
+        };
+
+        Self {
+            inner,
+            total_samples,
+            emitted_samples: 0,
+        }
+    }
+}
+
+impl<S: Source<Item = f32>> Iterator for FadeInSource<S> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let sample = self.inner.next()?;
+        if self.total_samples == 0 || self.emitted_samples >= self.total_samples {
+            self.emitted_samples = self.emitted_samples.saturating_add(1);
+            return Some(sample);
+        }
+
+        let gain = (self.emitted_samples as f32 / self.total_samples as f32).clamp(0.0, 1.0);
+        self.emitted_samples = self.emitted_samples.saturating_add(1);
+        Some(sample * gain)
+    }
+}
+
+impl<S: Source<Item = f32>> Source for FadeInSource<S> {
+    fn current_frame_len(&self) -> Option<usize> {
+        self.inner.current_frame_len()
+    }
+
+    fn channels(&self) -> u16 {
+        self.inner.channels()
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.inner.sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
+    }
+}
+
+fn fill_radio_waveform_gaps(values: &mut [f32]) {
+    let mut previous: Option<(usize, f32)> = None;
+
+    for index in 0..values.len() {
+        if values[index] <= 0.0005 {
+            continue;
+        }
+
+        if let Some((previous_index, previous_value)) = previous {
+            let gap = index.saturating_sub(previous_index + 1);
+            if gap > 0 && gap <= 3 {
+                let current_value = values[index];
+                for offset in 1..=gap {
+                    let mix = offset as f32 / (gap + 1) as f32;
+                    values[previous_index + offset] = previous_value * (1.0 - mix) + current_value * mix;
+                }
+            }
+        }
+
+        previous = Some((index, values[index]));
+    }
+}
+
+struct LiveFileSource<S> {
+    inner: S,
+    settings: DspSettings,
+    input_channels: u16,
+    sample_rate: u32,
+    frame_index: u64,
+    output_frame: [f32; 2],
+    output_channel: usize,
+}
+
+impl<S: Source<Item = f32>> LiveFileSource<S> {
+    fn new(inner: S, settings: DspSettings, start_seconds: f32) -> Self {
+        let input_channels = inner.channels().max(1);
+        let sample_rate = inner.sample_rate().max(1);
+        let start_seconds = if start_seconds.is_finite() {
+            start_seconds.max(0.0)
+        } else {
+            0.0
+        };
+        Self {
+            inner,
+            settings,
+            input_channels,
+            sample_rate,
+            frame_index: (start_seconds * sample_rate as f32).round().max(0.0) as u64,
+            output_frame: [0.0, 0.0],
+            output_channel: 2,
+        }
+    }
+
+    fn read_input_frame(&mut self) -> Option<([f32; 2], f32)> {
+        let channels = self.input_channels.max(1) as usize;
+        let mut sum = 0.0_f32;
+        let mut count = 0usize;
+        let mut left = 0.0_f32;
+        let mut right = 0.0_f32;
+
+        for channel in 0..channels {
+            match self.inner.next() {
+                Some(sample) => {
+                    if channel == 0 {
+                        left = sample;
+                    } else if channel == 1 {
+                        right = sample;
+                    }
+                    sum += sample;
+                    count += 1;
+                }
+                None if count == 0 => return None,
+                None => break,
+            }
+        }
+
+        if count == 0 {
+            None
+        } else {
+            if count == 1 {
+                right = left;
+            }
+            Some(([left, right], sum / count as f32))
+        }
+    }
+
+    fn process_frame(&mut self, stereo: [f32; 2], mono: f32) -> [f32; 2] {
+        let output_level = self.settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
+        if !self.settings.orbit_enabled {
+            return [
+                (stereo[0] * output_level).clamp(-1.0, 1.0),
+                (stereo[1] * output_level).clamp(-1.0, 1.0),
+            ];
+        }
+
+        let width = self.settings.stereo_width_percent.min(100) as f32 / 100.0;
+        let speed = self.settings.orbit_speed_percent.clamp(10, 200) as f32 / 100.0;
+        let time = self.frame_index as f32 / self.sample_rate as f32;
+        let pan = (2.0 * PI * 0.20 * speed * time).sin() * width;
+        let angle = (pan.clamp(-1.0, 1.0) + 1.0) * PI / 4.0;
+        let mut left_gain = angle.cos();
+        let mut right_gain = angle.sin();
+
+        if matches!(self.settings.mode, crate::dsp::OrbitMode::VirtualEightDirectionOrbit) {
+            let depth = (2.0 * PI * 0.20 * speed * time).cos();
+            let rear = (-depth).max(0.0) * (self.settings.depth_cue_percent.min(100) as f32 / 100.0);
+            let shade = 1.0 - rear * 0.22;
+            left_gain *= shade;
+            right_gain *= shade;
+        }
+
+        [
+            soft_limit_radio(mono * left_gain * output_level),
+            soft_limit_radio(mono * right_gain * output_level),
+        ]
+    }
+}
+
+impl<S: Source<Item = f32>> Iterator for LiveFileSource<S> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.output_channel < 2 {
+            let sample = self.output_frame[self.output_channel];
+            self.output_channel += 1;
+            return Some(sample);
+        }
+
+        let (stereo, mono) = self.read_input_frame()?;
+        self.output_frame = self.process_frame(stereo, mono);
+        self.output_channel = 1;
+        self.frame_index = self.frame_index.saturating_add(1);
+        Some(self.output_frame[0])
+    }
+}
+
+impl<S: Source<Item = f32>> Source for LiveFileSource<S> {
+    fn current_frame_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> u16 {
+        2
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+}
 
 struct LiveRadioSource<S> {
     inner: S,
@@ -166,7 +423,7 @@ struct LiveRadioSource<S> {
     output_frame: [f32; 2],
     output_channel: usize,
     visualizer: RadioVisualizerHandle,
-    visualizer_analyzer: LiveSpectrumAnalyzer,
+    visualizer_analyzer: LiveRadioWaveformAnalyzer,
 }
 
 impl<S: Source<Item = f32>> LiveRadioSource<S> {
@@ -186,7 +443,7 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
             output_frame: [0.0, 0.0],
             output_channel: 2,
             visualizer,
-            visualizer_analyzer: LiveSpectrumAnalyzer::new(sample_rate, RADIO_VISUALIZER_BUCKETS_PER_SECOND),
+            visualizer_analyzer: LiveRadioWaveformAnalyzer::new(sample_rate, RADIO_VISUALIZER_BUCKETS_PER_SECOND),
         }
     }
 
@@ -224,7 +481,7 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
     }
 
     fn record_visualizer_sample(&mut self, mono: f32) {
-        let Some(bucket) = self.visualizer_analyzer.push_sample(mono) else {
+        let Some(level) = self.visualizer_analyzer.push_sample(mono) else {
             return;
         };
         let now = Instant::now();
@@ -232,7 +489,7 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
         if let Ok(mut state) = self.visualizer.lock() {
             state.peaks.push_back(RadioVisualizerBucket {
                 at: now,
-                peak: bucket.level.clamp(0.0, 1.0),
+                level: level.clamp(0.0, 1.0),
             });
 
             let history = Duration::from_secs(RADIO_VISUALIZER_HISTORY_SECONDS as u64);
@@ -511,16 +768,12 @@ impl AudioPlayer {
         self.volume_percent as f32 / 100.0
     }
 
-
-    pub fn radio_recorder_handle(&self) -> RadioRecorderHandle {
-        RadioRecorderHandle(Arc::clone(&self.radio_recorder))
-    }
-
-    pub fn prepare_radio_stream(
-        url: String,
+    pub fn play_radio_stream_with_crossfade(
+        &mut self,
+        url: &str,
         settings: DspSettings,
-        recorder: RadioRecorderHandle,
-    ) -> Result<PreparedRadioPlayback> {
+        crossfade_seconds: f32,
+    ) -> Result<()> {
         let response = reqwest::blocking::Client::builder()
             .user_agent("Audio-Orbit-Radio")
             .connect_timeout(Duration::from_secs(6))
@@ -530,21 +783,21 @@ impl AudioPlayer {
             .with_context(|| format!("failed to open internet radio stream: {url}"))?
             .error_for_status()
             .with_context(|| format!("internet radio stream returned an error: {url}"))?;
-        let stream = RadioStream::new(response, recorder.0);
+        let stream = RadioStream::new(response, Arc::clone(&self.radio_recorder));
         let decoder = Decoder::new(BufReader::new(stream))
             .with_context(|| format!("failed to decode internet radio stream: {url}"))?;
 
-        Ok(PreparedRadioPlayback {
-            url,
-            settings,
-            decoder,
-        })
-    }
+        let fade_seconds = crossfade_seconds.max(0.0);
+        let keep_visualizer_history = self.current_radio_url.as_deref() == Some(url);
+        if fade_seconds > 0.05 {
+            let _ = self.stop_radio_recording();
+            if let Some(old_sink) = self.sink.take() {
+                fade_out_and_stop(old_sink, fade_seconds, self.volume_gain());
+            }
+        } else {
+            self.stop();
+        }
 
-    pub fn play_prepared_radio_stream(&mut self, prepared: PreparedRadioPlayback) -> Result<()> {
-        let PreparedRadioPlayback { url, settings, decoder } = prepared;
-        let keep_visualizer_history = self.current_radio_url.as_deref() == Some(url.as_str());
-        self.stop();
         if !keep_visualizer_history {
             self.radio_visualizer = Arc::new(Mutex::new(RadioVisualizerState::default()));
         }
@@ -553,7 +806,11 @@ impl AudioPlayer {
         let sink = Sink::try_new(&self.stream_handle)
             .context("failed to create audio playback sink")?;
         sink.set_volume(self.volume_gain());
-        sink.append(radio_source);
+        if fade_seconds > 0.05 {
+            sink.append(FadeInSource::new(radio_source, fade_seconds));
+        } else {
+            sink.append(radio_source);
+        }
         sink.play();
 
         self.sink = Some(sink);
@@ -568,8 +825,6 @@ impl AudioPlayer {
 
         Ok(())
     }
-
-
 
     pub fn is_radio_recording(&self) -> bool {
         self.radio_recorder
@@ -655,7 +910,7 @@ impl AudioPlayer {
         }))
     }
 
-    pub fn radio_visualizer_frame(&self, requested_points: usize) -> RadioVisualizerFrame {
+    pub fn radio_visualizer_frame(&self, requested_points: usize, visible_seconds: f32) -> RadioVisualizerFrame {
         let Ok(mut state) = self.radio_visualizer.lock() else {
             return RadioVisualizerFrame::default();
         };
@@ -664,8 +919,10 @@ impl AudioPlayer {
         }
 
         let now = Instant::now();
-        let visible_seconds = RADIO_VISUALIZER_VISIBLE_SECONDS;
-        let bucket_seconds = visible_seconds / requested_points.max(1) as f32;
+        let requested_points = requested_points.clamp(1, RADIO_VISUALIZER_MAX_BUCKETS);
+        let visible_seconds = visible_seconds
+            .clamp(1.0, RADIO_VISUALIZER_HISTORY_SECONDS as f32);
+        let bucket_seconds = (visible_seconds / requested_points as f32).max(1.0 / 240.0);
         let max_age = visible_seconds + bucket_seconds * 2.0;
 
         while state
@@ -679,6 +936,9 @@ impl AudioPlayer {
         }
 
         let mut slot_peaks = vec![0.0_f32; requested_points];
+        let mut slot_sums = vec![0.0_f32; requested_points];
+        let mut slot_counts = vec![0_u16; requested_points];
+        let mut has_audio = false;
         for bucket in &state.peaks {
             let age_seconds = now.duration_since(bucket.at).as_secs_f32();
             if age_seconds > max_age {
@@ -689,25 +949,73 @@ impl AudioPlayer {
                 continue;
             }
             let slot = requested_points - 1 - slot_from_right;
-            slot_peaks[slot] = slot_peaks[slot].max(bucket.peak);
+            let level = bucket.level.clamp(0.0, 1.0);
+            if level > 0.0005 {
+                has_audio = true;
+            }
+            slot_peaks[slot] = slot_peaks[slot].max(level);
+            slot_sums[slot] += level;
+            slot_counts[slot] = slot_counts[slot].saturating_add(1);
         }
 
-        let mut release_tail = 0.0_f32;
-        let bars = slot_peaks
+        let mut slot_levels = slot_peaks
             .into_iter()
-            .enumerate()
-            .filter_map(|(slot, peak)| {
-                // Keep motion smooth like AIMP, but avoid turning every bucket
-                // into the same full-height value. The raw peak keeps rhythm,
-                // the short release tail only softens the visual decay.
-                release_tail = if peak > release_tail {
-                    peak
+            .zip(slot_sums)
+            .zip(slot_counts)
+            .map(|((peak, sum), count)| {
+                if count == 0 {
+                    0.0
                 } else {
-                    (release_tail * 0.84).max(peak)
-                };
-                let shaped = (peak * 0.76 + release_tail * 0.24).clamp(0.0, 0.72);
-                if shaped <= 0.003 {
-                    return None;
+                    let mean = sum / count as f32;
+                    // AIMP-like overview: keep transients, but do not let a single
+                    // hot live-radio bucket make the whole small strip look solid.
+                    (mean * 0.68 + peak * 0.32).clamp(0.0, 1.0)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if !has_audio {
+            return RadioVisualizerFrame {
+                bars: slot_levels
+                    .into_iter()
+                    .map(|_| RadioVisualizerBar { peak: 0.0 })
+                    .collect(),
+            };
+        }
+
+        fill_radio_waveform_gaps(&mut slot_levels);
+
+        let mut nonzero = slot_levels
+            .iter()
+            .copied()
+            .filter(|value| *value > 0.0005)
+            .collect::<Vec<_>>();
+        nonzero.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+        let last = nonzero.len().saturating_sub(1);
+        let target_floor = nonzero[((last as f32 * 0.06) as usize).min(last)].min(0.22);
+        let target_peak = nonzero[((last as f32 * 0.94) as usize).min(last)].max(target_floor + 0.18);
+
+        // Slow range tracking gives radio a full-track-like overview feel without
+        // making every UI frame rescale the entire strip.
+        let floor_blend = if target_floor > state.display_floor { 0.010 } else { 0.040 };
+        state.display_floor = (state.display_floor * (1.0 - floor_blend) + target_floor * floor_blend)
+            .clamp(0.0, 0.24);
+
+        let peak_blend = if target_peak > state.display_peak { 0.040 } else { 0.010 };
+        state.display_peak = (state.display_peak * (1.0 - peak_blend) + target_peak * peak_blend)
+            .max(state.display_floor + 0.16)
+            .clamp(0.22, 1.0);
+
+        let display_floor = state.display_floor;
+        let display_range = (state.display_peak - display_floor).max(0.12);
+        let bars = slot_levels
+            .into_iter()
+            .map(|level| {
+                let normalized = ((level.clamp(0.0, 1.0) - display_floor) / display_range)
+                    .clamp(0.0, 1.0)
+                    .powf(1.08);
+                RadioVisualizerBar {
+                    peak: normalized.clamp(0.0, 1.0),
                 }
                 Some(RadioVisualizerBar {
                     age_seconds: (requested_points - 1 - slot) as f32 * bucket_seconds,
@@ -716,24 +1024,179 @@ impl AudioPlayer {
             })
             .collect();
 
-        RadioVisualizerFrame {
-            bars,
-            bucket_seconds,
+        RadioVisualizerFrame { bars }
+    }
+
+
+    pub fn play_file_streaming_with_cached_waveform(
+        &mut self,
+        path: &Path,
+        settings: DspSettings,
+        start_seconds: f32,
+        cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
+        known_duration_seconds: Option<f32>,
+    ) -> Result<PlaybackInfo> {
+        self.play_file_streaming_with_cached_waveform_and_crossfade(
+            path,
+            settings,
+            start_seconds,
+            cached_waveform,
+            known_duration_seconds,
+            0.0,
+        )
+    }
+
+    pub fn play_file_streaming_with_cached_waveform_and_crossfade(
+        &mut self,
+        path: &Path,
+        settings: DspSettings,
+        start_seconds: f32,
+        cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
+        known_duration_seconds: Option<f32>,
+        crossfade_seconds: f32,
+    ) -> Result<PlaybackInfo> {
+        // This streaming path intentionally starts immediately even when the selected
+        // settings include silence skipping. Silence skipping needs a full render pass,
+        // so callers can use this as the sub-second audible path and prepare the
+        // silence-skipped render in the background.
+        let start_seconds = if start_seconds.is_finite() {
+            start_seconds.max(0.0)
+        } else {
+            0.0
+        };
+        let file = File::open(path)
+            .with_context(|| format!("failed to open audio file: {}", path.display()))?;
+        let mut decoder = Decoder::new(BufReader::new(file))
+            .with_context(|| format!("failed to decode audio file: {}", path.display()))?;
+
+        let input_channels = decoder.channels();
+        let sample_rate = decoder.sample_rate();
+        if sample_rate == 0 {
+            anyhow::bail!("the selected audio file reported an invalid sample rate");
         }
+
+        // Do not call `decoder.total_duration()` on the fast streaming path. Some
+        // formats compute it by scanning metadata/frames, which makes long tracks
+        // feel slow exactly when the user is trying to start or seek immediately.
+        // Prefer the library metadata cache; if it is missing, start playback first
+        // and let background/library metadata fill the duration later.
+        let total_duration = known_duration_seconds
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+            .map(Duration::from_secs_f32);
+        let (waveform, waveform_brightness) = cached_waveform.unwrap_or_default();
+        let seek_to = Duration::from_secs_f32(start_seconds);
+        let crossfade_seconds = crossfade_seconds.max(0.0);
+
+        // Use the decoder's real random-access seek when available. The previous
+        // implementation used `skip_duration`, which had to decode and discard audio
+        // until the target timestamp and caused a visible pause after dragging the
+        // waveform playhead.
+        if decoder.try_seek(seek_to).is_ok() {
+            return self.start_file_streaming_source(
+                path,
+                settings,
+                start_seconds,
+                decoder.convert_samples::<f32>(),
+                total_duration,
+                input_channels,
+                sample_rate,
+                waveform,
+                waveform_brightness,
+                crossfade_seconds,
+            );
+        }
+
+        self.start_file_streaming_source(
+            path,
+            settings,
+            start_seconds,
+            decoder
+                .convert_samples::<f32>()
+                .skip_duration(seek_to),
+            total_duration,
+            input_channels,
+            sample_rate,
+            waveform,
+            waveform_brightness,
+            crossfade_seconds,
+        )
+    }
+
+    fn start_file_streaming_source<S>(
+        &mut self,
+        path: &Path,
+        settings: DspSettings,
+        start_seconds: f32,
+        source: S,
+        total_duration: Option<Duration>,
+        input_channels: u16,
+        sample_rate: u32,
+        waveform: Vec<f32>,
+        waveform_brightness: Vec<f32>,
+        crossfade_seconds: f32,
+    ) -> Result<PlaybackInfo>
+    where
+        S: Source<Item = f32> + Send + 'static,
+    {
+        let remaining_duration = total_duration
+            .map(|duration| duration.saturating_sub(Duration::from_secs_f32(start_seconds)))
+            .unwrap_or(Duration::ZERO);
+        let source = LiveFileSource::new(source, settings, start_seconds);
+        let fade_seconds = crossfade_seconds.max(0.0);
+
+        if fade_seconds > 0.05 {
+            let _ = self.stop_radio_recording();
+            if let Some(old_sink) = self.sink.take() {
+                fade_out_and_stop(old_sink, fade_seconds, self.volume_gain());
+            }
+        } else {
+            self.stop();
+        }
+
+        let sink = Sink::try_new(&self.stream_handle)
+            .context("failed to create audio playback sink")?;
+        sink.set_volume(self.volume_gain());
+        if fade_seconds > 0.05 {
+            sink.append(FadeInSource::new(source, fade_seconds));
+        } else {
+            sink.append(source);
+        }
+        sink.play();
+
+        self.sink = Some(sink);
+        self.started_at = Some(Instant::now());
+        self.paused_at = None;
+        self.accumulated_pause = Duration::ZERO;
+        self.current_duration = Some(remaining_duration);
+        self.current_start_offset_seconds = start_seconds;
+        self.current_path = Some(path.to_path_buf());
+        self.current_settings = Some(settings);
+        self.current_radio_url = None;
+
+        let original_duration_seconds = total_duration.map(|duration| duration.as_secs_f32()).unwrap_or(0.0);
+        Ok(PlaybackInfo {
+            path: path.to_path_buf(),
+            original_duration_seconds,
+            input_channels,
+            sample_rate,
+            size_bytes: fs::metadata(path).ok().map(|metadata| metadata.len()),
+            waveform,
+            waveform_brightness,
+            silence_ranges: Vec::new(),
+        })
     }
 
     pub fn prepare_file(path: PathBuf, settings: DspSettings, start_seconds: f32) -> Result<PreparedPlayback> {
-        Self::prepare_file_with_cancel(path, settings, start_seconds, None)
+        Self::prepare_file_with_cached_waveform(path, settings, start_seconds, None)
     }
 
-    pub fn prepare_file_with_cancel(
+    pub fn prepare_file_with_cached_waveform(
         path: PathBuf,
         settings: DspSettings,
         start_seconds: f32,
-        cancel: Option<Arc<AtomicBool>>,
+        cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
     ) -> Result<PreparedPlayback> {
-        let cancel_ref = cancel.as_deref();
-        let (processed_samples, render_info, sample_rate) = render_file_data(&path, settings, start_seconds, cancel_ref)?;
+        let (processed_samples, render_info, sample_rate) = render_file_data(&path, settings, start_seconds, cached_waveform)?;
         Ok(PreparedPlayback {
             path,
             settings,
@@ -951,6 +1414,7 @@ impl AudioPlayer {
         apply_fade_in(&mut prepared.processed_samples, prepared.sample_rate, fade_seconds);
 
         if fade_seconds > 0.05 {
+            let _ = self.stop_radio_recording();
             if let Some(old_sink) = self.sink.take() {
                 fade_out_and_stop(old_sink, fade_seconds, self.volume_gain());
             }
@@ -971,13 +1435,24 @@ impl AudioPlayer {
         Ok(playback_info(&prepared.path, prepared.render_info))
     }
 
-    pub fn seek_current(&mut self, seconds: f32) -> Result<Option<PlaybackInfo>> {
+    pub fn seek_current_with_cached_waveform(
+        &mut self,
+        seconds: f32,
+        cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
+        known_duration_seconds: Option<f32>,
+    ) -> Result<Option<PlaybackInfo>> {
         let Some(path) = self.current_path.clone() else {
             return Ok(None);
         };
         let Some(settings) = self.current_settings else {
             return Ok(None);
         };
+
+        if !settings.skip_silence_enabled {
+            return self
+                .play_file_streaming_with_cached_waveform(&path, settings, seconds, cached_waveform, known_duration_seconds)
+                .map(Some);
+        }
 
         self.play_file_with_orbit_from(&path, settings, seconds).map(Some)
     }
@@ -1057,6 +1532,10 @@ impl AudioPlayer {
 
     pub fn current_start_offset_seconds(&self) -> f32 {
         self.current_start_offset_seconds
+    }
+
+    pub fn current_settings(&self) -> Option<DspSettings> {
+        self.current_settings
     }
 
     fn play_processed_samples(
@@ -1177,7 +1656,7 @@ fn render_file_data(
     path: &Path,
     settings: DspSettings,
     start_seconds: f32,
-    cancel: Option<&AtomicBool>,
+    cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
 ) -> Result<(Vec<f32>, RenderInfo, u32)> {
     let file = File::open(path)
         .with_context(|| format!("failed to open audio file: {}", path.display()))?;
@@ -1195,24 +1674,14 @@ fn render_file_data(
         anyhow::bail!("the selected audio file did not contain any decoded samples");
     }
 
-    let channels = input_channels.max(1) as usize;
-    let frame_count = input_samples.len() / channels;
-    let start_frame = ((start_seconds.max(0.0) * sample_rate as f32) as usize).min(frame_count);
-    let requested_rendered_samples = frame_count.saturating_sub(start_frame).saturating_mul(2);
-    if requested_rendered_samples > MAX_RENDERED_STEREO_SAMPLES {
-        anyhow::bail!(
-            "the selected audio range is too large for the current in-memory renderer ({} stereo samples requested, limit is {}). Split the file or use a shorter seek range until the streaming engine lands.",
-            requested_rendered_samples,
-            MAX_RENDERED_STEREO_SAMPLES
-        );
-    }
-
-    if is_cancelled(cancel) {
-        anyhow::bail!("playback preparation was cancelled");
-    }
-
-    let (processed_samples, render_info) =
-        render_orbit_to_stereo(&input_samples, input_channels, sample_rate, settings, start_seconds, cancel)?;
+    let (processed_samples, render_info) = render_orbit_to_stereo_with_cached_waveform(
+        &input_samples,
+        input_channels,
+        sample_rate,
+        settings,
+        start_seconds,
+        cached_waveform,
+    );
 
     if processed_samples.is_empty() {
         anyhow::bail!("the rendered audio was empty after processing; disable silence skip or seek earlier in the track");
@@ -1268,7 +1737,6 @@ fn playback_info(path: &Path, render_info: RenderInfo) -> PlaybackInfo {
     PlaybackInfo {
         path: path.to_path_buf(),
         original_duration_seconds: render_info.original_duration_seconds,
-        rendered_duration_seconds: render_info.rendered_duration_seconds,
         input_channels: render_info.input_channels,
         sample_rate: render_info.sample_rate,
         size_bytes: fs::metadata(path).ok().map(|metadata| metadata.len()),

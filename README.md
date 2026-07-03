@@ -2,7 +2,6 @@
 
 `audio-orbit` is a lightweight Windows music player for local audio libraries, internet radio streams, folder-based playlists, smooth crossfade playback, silence skipping, and headphone-friendly orbit-style stereo movement.
 
-It is designed for people who keep music in local folders and want an AIMP-like desktop player with portable app data, playlist backups, global media keys, release updates, and simple spatial stereo controls. The orbit effect can be turned off per sound profile, so the app can also be used as a normal stereo music player.
 
 - [What it does](#what-it-does)
   - [Local music libraries](#local-music-libraries)
@@ -10,7 +9,6 @@ It is designed for people who keep music in local folders and want an AIMP-like 
   - [Playback](#playback)
   - [Sound profiles](#sound-profiles)
   - [Backups](#backups)
-  - [Updates](#updates)
   - [Radio recordings](#radio-recordings)
 - [Get started](#get-started)
 - [Usage](#usage)
@@ -22,7 +20,6 @@ It is designed for people who keep music in local folders and want an AIMP-like 
   - [Search tracks](#search-tracks)
   - [Manage Favorites](#manage-favorites)
   - [Export and import backups](#export-and-import-backups)
-  - [Check for updates](#check-for-updates)
 - [Window behavior](#window-behavior)
 - [Data location](#data-location)
 - [Known limitations](#known-limitations)
@@ -61,7 +58,6 @@ Audio Orbit supports common desktop-player behavior:
 - favorite radio stations and filter the Radio list to favorites
 - show a live radio visualizer with elapsed listening time
 - record the original internet radio stream bytes to timestamped files
-- copy the current internet radio song title from StreamTitle metadata when the station provides it
 - remember the window size and position between app launches
 - prevent multiple app instances from running at the same time
 
@@ -86,7 +82,6 @@ Backups are ZIP files containing the full app state:
 - crossfade settings
 - silence skip settings
 - internet radio station list
-- update settings
 - UI layout settings
 
 Audio files themselves are not embedded in the backup. The backup stores library and playlist state, not your music collection.
@@ -98,15 +93,15 @@ Internet radio recordings are captured from the original stream bytes before vol
 
 Saved files use the stop-time based format `audio-orbit-records-yyyy-mm-dd-hh-mm-ss.mp3`. By default, recordings are saved next to the executable in `.audio-orbit-records/`. Right-click the microphone button to open the current recordings folder, or open/change it from **Settings > Recording**.
 
-### Updates
 
-Audio Orbit can check GitHub releases for new Windows executable builds. Stable releases are checked by default. Prerelease watching can be enabled in the release watcher.
 
-On startup, Audio Orbit performs a background update check at most once per hour. If a newer release is available, the release watcher modal opens automatically. To avoid GitHub rate limiting, manual update checks are also limited per app session.
+
+
+
+
 
 ## Get started
 
-Download the Windows executable from the GitHub Releases page and place it in a folder where Audio Orbit can store its portable data next to the executable.
 
 Recommended layout:
 
@@ -115,7 +110,6 @@ audio-orbit/
 ├─ audio-orbit.exe
 └─ .audio-orbit-data/
    ├─ state.json
-   └─ update/
 ```
 
 Run `audio-orbit.exe`, add a folder playlist, and start playback from the track list.
@@ -178,7 +172,7 @@ Use the search button in the track list header to reveal search. Search filters 
 
 ### Waveform and silence skip
 
-Local track waveforms mark long quiet sections that silence skipping will bypass. Local tracks and internet radio use the same AIMP-style amplitude envelope approach rather than an RGB frequency spectrum. Local tracks use gray for unplayed audio, blue for played audio, and yellow for silence-skip ranges. Live radio uses a subdued gray-blue live waveform because there is no seekable played/unplayed region. The analyzer combines dB-scaled RMS, peak, crest, and transient energy without full-height per-frame normalization, so mastered radio streams do not turn into a constant barcode.
+Local track waveforms mark long quiet sections that silence skipping will bypass. Audio Orbit uses a RustFFT-backed analyzer for both local music and internet radio, but renders the result as an AIMP-style amplitude bar instead of a colored spectral stack: unplayed waveform bars are gray, played sections are blue, and skipped quiet sections are yellow. Internet radio uses the same smoothed analyzer in a 15-second live visualizer window with softer adaptive normalization so live streams do not collapse into constant full-height bars.
 
 ### Manage Favorites
 
@@ -190,19 +184,17 @@ Open **Settings**, then use **Backup and data**.
 
 Export creates a compressed ZIP backup of the full app state and suggests a timestamped filename such as `audio-orbit-backup-2026-06-30-09-15-42.zip`. Import restores the state from a ZIP backup.
 
-### Check for updates
+### Identify the current song
 
-Open **Settings** or **Release watcher**.
 
-By default, only stable releases are checked. Enable prerelease watching when you want to include prerelease builds.
 
-If an update is available, Audio Orbit can replace its current executable and restart itself.
+
+
 
 ## Window behavior
 
 Audio Orbit remembers the window size and position when the app closes and restores the same layout on the next launch. Player-only and full-layout sizes are kept separately, and switching modes restores that mode's own saved width and height.
 
-Settings, Updates, Backup, About, folder import, add-radio, and Details dialogs use responsive modal layouts with internal scrolling on small windows and a fixed bottom info area for status/error messages.
 
 Only one Audio Orbit instance can run at a time. If the app is already open, starting the executable again exits immediately instead of opening a second player window.
 
@@ -214,7 +206,6 @@ Audio Orbit stores app data next to the executable:
 .audio-orbit-data/state.json
 ```
 
-This keeps settings portable across version updates when the new executable replaces the old one in the same folder.
 
 ## Known limitations
 
@@ -226,25 +217,18 @@ Support for audio formats depends on the bundled Rust audio decoding stack. Comm
 
 ## Contributing
 
-Development notes, local build steps, release workflow notes, and contribution guidance live in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License & Acknowledgments
 
-Audio Orbit is open source and released under the [GNU Affero General Public License v3.0 (AGPL-3.0)](https://www.gnu.org/licenses/agpl-3.0.html).
 
-The app uses Rust ecosystem libraries for the desktop UI, audio decoding/playback, metadata reading, ZIP backups, HTTP update checks, and Lucide icons.
 
 Copyright (C) 2020–present [Zoltán Rózsa](https://github.com/rozsazoltan)
 
-### Notes on waveform analysis
 
-Audio Orbit intentionally uses a clean amplitude waveform lane instead of RGB/spectrum bars. The UI layer is simple and readable: gray for unplayed local audio, blue for played local audio, and yellow for silence ranges that will be skipped. Live radio is rendered as a subdued moving waveform rather than a full-height visualizer. The local-file and live-radio analyzers share the same dB-scaled RMS/peak/transient shaping rules so both views stay visually consistent without saturating every loud section.
+Audio Orbit renders local and live radio waveform bars through a RustFFT-backed amplitude analysis path. The visual design intentionally follows AIMP-like progress bars: neutral gray for the upcoming waveform, blue for the played region, and yellow markers for silence-skip sections. The analyzer still uses spectral information internally to shape a stable loudness envelope, but the UI does not draw colored bass/mid/treble stacks.
 
 
-### Performance and safety
 
-Audio Orbit keeps the UI responsive by running expensive work outside the UI thread. Normal local playback now starts through a streaming source instead of waiting for a full-file render. Full preparation is still used when a feature genuinely needs it, such as crossfade or silence-skip editing. Starting another prepared track cancels the previous preparation request so multiple large decodes do not compete for memory. Internet radio startup also runs off the UI thread, with connection timeouts so a broken stream cannot freeze the window.
+## Development runner
 
-Waveform cache data is runtime-only and is not written into the app state or backup ZIP. This keeps large libraries and backups small and avoids slow JSON saves when thousands of tracks are present.
-
-The current Windows engine has strict allocation guards and cancellation checks for the remaining full-render paths. A future breaking core engine can move even silence-skip and crossfade preparation to a streaming/segment pipeline for lower memory use.
+Use `cargo dev` from the repository root. The repository contains both `.cargo/config.toml` and `.cargo/config` so Cargo uses the built-in polling dev runner instead of requiring the external `cargo-watch` subcommand. On Windows, `scripts/dev.ps1` runs the same project-local runner directly with `cargo run --bin audio-orbit-dev --`.

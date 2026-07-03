@@ -5,7 +5,7 @@ use lofty::file::AudioFile;
 use lucide_icons::Icon;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -15,6 +15,14 @@ use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
 pub const FAVORITES_PLAYLIST_NAME: &str = "Favorites";
 const BACKUP_STATE_ENTRY: &str = "audio-orbit/state.json";
 const BACKUP_META_ENTRY: &str = "audio-orbit/backup.json";
+
+pub fn app_version_label() -> &'static str {
+    if cfg!(debug_assertions) {
+        "dev"
+    } else {
+        concat!("v", env!("CARGO_PKG_VERSION"))
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlaylistKind {
@@ -77,7 +85,7 @@ pub struct Track {
     // turn the app state into a huge JSON file and make save/backup/update operations feel frozen.
     #[serde(skip)]
     pub waveform: Vec<f32>,
-    #[serde(skip)]
+    #[serde(default)]
     pub waveform_brightness: Vec<f32>,
 }
 
@@ -91,10 +99,12 @@ impl Track {
             .unwrap_or_else(|| display_file_name(&path));
 
         let group = folder_group_for_path(&path, root, folder_depth);
-        let metadata = read_track_metadata(&path).unwrap_or_else(|_| TrackMetadata {
+        // Keep large folder imports responsive: expensive decoder/tag metadata is filled
+        // lazily from playback results instead of being read for every scanned file.
+        let metadata = TrackMetadata {
             size_bytes: fs::metadata(&path).ok().map(|metadata| metadata.len()),
             ..Default::default()
-        });
+        };
 
         Self {
             path,
@@ -120,8 +130,10 @@ impl Track {
         if self.metadata.size_bytes.is_none() {
             self.metadata.size_bytes = fs::metadata(&self.path).ok().map(|metadata| metadata.len());
         }
-        self.waveform = waveform;
-        self.waveform_brightness = waveform_brightness;
+        if !waveform.is_empty() && !waveform_brightness.is_empty() {
+            self.waveform = waveform;
+            self.waveform_brightness = waveform_brightness;
+        }
     }
 }
 
@@ -156,12 +168,51 @@ pub struct LastPlayedTrack {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlaybackSession {
+    #[serde(default)]
+    pub was_active: bool,
+    #[serde(default)]
+    pub was_paused: bool,
+    #[serde(default = "default_playback_session_source")]
+    pub source: String,
+    #[serde(default)]
+    pub playlist_index: Option<usize>,
+    #[serde(default)]
+    pub track_path: Option<PathBuf>,
+    #[serde(default)]
+    pub position_seconds: f32,
+    #[serde(default)]
+    pub radio_index: Option<usize>,
+}
+
+impl Default for PlaybackSession {
+    fn default() -> Self {
+        Self {
+            was_active: false,
+            was_paused: false,
+            source: default_playback_session_source(),
+            playlist_index: None,
+            track_path: None,
+            position_seconds: 0.0,
+            radio_index: None,
+        }
+    }
+}
+
+fn default_playback_session_source() -> String {
+    "music".to_owned()
+}
+
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Playlist {
     pub name: String,
     pub tracks: Vec<Track>,
     pub source_folder: Option<PathBuf>,
     pub folder_depth: usize,
     pub selected_group: Option<String>,
+    #[serde(default)]
+    pub repeat_selection: Vec<PathBuf>,
     #[serde(default)]
     pub kind: PlaylistKind,
 }
@@ -174,6 +225,7 @@ impl Playlist {
             source_folder: None,
             folder_depth: 2,
             selected_group: None,
+            repeat_selection: Vec::new(),
             kind: PlaylistKind::Manual,
         }
     }
@@ -185,6 +237,7 @@ impl Playlist {
             source_folder: None,
             folder_depth: 0,
             selected_group: None,
+            repeat_selection: Vec::new(),
             kind: PlaylistKind::Favorites,
         }
     }
@@ -201,6 +254,7 @@ impl Playlist {
             source_folder: Some(source_folder),
             folder_depth,
             selected_group: None,
+            repeat_selection: Vec::new(),
             kind: PlaylistKind::Folder,
         };
         playlist.replace_tracks_from_files(files);
@@ -274,7 +328,6 @@ impl Playlist {
             .unwrap_or(true)
     }
 
-
     pub fn set_selected_group(&mut self, group: Option<String>) {
         self.selected_group = group;
         self.ensure_selected_group_exists();
@@ -336,24 +389,6 @@ pub fn default_recording_output_folder() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join(".audio-orbit-records")))
-}
-
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct UpdateSettings {
-    #[serde(default)]
-    pub include_prereleases: bool,
-    #[serde(default)]
-    pub last_auto_check_unix_seconds: u64,
-}
-
-impl Default for UpdateSettings {
-    fn default() -> Self {
-        Self {
-            include_prereleases: false,
-            last_auto_check_unix_seconds: 0,
-        }
-    }
 }
 
 
@@ -473,6 +508,8 @@ pub struct UiSettings {
     pub player_only_window_geometry: Option<WindowGeometry>,
     #[serde(default)]
     pub playlist_scroll_offset_y: f32,
+    #[serde(default)]
+    pub playlist_scroll_offsets: BTreeMap<String, f32>,
 }
 
 impl Default for UiSettings {
@@ -487,6 +524,7 @@ impl Default for UiSettings {
             full_layout_window_geometry: None,
             player_only_window_geometry: None,
             playlist_scroll_offset_y: 0.0,
+            playlist_scroll_offsets: BTreeMap::new(),
         }
     }
 }
@@ -508,7 +546,7 @@ pub struct SavedState {
     #[serde(default)]
     pub last_played_track: Option<LastPlayedTrack>,
     #[serde(default)]
-    pub update_settings: UpdateSettings,
+    pub playback_session: PlaybackSession,
     #[serde(default)]
     pub playback: PlaybackSettings,
     #[serde(default)]
@@ -537,7 +575,7 @@ impl Default for SavedState {
             radio_stations: Vec::new(),
             selected_radio_index: None,
             last_played_track: None,
-            update_settings: UpdateSettings::default(),
+            playback_session: PlaybackSession::default(),
             playback: PlaybackSettings::default(),
             recording: RecordingSettings::default(),
             ui: UiSettings::default(),
@@ -605,8 +643,7 @@ pub fn export_state_zip(state: &SavedState, path: &Path) -> Result<()> {
 
     let meta = serde_json::json!({
         "app": "Audio Orbit",
-        "version": env!("CARGO_PKG_VERSION"),
-        "display_version": env!("AUDIO_ORBIT_DISPLAY_VERSION"),
+        "version": app_version_label(),
         "type": "full-app-state-backup"
     });
     zip.start_file(BACKUP_META_ENTRY, options)?;
@@ -699,6 +736,7 @@ fn write_state_to_path(state: &SavedState, path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn read_track_metadata(path: &Path) -> Result<TrackMetadata> {
     let file_size = fs::metadata(path).ok().map(|metadata| metadata.len());
     let tagged_file = lofty::read_from_path(path)

@@ -3,9 +3,23 @@ use lucide_icons::{Icon, LUCIDE_FONT_BYTES};
 use std::sync::Arc;
 
 const LUCIDE_FONT_NAME: &str = "lucide-icons";
+const WINDOWS_TEXT_FONT_NAME: &str = "windows-ui-text";
 
 pub fn install(context: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+
+    if let Ok(bytes) = std::fs::read(r"C:\Windows\Fonts\segoeui.ttf") {
+        fonts.font_data.insert(
+            WINDOWS_TEXT_FONT_NAME.to_owned(),
+            Arc::new(egui::FontData::from_owned(bytes)),
+        );
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, WINDOWS_TEXT_FONT_NAME.to_owned());
+    }
+
     fonts.font_data.insert(
         LUCIDE_FONT_NAME.to_owned(),
         Arc::new(egui::FontData::from_static(LUCIDE_FONT_BYTES)),

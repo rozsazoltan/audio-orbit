@@ -12,13 +12,12 @@ mod media_keys;
 mod single_instance;
 mod spectrum_waveform;
 mod ui_icons;
-mod updater;
 
 use crate::{
     audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo, PreparedPlayback, PreparedRadioPlayback, RadioVisualizerFrame},
     config::{
-        app_data_dir, collect_audio_files_from_folder, display_file_name, export_state_zip,
-        import_state_zip, load_state, same_path, save_state, LastPlayedTrack, Playlist, PlaylistKind, RadioStation, RepeatMode, SavedState,
+        app_data_dir, app_version_label, collect_audio_files_from_folder, display_file_name, export_state_zip,
+        import_state_zip, load_state, same_path, save_state, LastPlayedTrack, PlaybackSession, Playlist, PlaylistKind, RadioStation, RepeatMode, SavedState,
         Track, WindowGeometry, FAVORITES_PLAYLIST_NAME,
     },
     dsp::{DspSettings, OrbitMode},
@@ -27,7 +26,7 @@ use eframe::egui;
 use lucide_icons::Icon;
 use rfd::FileDialog;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -40,13 +39,14 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const UPDATE_CHECKS_BEFORE_CONFIRMATION: u8 = 2;
-const AUTOMATIC_UPDATE_CHECK_INTERVAL_SECONDS: u64 = 60 * 60;
-const APP_VERSION_LABEL: &str = env!("AUDIO_ORBIT_DISPLAY_VERSION");
-
-fn app_version_label() -> &'static str {
-    APP_VERSION_LABEL
-}
+// Radio waveform is a rolling live overview, not a zoomed-in oscilloscope.
+// Keep scroll speed constant, but show enough seconds for real music dynamics to
+// appear instead of a solid high-frequency block.
+const RADIO_WAVEFORM_PIXELS_PER_SECOND: f32 = 30.0;
+const RADIO_WAVEFORM_BAR_PITCH_PIXELS: f32 = 3.0;
+const WAVEFORM_BAR_WIDTH_PIXELS: f32 = 1.0;
+const RADIO_WAVEFORM_MAX_VISIBLE_SECONDS: f32 = 180.0;
+const RADIO_METADATA_REFRESH_INTERVAL_SECONDS: u64 = 5;
 
 fn min_window_size_for_mode(player_only_mode: bool) -> egui::Vec2 {
     if player_only_mode {
@@ -159,8 +159,7 @@ struct PreparedTrackPlayback {
     index: Option<usize>,
     crossfade_seconds: f32,
     live_position_compensation: bool,
-    previous_position: Option<f32>,
-    previous_duration: Option<f32>,
+    background_upgrade: bool,
     prepared: PreparedPlayback,
     requested_at: Instant,
 }
@@ -179,6 +178,27 @@ struct WaveformAnalysisMessage {
 }
 
 #[derive(Clone, Debug)]
+enum PendingFolderScanKind {
+    Import {
+        name: String,
+        folder: PathBuf,
+        depth: usize,
+    },
+    Rescan {
+        playlist_index: usize,
+        name: String,
+        folder: PathBuf,
+        depth: usize,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct PendingFolderScanResult {
+    kind: PendingFolderScanKind,
+    files: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
 enum DetailsModal {
     Track(PathBuf),
     Radio(usize),
@@ -193,7 +213,6 @@ enum MainContentTab {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AppPanelModal {
     Settings,
-    Updates,
     Backup,
     About,
 }
@@ -202,7 +221,6 @@ impl AppPanelModal {
     fn title(self) -> &'static str {
         match self {
             Self::Settings => "Settings",
-            Self::Updates => "Updates",
             Self::Backup => "Backup",
             Self::About => "About",
         }
@@ -211,7 +229,6 @@ impl AppPanelModal {
     fn description(self) -> &'static str {
         match self {
             Self::Settings => "Playback, profiles, shortcuts, and links to the app panels.",
-            Self::Updates => "Check, review, and install GitHub release updates.",
             Self::Backup => "Export and import the complete Audio Orbit state, including folders, playlists, radio stations, profiles, playback, and UI settings.",
             Self::About => "Purpose, licensing, author information, and app shortcuts.",
         }
@@ -220,7 +237,6 @@ impl AppPanelModal {
     fn icon(self) -> Icon {
         match self {
             Self::Settings => Icon::Settings2,
-            Self::Updates => Icon::Download,
             Self::Backup => Icon::Archive,
             Self::About => Icon::Info,
         }
@@ -231,6 +247,25 @@ impl AppPanelModal {
 struct RadioStreamMetadata {
     station_name: Option<String>,
     stream_title: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+enum OrderUndoSnapshot {
+    Playlist {
+        playlist_index: usize,
+        playlist: Playlist,
+        selected_track_index: Option<usize>,
+        selected_track_indexes: BTreeSet<usize>,
+        active_playlist_index: Option<usize>,
+        active_track_index: Option<usize>,
+        active_track_path: Option<PathBuf>,
+    },
+    Radio {
+        stations: Vec<RadioStation>,
+        selected_radio_index: Option<usize>,
+        active_radio_index: Option<usize>,
+        radio_selection_was_user_set: bool,
+    },
 }
 
 struct AudioOrbitApp {
@@ -251,14 +286,10 @@ struct AudioOrbitApp {
     crossfade_started_for_path: Option<PathBuf>,
     pending_track_switch: Option<PendingTrackSwitch>,
     pending_prepared_track_receiver: Option<mpsc::Receiver<Result<PreparedTrackPlayback, String>>>,
-    pending_prepare_cancel: Option<Arc<AtomicBool>>,
-    pending_waveform_receiver: Option<mpsc::Receiver<Result<WaveformAnalysisMessage, String>>>,
-    pending_waveform_cancel: Option<Arc<AtomicBool>>,
-    waveform_request_id: u64,
-    prepare_request_id: u64,
-    pending_radio_playback_receiver: Option<mpsc::Receiver<Result<PreparedRadioPlaybackMessage, String>>>,
-    radio_playback_request_id: u64,
+    pending_folder_scan_receiver: Option<mpsc::Receiver<Result<PendingFolderScanResult, String>>>,
     pending_profile_apply_at: Option<Instant>,
+    profile_apply_applied_until: Option<Instant>,
+    waveform_drag_position_seconds: Option<f32>,
     suppress_window_geometry_save_until: Option<Instant>,
     show_folder_import_modal: bool,
     show_radio_add_modal: bool,
@@ -290,6 +321,11 @@ struct AudioOrbitApp {
     radio_started_at: Option<Instant>,
     last_radio_title_lookup_at: Option<Instant>,
     radio_title_receiver: Option<mpsc::Receiver<(usize, Option<RadioStreamMetadata>)>>,
+    dragging_track_index: Option<usize>,
+    dragging_radio_index: Option<usize>,
+    track_drop_target_index: Option<usize>,
+    radio_drop_target_index: Option<usize>,
+    order_undo_stack: Vec<OrderUndoSnapshot>,
     collapsed_groups: BTreeSet<String>,
     pending_folder_path: Option<PathBuf>,
     pending_playlist_name: String,
@@ -299,10 +335,6 @@ struct AudioOrbitApp {
     last_output_check: Instant,
     editing_playlist_index: Option<usize>,
     editing_profile_index: Option<usize>,
-    last_update_check: Option<updater::UpdateCheck>,
-    update_check_receiver: Option<mpsc::Receiver<Result<updater::UpdateCheck, String>>>,
-    update_check_count: u8,
-    show_update_check_confirmation: bool,
     pending_clipboard_text: Option<String>,
     media_key_receiver: Option<mpsc::Receiver<media_keys::MediaKeyEvent>>,
     media_key_status: String,
@@ -339,14 +371,10 @@ impl AudioOrbitApp {
                     crossfade_started_for_path: None,
                     pending_track_switch: None,
                     pending_prepared_track_receiver: None,
-                    pending_prepare_cancel: None,
-                    pending_waveform_receiver: None,
-                    pending_waveform_cancel: None,
-                    waveform_request_id: 0,
-                    prepare_request_id: 0,
-                    pending_radio_playback_receiver: None,
-                    radio_playback_request_id: 0,
+                    pending_folder_scan_receiver: None,
                     pending_profile_apply_at: None,
+                    profile_apply_applied_until: None,
+                    waveform_drag_position_seconds: None,
                     suppress_window_geometry_save_until: None,
                     show_folder_import_modal: false,
                     show_radio_add_modal: false,
@@ -378,6 +406,11 @@ impl AudioOrbitApp {
                     radio_started_at: None,
                     last_radio_title_lookup_at: None,
                     radio_title_receiver: None,
+                    dragging_track_index: None,
+                    dragging_radio_index: None,
+                    track_drop_target_index: None,
+                    radio_drop_target_index: None,
+                    order_undo_stack: Vec::new(),
                     collapsed_groups: BTreeSet::new(),
                     pending_folder_path: None,
                     pending_playlist_name,
@@ -387,10 +420,6 @@ impl AudioOrbitApp {
                     last_output_check: Instant::now(),
                     editing_playlist_index: None,
                     editing_profile_index: None,
-                    last_update_check: None,
-                    update_check_receiver: None,
-                    update_check_count: 0,
-                    show_update_check_confirmation: false,
                     pending_clipboard_text: None,
                     media_key_receiver: None,
                     media_key_status: "Media keys: unavailable".to_owned(),
@@ -414,14 +443,10 @@ impl AudioOrbitApp {
                 crossfade_started_for_path: None,
                 pending_track_switch: None,
                 pending_prepared_track_receiver: None,
-                pending_prepare_cancel: None,
-                pending_waveform_receiver: None,
-                pending_waveform_cancel: None,
-                waveform_request_id: 0,
-                prepare_request_id: 0,
-                pending_radio_playback_receiver: None,
-                radio_playback_request_id: 0,
+                pending_folder_scan_receiver: None,
                 pending_profile_apply_at: None,
+                profile_apply_applied_until: None,
+                waveform_drag_position_seconds: None,
                 suppress_window_geometry_save_until: None,
                 show_folder_import_modal: false,
                 show_radio_add_modal: false,
@@ -453,6 +478,11 @@ impl AudioOrbitApp {
                 radio_started_at: None,
                 last_radio_title_lookup_at: None,
                 radio_title_receiver: None,
+                dragging_track_index: None,
+                dragging_radio_index: None,
+                track_drop_target_index: None,
+                radio_drop_target_index: None,
+                order_undo_stack: Vec::new(),
                 collapsed_groups: BTreeSet::new(),
                 pending_folder_path: None,
                 pending_playlist_name,
@@ -462,10 +492,6 @@ impl AudioOrbitApp {
                 last_output_check: Instant::now(),
                 editing_playlist_index: None,
                 editing_profile_index: None,
-                last_update_check: None,
-                update_check_receiver: None,
-                update_check_count: 0,
-                show_update_check_confirmation: false,
                 pending_clipboard_text: None,
                 media_key_receiver: None,
                 media_key_status: "Media keys: unavailable".to_owned(),
@@ -481,9 +507,8 @@ impl AudioOrbitApp {
         app.media_key_receiver = media_keys.receiver;
         app.media_key_status = media_keys.status_message;
         app.restore_last_played_track_selection();
-        app.state.selected_radio_index = None;
-        app.radio_selection_was_user_set = false;
-        app.start_automatic_update_check_if_due();
+        app.restore_saved_playback_session();
+        app.restore_repeat_selection_for_current_playlist();
         app
     }
 
@@ -592,9 +617,7 @@ impl AudioOrbitApp {
             return;
         }
 
-        if self.show_update_check_confirmation {
-            self.show_update_check_confirmation = false;
-        } else if self.active_panel_modal.is_some() {
+        if self.active_panel_modal.is_some() {
             self.close_panel_modal();
         } else if self.show_folder_import_modal {
             self.show_folder_import_modal = false;
@@ -622,12 +645,74 @@ impl AudioOrbitApp {
             return;
         }
 
+        self.persist_repeat_selection_for_current_playlist();
+        self.remember_current_playlist_scroll_offset(self.state.ui.playlist_scroll_offset_y);
         self.state.selected_playlist_index = index;
-        self.selected_track_indexes.clear();
+        self.restore_repeat_selection_for_current_playlist();
         self.selected_track_index = self.eligible_track_indexes().first().copied();
         self.collapsed_groups.clear();
         self.search_cursor = 0;
         self.save_state_silently();
+    }
+
+    fn restore_repeat_selection_for_current_playlist(&mut self) {
+        let selected_indexes = self
+            .current_playlist()
+            .map(|playlist| {
+                playlist
+                    .tracks
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, track)| {
+                        playlist
+                            .repeat_selection
+                            .iter()
+                            .any(|selected_path| same_path(selected_path.as_path(), track.path.as_path()))
+                            .then_some(index)
+                    })
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+
+        self.selected_track_indexes = selected_indexes;
+    }
+
+    fn persist_repeat_selection_for_current_playlist(&mut self) {
+        let selected_paths = self
+            .current_playlist()
+            .map(|playlist| {
+                self.selected_track_indexes
+                    .iter()
+                    .filter_map(|index| playlist.tracks.get(*index).map(|track| track.path.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if let Some(playlist) = self.current_playlist_mut() {
+            playlist.repeat_selection = selected_paths;
+        }
+    }
+
+    fn current_playlist_scroll_key(&self) -> Option<String> {
+        self.state
+            .playlists
+            .get(self.state.selected_playlist_index)
+            .map(|playlist| playlist_scroll_key(self.state.selected_playlist_index, playlist))
+    }
+
+    fn current_playlist_scroll_offset_y(&self) -> f32 {
+        self.current_playlist_scroll_key()
+            .and_then(|key| self.state.ui.playlist_scroll_offsets.get(&key).copied())
+            .unwrap_or(self.state.ui.playlist_scroll_offset_y)
+            .max(0.0)
+    }
+
+    fn remember_current_playlist_scroll_offset(&mut self, offset_y: f32) {
+        let offset_y = offset_y.max(0.0);
+        self.state.ui.playlist_scroll_offset_y = offset_y;
+        if let Some(key) = self.current_playlist_scroll_key() {
+            self.state.ui.playlist_scroll_offsets.insert(key, offset_y);
+        }
     }
 
     fn current_settings(&self) -> DspSettings {
@@ -645,7 +730,7 @@ impl AudioOrbitApp {
     }
 
     fn visible_track_indexes(&self) -> Vec<usize> {
-        let query = self.track_search_query.trim().to_lowercase();
+        let query = self.track_search_query.trim();
         let Some(playlist) = self.current_playlist() else {
             return Vec::new();
         };
@@ -657,12 +742,7 @@ impl AudioOrbitApp {
                 playlist
                     .tracks
                     .get(*index)
-                    .map(|track| {
-                        query.is_empty()
-                            || track.title.to_lowercase().contains(&query)
-                            || track.group.to_lowercase().contains(&query)
-                            || track.path.to_string_lossy().to_lowercase().contains(&query)
-                    })
+                    .map(|track| track_matches_search_query(track, query))
                     .unwrap_or(false)
             })
             .collect()
@@ -722,6 +802,145 @@ impl AudioOrbitApp {
         };
         self.state.selected_playlist_index = last_played.playlist_index;
         self.selected_track_index = Some(track_index);
+        self.scroll_to_active_track_requested = true;
+    }
+
+    fn restore_saved_playback_session(&mut self) {
+        let session = self.state.playback_session.clone();
+        match session.source.as_str() {
+            "radio" => {
+                let Some(radio_index) = session.radio_index.or(self.state.selected_radio_index) else {
+                    return;
+                };
+                if radio_index >= self.state.radio_stations.len() {
+                    return;
+                }
+                self.active_tab = MainContentTab::Radio;
+                self.state.selected_radio_index = Some(radio_index);
+                self.radio_selection_was_user_set = true;
+                self.scroll_to_active_radio_requested = true;
+                if session.was_active && !session.was_paused {
+                    self.play_radio_station(radio_index);
+                }
+            }
+            "track" | "music" => {
+                let Some((playlist_index, track_index, path)) = self.find_session_track(&session) else {
+                    return;
+                };
+                self.active_tab = MainContentTab::Music;
+                self.state.selected_playlist_index = playlist_index;
+                self.selected_track_index = Some(track_index);
+                self.scroll_to_active_track_requested = true;
+                if session.was_active && !session.was_paused {
+                    let start_seconds = session.position_seconds.max(0.0);
+                    self.play_path(path, Some(track_index), start_seconds);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn find_session_track(&self, session: &PlaybackSession) -> Option<(usize, usize, PathBuf)> {
+        let session_path = session
+            .track_path
+            .as_ref()
+            .or_else(|| self.state.last_played_track.as_ref().map(|track| &track.track_path))?;
+        let preferred_playlist = session
+            .playlist_index
+            .or_else(|| self.state.last_played_track.as_ref().map(|track| track.playlist_index));
+
+        if let Some(playlist_index) = preferred_playlist {
+            if let Some(playlist) = self.state.playlists.get(playlist_index) {
+                if let Some(track_index) = playlist.tracks.iter().position(|track| same_path(&track.path, session_path)) {
+                    return Some((playlist_index, track_index, playlist.tracks[track_index].path.clone()));
+                }
+            }
+        }
+
+        for (playlist_index, playlist) in self.state.playlists.iter().enumerate() {
+            if let Some(track_index) = playlist.tracks.iter().position(|track| same_path(&track.path, session_path)) {
+                return Some((playlist_index, track_index, playlist.tracks[track_index].path.clone()));
+            }
+        }
+
+        None
+    }
+
+    fn persist_playback_session(&mut self) {
+        let mut session = PlaybackSession::default();
+        session.source = match self.active_tab {
+            MainContentTab::Radio => "radio".to_owned(),
+            MainContentTab::Music => "music".to_owned(),
+        };
+
+        let radio_candidate = if self.active_radio_index.is_some()
+            || (self.active_track_path.is_none() && self.active_tab == MainContentTab::Radio)
+        {
+            self.active_radio_index.or(self.state.selected_radio_index)
+        } else {
+            None
+        };
+
+        if let Some(radio_index) = radio_candidate {
+            let is_active = self
+                .player
+                .as_ref()
+                .map(|player| player.is_playing() || player.is_paused())
+                .unwrap_or(false)
+                && self.active_radio_index.is_some();
+            session.source = "radio".to_owned();
+            session.was_active = is_active;
+            session.was_paused = self.player.as_ref().map(|player| player.is_paused()).unwrap_or(false);
+            session.radio_index = Some(radio_index);
+            self.state.selected_radio_index = Some(radio_index);
+            self.state.playback_session = session;
+            return;
+        }
+
+        let track_path = self
+            .active_track_path
+            .clone()
+            .or_else(|| self.selected_track_path())
+            .or_else(|| self.state.last_played_track.as_ref().map(|track| track.track_path.clone()));
+        if let Some(path) = track_path {
+            let playlist_index = self
+                .active_playlist_index
+                .or_else(|| self.state.last_played_track.as_ref().map(|track| track.playlist_index))
+                .unwrap_or(self.state.selected_playlist_index);
+            let is_active = self
+                .player
+                .as_ref()
+                .map(|player| player.is_playing() || player.is_paused())
+                .unwrap_or(false)
+                && self.active_track_path.is_some();
+            let player_is_paused = self.player.as_ref().map(|player| player.is_paused()).unwrap_or(false);
+            let preserved_paused_session_position = (!is_active
+                && self.state.playback_session.was_paused
+                && self
+                    .state
+                    .playback_session
+                    .track_path
+                    .as_ref()
+                    .map(|saved_path| same_path(saved_path, &path))
+                    .unwrap_or(false))
+            .then_some(self.state.playback_session.position_seconds.max(0.0));
+            session.source = "track".to_owned();
+            session.was_active = is_active || preserved_paused_session_position.is_some();
+            session.was_paused = player_is_paused || preserved_paused_session_position.is_some();
+            session.playlist_index = Some(playlist_index);
+            session.track_path = Some(path.clone());
+            session.position_seconds = if is_active {
+                self.displayed_playback_position_seconds().max(0.0)
+            } else {
+                preserved_paused_session_position.unwrap_or(0.0)
+            };
+            self.state.last_played_track = Some(LastPlayedTrack {
+                playlist_index,
+                track_path: path,
+            });
+        }
+
+        self.state.playback_session = session;
     }
 
     fn active_track_title(&self) -> String {
@@ -787,18 +1006,19 @@ impl AudioOrbitApp {
         self.last_playback.as_ref().map(|playback| {
             if self.player_only_mode {
                 format!(
-                    "{} · {}",
-                    format_duration(playback.rendered_duration_seconds),
+                    "{}k · {} ch · {}",
+                    playback.sample_rate / 1000,
+                    playback.input_channels,
                     playback.size_bytes.map(format_file_size).unwrap_or_else(|| "unknown size".to_owned())
                 )
             } else {
                 format!(
-                    "{} · {} Hz · {} ch · {} · rendered {}",
+                    "{} · {} Hz · {} ch · {} · duration {}",
                     display_parent(&playback.path),
                     playback.sample_rate,
                     playback.input_channels,
                     playback.size_bytes.map(format_file_size).unwrap_or_else(|| "unknown size".to_owned()),
-                    format_duration(playback.rendered_duration_seconds)
+                    format_duration(playback.original_duration_seconds)
                 )
             }
         })
@@ -813,7 +1033,9 @@ impl AudioOrbitApp {
         }
 
         if self.active_track_path.is_some() || self.pending_track_switch.is_some() {
-            let position = self.displayed_playback_position_seconds();
+            let position = self
+                .waveform_drag_position_seconds
+                .unwrap_or_else(|| self.displayed_playback_position_seconds());
             let duration = self.displayed_playback_duration_seconds();
             return format!("{} / {}", format_duration(position), format_duration(duration));
         }
@@ -892,73 +1114,18 @@ impl AudioOrbitApp {
             return;
         };
         let settings = self.current_settings();
-        let Some(player) = &self.player else {
-            self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
-            return;
-        };
-
-        self.radio_playback_request_id = self.radio_playback_request_id.wrapping_add(1);
-        let request_id = self.radio_playback_request_id;
-        let recorder = player.radio_recorder_handle();
-        let (sender, receiver) = mpsc::channel();
-        let url = station.url.clone();
-        let station_for_thread = station.clone();
-
-        self.pending_radio_playback_receiver = Some(receiver);
-        self.active_tab = MainContentTab::Radio;
-        self.state.selected_radio_index = Some(index);
-        self.radio_selection_was_user_set = true;
-        self.status_message = format!("Opening internet radio: {}...", station.name);
-        self.error_message = None;
-
-        thread::spawn(move || {
-            let result = AudioPlayer::prepare_radio_stream(url, settings, recorder)
-                .map(|prepared| PreparedRadioPlaybackMessage {
-                    request_id,
-                    index,
-                    station: station_for_thread,
-                    prepared,
-                })
-                .map_err(|error| error.to_string());
-            let _ = sender.send(result);
-        });
-    }
-
-    fn process_radio_playback_events(&mut self) {
-        let Some(receiver) = &self.pending_radio_playback_receiver else {
-            return;
-        };
-
-        let message = match receiver.try_recv() {
-            Ok(message) => message,
-            Err(mpsc::TryRecvError::Empty) => return,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.pending_radio_playback_receiver = None;
-                return;
-            }
-        };
-
-        self.pending_radio_playback_receiver = None;
-        let prepared = match message {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                self.error_message = Some(error);
-                self.status_message = "Internet radio playback failed.".to_owned();
-                return;
-            }
-        };
-
-        if prepared.request_id != self.radio_playback_request_id {
-            self.status_message = "Ignored stale internet radio startup result.".to_owned();
-            return;
-        }
-
+        let crossfade_seconds = self.configured_manual_crossfade_seconds();
         let Some(player) = &mut self.player else {
             self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
             return;
         };
-
-        match player.play_prepared_radio_stream(prepared.prepared) {
+        self.status_message = if crossfade_seconds > 0.05 {
+            format!("Crossfading to internet radio: {}...", station.name)
+        } else {
+            format!("Opening internet radio: {}...", station.name)
+        };
+        self.error_message = None;
+        match player.play_radio_stream_with_crossfade(&station.url, settings, crossfade_seconds) {
             Ok(()) => {
                 self.active_tab = MainContentTab::Radio;
                 self.active_radio_index = Some(prepared.index);
@@ -973,7 +1140,12 @@ impl AudioOrbitApp {
                 self.pending_track_switch = None;
                 self.state.selected_radio_index = Some(prepared.index);
                 self.radio_selection_was_user_set = true;
-                self.status_message = format!("Playing internet radio: {}.", prepared.station.name);
+                self.status_message = if crossfade_seconds > 0.05 {
+                    format!("Crossfading to internet radio: {}.", station.name)
+                } else {
+                    format!("Playing internet radio: {}.", station.name)
+                };
+                self.persist_playback_session();
                 self.save_state_silently();
                 self.start_radio_title_lookup(prepared.index, prepared.station.url);
             }
@@ -1032,7 +1204,7 @@ impl AudioOrbitApp {
         let Some(last_lookup) = self.last_radio_title_lookup_at else {
             return;
         };
-        if last_lookup.elapsed() < Duration::from_secs(15) {
+        if last_lookup.elapsed() < Duration::from_secs(RADIO_METADATA_REFRESH_INTERVAL_SECONDS) {
             return;
         }
         let Some(station) = self.state.radio_stations.get(index) else {
@@ -1114,37 +1286,19 @@ impl AudioOrbitApp {
             self.pending_playlist_name.trim().to_owned()
         };
 
-        match collect_audio_files_from_folder(&folder) {
-            Ok(files) if files.is_empty() => {
-                self.error_message = Some(format!(
-                    "No supported audio files were found under {}.",
-                    folder.display()
-                ));
-                false
-            }
-            Ok(files) => {
-                let track_count = files.len();
-                let playlist = Playlist::from_folder(name.clone(), folder.clone(), self.pending_folder_depth, files);
-                self.state.playlists.push(playlist);
-                self.state.selected_playlist_index = self.state.playlists.len() - 1;
-                self.selected_track_indexes.clear();
-                self.selected_track_index = self.eligible_track_indexes().first().copied();
-                self.status_message = format!(
-                    "Imported {track_count} track(s) from {} as {name}.",
-                    folder.display()
-                );
-                self.error_message = None;
-                self.save_state_silently();
-                true
-            }
-            Err(error) => {
-                self.error_message = Some(error.to_string());
-                false
-            }
+        if !self.start_folder_scan(PendingFolderScanKind::Import {
+            name: name.clone(),
+            folder: folder.clone(),
+            depth: self.pending_folder_depth,
+        }) {
+            return false;
         }
+        self.status_message = format!("Scanning {} for {name}...", folder.display());
+        true
     }
 
     fn rescan_current_folder(&mut self) {
+        let playlist_index = self.state.selected_playlist_index;
         let Some((folder, depth, name)) = self.current_playlist().and_then(|playlist| {
             playlist
                 .source_folder
@@ -1155,20 +1309,111 @@ impl AudioOrbitApp {
             return;
         };
 
-        match collect_audio_files_from_folder(&folder) {
-            Ok(files) => {
-                let track_count = files.len();
-                if let Some(playlist) = self.current_playlist_mut() {
-                    playlist.folder_depth = depth;
-                    playlist.replace_tracks_from_files(files);
-                }
+        if self.start_folder_scan(PendingFolderScanKind::Rescan {
+            playlist_index,
+            name: name.clone(),
+            folder: folder.clone(),
+            depth,
+        }) {
+            self.status_message = format!("Rescanning {name} in background...");
+        }
+    }
+
+    fn start_folder_scan(&mut self, kind: PendingFolderScanKind) -> bool {
+        if self.pending_folder_scan_receiver.is_some() {
+            self.error_message = Some("A folder scan is already running. Wait for it to finish before starting another scan.".to_owned());
+            return false;
+        }
+
+        let folder = match &kind {
+            PendingFolderScanKind::Import { folder, .. } => folder.clone(),
+            PendingFolderScanKind::Rescan { folder, .. } => folder.clone(),
+        };
+        let (sender, receiver) = mpsc::channel();
+        self.pending_folder_scan_receiver = Some(receiver);
+        self.error_message = None;
+
+        thread::spawn(move || {
+            let result = collect_audio_files_from_folder(&folder)
+                .map(|files| PendingFolderScanResult { kind, files })
+                .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+        true
+    }
+
+    fn process_folder_scan_events(&mut self) {
+        let Some(receiver) = &self.pending_folder_scan_receiver else {
+            return;
+        };
+
+        let message = match receiver.try_recv() {
+            Ok(message) => message,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.pending_folder_scan_receiver = None;
+                self.error_message = Some("Folder scan stopped before returning a result.".to_owned());
+                return;
+            }
+        };
+
+        self.pending_folder_scan_receiver = None;
+        let result = match message {
+            Ok(result) => result,
+            Err(error) => {
+                self.error_message = Some(error);
+                self.status_message = "Folder scan failed.".to_owned();
+                return;
+            }
+        };
+
+        if result.files.is_empty() {
+            let folder = match &result.kind {
+                PendingFolderScanKind::Import { folder, .. } => folder,
+                PendingFolderScanKind::Rescan { folder, .. } => folder,
+            };
+            self.error_message = Some(format!(
+                "No supported audio files were found under {}.",
+                folder.display()
+            ));
+            self.status_message = "Folder scan finished without tracks.".to_owned();
+            return;
+        }
+
+        match result.kind {
+            PendingFolderScanKind::Import { name, folder, depth } => {
+                let track_count = result.files.len();
+                let playlist = Playlist::from_folder(name.clone(), folder.clone(), depth, result.files);
+                self.state.playlists.push(playlist);
+                self.state.selected_playlist_index = self.state.playlists.len() - 1;
+                self.restore_repeat_selection_for_current_playlist();
                 self.selected_track_index = self.eligible_track_indexes().first().copied();
-                self.status_message = format!("Rescanned {name}: {track_count} track(s) found.");
+                self.status_message = format!(
+                    "Imported {track_count} track(s) from {} as {name}.",
+                    folder.display()
+                );
                 self.error_message = None;
                 self.save_state_silently();
             }
-            Err(error) => {
-                self.error_message = Some(error.to_string());
+            PendingFolderScanKind::Rescan { playlist_index, name, folder, depth } => {
+                let track_count = result.files.len();
+                let Some(playlist) = self.state.playlists.get_mut(playlist_index) else {
+                    self.error_message = Some(format!("{name} no longer exists; rescan result was ignored."));
+                    return;
+                };
+                if playlist.source_folder.as_ref().map(|source| same_path(source, &folder)).unwrap_or(false) {
+                    playlist.folder_depth = depth;
+                    playlist.replace_tracks_from_files(result.files);
+                    if self.state.selected_playlist_index == playlist_index {
+                        self.restore_repeat_selection_for_current_playlist();
+                        self.selected_track_index = self.eligible_track_indexes().first().copied();
+                    }
+                    self.status_message = format!("Rescanned {name}: {track_count} track(s) found.");
+                    self.error_message = None;
+                    self.save_state_silently();
+                } else {
+                    self.error_message = Some(format!("{name} changed source folders; rescan result was ignored."));
+                }
             }
         }
     }
@@ -1209,7 +1454,7 @@ impl AudioOrbitApp {
                 self.show_library_panel = self.state.ui.show_library_panel;
                 self.show_profile_panel = self.state.ui.show_profile_panel;
                 self.player_only_mode = self.state.ui.player_only_mode;
-                self.selected_track_indexes.clear();
+                self.restore_repeat_selection_for_current_playlist();
                 self.selected_track_index = self.eligible_track_indexes().first().copied();
                 self.status_message = format!("Imported app backup from {}.", path.display());
                 self.error_message = None;
@@ -1223,9 +1468,10 @@ impl AudioOrbitApp {
 
     fn add_playlist(&mut self) {
         let number = self.state.playlists.len() + 1;
+        self.persist_repeat_selection_for_current_playlist();
         self.state.playlists.push(Playlist::new(format!("Playlist {number}")));
         self.state.selected_playlist_index = self.state.playlists.len() - 1;
-        self.selected_track_indexes.clear();
+        self.restore_repeat_selection_for_current_playlist();
         self.selected_track_index = None;
         self.status_message = "Created a new playlist.".to_owned();
         self.save_state_silently();
@@ -1259,7 +1505,7 @@ impl AudioOrbitApp {
             }
         }
         self.state.selected_playlist_index = removed_index.saturating_sub(1).min(self.state.playlists.len() - 1);
-        self.selected_track_indexes.clear();
+        self.restore_repeat_selection_for_current_playlist();
         self.selected_track_index = self.eligible_track_indexes().first().copied();
         self.status_message = if removed_playing_playlist {
             "Removed playlist and stopped its active playback.".to_owned()
@@ -1287,6 +1533,337 @@ impl AudioOrbitApp {
         } else if self.state.selected_playlist_index == to {
             self.state.selected_playlist_index = from;
         }
+        self.save_state_silently();
+    }
+
+
+    fn push_playlist_order_undo(&mut self) {
+        let playlist_index = self.state.selected_playlist_index;
+        let Some(playlist) = self.state.playlists.get(playlist_index).cloned() else {
+            return;
+        };
+
+        self.order_undo_stack.push(OrderUndoSnapshot::Playlist {
+            playlist_index,
+            playlist,
+            selected_track_index: self.selected_track_index,
+            selected_track_indexes: self.selected_track_indexes.clone(),
+            active_playlist_index: self.active_playlist_index,
+            active_track_index: self.active_track_index,
+            active_track_path: self.active_track_path.clone(),
+        });
+        self.trim_order_undo_stack();
+    }
+
+    fn push_radio_order_undo(&mut self) {
+        self.order_undo_stack.push(OrderUndoSnapshot::Radio {
+            stations: self.state.radio_stations.clone(),
+            selected_radio_index: self.state.selected_radio_index,
+            active_radio_index: self.active_radio_index,
+            radio_selection_was_user_set: self.radio_selection_was_user_set,
+        });
+        self.trim_order_undo_stack();
+    }
+
+    fn trim_order_undo_stack(&mut self) {
+        const MAX_ORDER_UNDO_STEPS: usize = 50;
+        if self.order_undo_stack.len() > MAX_ORDER_UNDO_STEPS {
+            let excess = self.order_undo_stack.len() - MAX_ORDER_UNDO_STEPS;
+            self.order_undo_stack.drain(0..excess);
+        }
+    }
+
+    fn undo_last_order_change(&mut self) {
+        let Some(snapshot) = self.order_undo_stack.pop() else {
+            self.status_message = "Nothing to undo.".to_owned();
+            return;
+        };
+
+        match snapshot {
+            OrderUndoSnapshot::Playlist {
+                playlist_index,
+                playlist,
+                selected_track_index,
+                selected_track_indexes,
+                active_playlist_index,
+                active_track_index,
+                active_track_path,
+            } => {
+                if playlist_index < self.state.playlists.len() {
+                    self.state.playlists[playlist_index] = playlist;
+                    self.state.selected_playlist_index = playlist_index;
+                    self.selected_track_index = selected_track_index
+                        .filter(|index| self.current_playlist().map(|playlist| *index < playlist.tracks.len()).unwrap_or(false));
+                    self.selected_track_indexes = selected_track_indexes
+                        .into_iter()
+                        .filter(|index| self.current_playlist().map(|playlist| *index < playlist.tracks.len()).unwrap_or(false))
+                        .collect();
+                    self.active_playlist_index = active_playlist_index;
+                    self.active_track_index = active_track_index;
+                    self.active_track_path = active_track_path;
+                    self.restore_repeat_selection_for_current_playlist();
+                    self.status_message = "Undid playlist order change.".to_owned();
+                }
+            }
+            OrderUndoSnapshot::Radio {
+                stations,
+                selected_radio_index,
+                active_radio_index,
+                radio_selection_was_user_set,
+            } => {
+                self.state.radio_stations = stations;
+                self.state.selected_radio_index = selected_radio_index
+                    .filter(|index| *index < self.state.radio_stations.len());
+                self.active_radio_index = active_radio_index
+                    .filter(|index| *index < self.state.radio_stations.len());
+                self.radio_selection_was_user_set = radio_selection_was_user_set;
+                self.status_message = "Undid radio order change.".to_owned();
+            }
+        }
+
+        self.dragging_track_index = None;
+        self.dragging_radio_index = None;
+        self.track_drop_target_index = None;
+        self.radio_drop_target_index = None;
+        self.save_state_silently();
+    }
+
+    fn valid_drop_target(from: usize, to: usize) -> bool {
+        from != to && from + 1 != to
+    }
+
+    fn restore_track_selection_after_reorder(&mut self, selected_path: Option<PathBuf>) {
+        if let Some(selected_path) = selected_path {
+            if let Some(index) = self
+                .current_playlist()
+                .and_then(|playlist| playlist.tracks.iter().position(|track| same_path(&track.path, &selected_path)))
+            {
+                self.selected_track_index = Some(index);
+            }
+        }
+
+        if let (Some(active_playlist_index), Some(active_path)) = (self.active_playlist_index, self.active_track_path.clone()) {
+            if active_playlist_index == self.state.selected_playlist_index {
+                self.active_track_index = self
+                    .current_playlist()
+                    .and_then(|playlist| playlist.tracks.iter().position(|track| same_path(&track.path, &active_path)));
+            }
+        }
+
+        self.restore_repeat_selection_for_current_playlist();
+    }
+
+    fn sort_current_playlist_by_name(&mut self, ascending: bool) {
+        self.persist_repeat_selection_for_current_playlist();
+        let selected_path = self.selected_track_path();
+        let should_sort = self.current_playlist().map(|playlist| playlist.tracks.len() > 1).unwrap_or(false);
+        if should_sort {
+            self.push_playlist_order_undo();
+        }
+        if let Some(playlist) = self.current_playlist_mut() {
+            playlist.tracks.sort_by(|left, right| {
+                let ordering = naturalish_key(&left.group)
+                    .cmp(&naturalish_key(&right.group))
+                    .then_with(|| naturalish_key(&left.title).cmp(&naturalish_key(&right.title)))
+                    .then_with(|| left.path.cmp(&right.path));
+                if ascending { ordering } else { ordering.reverse() }
+            });
+        }
+        self.restore_track_selection_after_reorder(selected_path);
+        self.status_message = if ascending {
+            "Sorted current playlist A to Z.".to_owned()
+        } else {
+            "Sorted current playlist Z to A.".to_owned()
+        };
+        self.save_state_silently();
+    }
+
+    fn move_track_in_current_playlist(&mut self, index: usize, delta: isize) {
+        self.persist_repeat_selection_for_current_playlist();
+        let selected_path = self.selected_track_path();
+        let Some(track_count) = self.current_playlist().map(|playlist| playlist.tracks.len()) else {
+            return;
+        };
+        if index >= track_count {
+            return;
+        }
+        let to = if delta < 0 {
+            index.saturating_sub(1)
+        } else {
+            (index + 1).min(track_count - 1)
+        };
+        if index == to {
+            return;
+        }
+        self.push_playlist_order_undo();
+        let Some(playlist) = self.current_playlist_mut() else {
+            return;
+        };
+        playlist.tracks.swap(index, to);
+        self.restore_track_selection_after_reorder(selected_path);
+        self.status_message = "Moved track in playlist order.".to_owned();
+        self.save_state_silently();
+    }
+
+    fn move_track_to_index_in_current_playlist(&mut self, from: usize, to: usize) {
+        self.persist_repeat_selection_for_current_playlist();
+        let selected_path = self.selected_track_path();
+        let Some(track_count) = self.current_playlist().map(|playlist| playlist.tracks.len()) else {
+            return;
+        };
+        if from >= track_count || to > track_count {
+            return;
+        }
+        self.push_playlist_order_undo();
+        let Some(playlist) = self.current_playlist_mut() else {
+            return;
+        };
+        let track = playlist.tracks.remove(from);
+        let insert_at = if from < to { to.saturating_sub(1) } else { to };
+        playlist.tracks.insert(insert_at.min(playlist.tracks.len()), track);
+        self.restore_track_selection_after_reorder(selected_path);
+        self.status_message = "Moved track in playlist order.".to_owned();
+        self.save_state_silently();
+    }
+
+
+    fn move_folder_group_in_current_playlist(&mut self, group: &str, delta: isize) {
+        self.persist_repeat_selection_for_current_playlist();
+        let selected_path = self.selected_track_path();
+        let Some(playlist) = self.current_playlist() else {
+            return;
+        };
+
+        let mut group_order: Vec<String> = Vec::new();
+        for track in &playlist.tracks {
+            if group_order.last().map(|current| current != &track.group).unwrap_or(true)
+                && !group_order.iter().any(|current| current == &track.group)
+            {
+                group_order.push(track.group.clone());
+            }
+        }
+        let Some(position) = group_order.iter().position(|current| current == group) else {
+            return;
+        };
+        let to = if delta < 0 {
+            position.saturating_sub(1)
+        } else {
+            (position + 1).min(group_order.len().saturating_sub(1))
+        };
+        if position == to {
+            return;
+        }
+
+        self.push_playlist_order_undo();
+        let Some(playlist) = self.current_playlist_mut() else {
+            return;
+        };
+        group_order.swap(position, to);
+        let old_tracks = std::mem::take(&mut playlist.tracks);
+        let mut reordered = Vec::with_capacity(old_tracks.len());
+        for ordered_group in &group_order {
+            reordered.extend(
+                old_tracks
+                    .iter()
+                    .filter(|track| &track.group == ordered_group)
+                    .cloned(),
+            );
+        }
+        playlist.tracks = reordered;
+        self.restore_track_selection_after_reorder(selected_path);
+        self.status_message = format!("Moved folder group: {group}.");
+        self.save_state_silently();
+    }
+
+    fn sort_radio_stations_by_name(&mut self, ascending: bool) {
+        if self.state.radio_stations.len() > 1 {
+            self.push_radio_order_undo();
+        }
+        let active_url = self
+            .active_radio_index
+            .and_then(|index| self.state.radio_stations.get(index).map(|station| station.url.clone()));
+        let selected_url = self
+            .state
+            .selected_radio_index
+            .and_then(|index| self.state.radio_stations.get(index).map(|station| station.url.clone()));
+
+        self.state.radio_stations.sort_by(|left, right| {
+            let ordering = naturalish_key(&left.name)
+                .cmp(&naturalish_key(&right.name))
+                .then_with(|| left.url.cmp(&right.url));
+            if ascending { ordering } else { ordering.reverse() }
+        });
+
+        self.active_radio_index = active_url.as_ref().and_then(|url| {
+            self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
+        });
+        self.state.selected_radio_index = selected_url.as_ref().and_then(|url| {
+            self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
+        });
+        self.radio_selection_was_user_set = self.state.selected_radio_index.is_some();
+        self.status_message = if ascending {
+            "Sorted radio stations A to Z.".to_owned()
+        } else {
+            "Sorted radio stations Z to A.".to_owned()
+        };
+        self.save_state_silently();
+    }
+
+    fn move_radio_station(&mut self, index: usize, delta: isize) {
+        if index >= self.state.radio_stations.len() {
+            return;
+        }
+        let active_url = self
+            .active_radio_index
+            .and_then(|active_index| self.state.radio_stations.get(active_index).map(|station| station.url.clone()));
+        let selected_url = self
+            .state
+            .selected_radio_index
+            .and_then(|selected_index| self.state.radio_stations.get(selected_index).map(|station| station.url.clone()));
+        let to = if delta < 0 {
+            index.saturating_sub(1)
+        } else {
+            (index + 1).min(self.state.radio_stations.len() - 1)
+        };
+        if index == to {
+            return;
+        }
+        self.push_radio_order_undo();
+        self.state.radio_stations.swap(index, to);
+        self.active_radio_index = active_url.as_ref().and_then(|url| {
+            self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
+        });
+        self.state.selected_radio_index = selected_url.as_ref().and_then(|url| {
+            self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
+        });
+        self.radio_selection_was_user_set = self.state.selected_radio_index.is_some();
+        self.status_message = "Moved radio station.".to_owned();
+        self.save_state_silently();
+    }
+
+    fn move_radio_station_to_index(&mut self, from: usize, to: usize) {
+        if from >= self.state.radio_stations.len() || to > self.state.radio_stations.len() {
+            return;
+        }
+        self.push_radio_order_undo();
+        let active_url = self
+            .active_radio_index
+            .and_then(|active_index| self.state.radio_stations.get(active_index).map(|station| station.url.clone()));
+        let selected_url = self
+            .state
+            .selected_radio_index
+            .and_then(|selected_index| self.state.radio_stations.get(selected_index).map(|station| station.url.clone()));
+        let station = self.state.radio_stations.remove(from);
+        let insert_at = if from < to { to.saturating_sub(1) } else { to };
+        self.state.radio_stations.insert(insert_at.min(self.state.radio_stations.len()), station);
+        self.active_radio_index = active_url.as_ref().and_then(|url| {
+            self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
+        });
+        self.state.selected_radio_index = selected_url.as_ref().and_then(|url| {
+            self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
+        });
+        self.radio_selection_was_user_set = self.state.selected_radio_index.is_some();
+        self.status_message = "Moved radio station.".to_owned();
         self.save_state_silently();
     }
 
@@ -1324,7 +1901,21 @@ impl AudioOrbitApp {
             return;
         };
 
-        self.play_path(path, self.selected_track_index, 0.0);
+        let start_seconds = self.saved_paused_resume_position_for_track(&path).unwrap_or(0.0);
+        self.play_path(path, self.selected_track_index, start_seconds);
+    }
+
+    fn saved_paused_resume_position_for_track(&self, path: &Path) -> Option<f32> {
+        let session = &self.state.playback_session;
+        if !session.was_paused || session.source != "track" {
+            return None;
+        }
+        let session_path = session.track_path.as_ref()?;
+        if same_path(session_path, path) {
+            Some(session.position_seconds.max(0.0))
+        } else {
+            None
+        }
     }
 
     fn play_path(&mut self, path: PathBuf, index: Option<usize>, start_seconds: f32) {
@@ -1346,6 +1937,30 @@ impl AudioOrbitApp {
         self.prepare_track_playback(path, index, start_seconds, crossfade_seconds, false);
     }
 
+    fn cached_track_for_path(&self, index: Option<usize>, path: &Path) -> Option<&Track> {
+        let playlist = self.current_playlist()?;
+        index
+            .and_then(|index| playlist.tracks.get(index))
+            .filter(|track| same_path(&track.path, path))
+            .or_else(|| playlist.tracks.iter().find(|track| same_path(&track.path, path)))
+    }
+
+    fn cached_waveform_for_track(&self, index: Option<usize>, path: &Path) -> Option<(Vec<f32>, Vec<f32>)> {
+        let track = self.cached_track_for_path(index, path)?;
+
+        if track.waveform.is_empty() || track.waveform_brightness.is_empty() {
+            None
+        } else {
+            Some((track.waveform.clone(), track.waveform_brightness.clone()))
+        }
+    }
+
+    fn known_duration_for_track(&self, index: Option<usize>, path: &Path) -> Option<f32> {
+        self.cached_track_for_path(index, path)
+            .and_then(|track| track.metadata.duration_seconds)
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+    }
+
     fn prepare_track_playback(
         &mut self,
         path: PathBuf,
@@ -1361,37 +1976,23 @@ impl AudioOrbitApp {
 
         let settings = self.current_settings();
         let playlist_index = self.state.selected_playlist_index;
-        let previous_position = if crossfade_seconds > 0.05 {
-            Some(self.displayed_playback_position_seconds())
-        } else {
-            None
-        };
-        let previous_duration = if crossfade_seconds > 0.05 {
-            Some(self.displayed_playback_duration_seconds())
-        } else {
-            None
-        };
-        if let Some(cancel) = self.pending_prepare_cancel.take() {
-            cancel.store(true, Ordering::Relaxed);
-        }
+        let cached_waveform = self.cached_waveform_for_track(index, &path);
+        let known_duration_seconds = self.known_duration_for_track(index, &path);
 
-        self.prepare_request_id = self.prepare_request_id.wrapping_add(1);
-
-        let can_start_streaming = crossfade_seconds <= 0.05 && !settings.skip_silence_enabled;
-        if can_start_streaming {
+        if !settings.skip_silence_enabled {
             self.pending_prepared_track_receiver = None;
-            self.pending_track_switch = None;
-            self.crossfade_started_for_path = None;
-            self.status_message = format!("Starting {}...", display_file_name(&path));
-            self.error_message = None;
-
-            let result = match self.player.as_mut() {
-                Some(player) => player.play_file_streaming_from(&path, settings, start_seconds),
-                None => {
-                    self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
-                    return;
-                }
-            };
+            let result = self
+                .player
+                .as_mut()
+                .expect("audio player was checked above")
+                .play_file_streaming_with_cached_waveform_and_crossfade(
+                    &path,
+                    settings,
+                    start_seconds,
+                    cached_waveform,
+                    known_duration_seconds,
+                    crossfade_seconds,
+                );
 
             match result {
                 Ok(info) => {
@@ -1411,15 +2012,24 @@ impl AudioOrbitApp {
                     self.selected_track_index = index;
                     self.active_track_index = index;
                     self.active_track_path = Some(info.path.clone());
+                    self.pending_track_switch = None;
+                    self.crossfade_started_for_path = None;
                     self.store_playback_metadata(&info);
                     self.remember_last_played_track(index, &info.path);
                     self.last_playback = Some(info.clone());
-                    self.start_background_waveform_analysis(info.path.clone());
                     self.status_message = if live_position_compensation {
                         format!("Applied sound profile and continued {} through {}.", display_file_name(&info.path), mode_label)
+                    } else if crossfade_seconds > 0.05 {
+                        format!(
+                            "Crossfading to {} through {}; previous source is fading out.",
+                            display_file_name(&info.path),
+                            mode_label
+                        )
                     } else {
                         format!("Playing {} through {}.", display_file_name(&info.path), mode_label)
                     };
+                    self.persist_playback_session();
+                    self.save_state_silently();
                     self.error_message = None;
                 }
                 Err(error) => {
@@ -1429,34 +2039,98 @@ impl AudioOrbitApp {
             }
             return;
         }
-        let request_id = self.prepare_request_id;
-        let cancel = Arc::new(AtomicBool::new(false));
-        let cancel_for_thread = Arc::clone(&cancel);
-        let requested_at = Instant::now();
+
+        let fast_result = self
+            .player
+            .as_mut()
+            .expect("audio player was checked above")
+            .play_file_streaming_with_cached_waveform_and_crossfade(
+                &path,
+                settings,
+                start_seconds,
+                cached_waveform.clone(),
+                known_duration_seconds,
+                crossfade_seconds,
+            );
+
+        let mut quick_started = false;
+        let mut requested_at = Instant::now();
+        match fast_result {
+            Ok(info) => {
+                quick_started = true;
+                requested_at = Instant::now();
+                let mode_label = if settings.orbit_enabled {
+                    settings.mode.label()
+                } else {
+                    "normal stereo playback"
+                };
+                self.active_tab = MainContentTab::Music;
+                self.active_radio_index = None;
+                self.active_radio_station_name = None;
+                self.active_radio_title = None;
+                self.radio_started_at = None;
+                self.last_radio_title_lookup_at = None;
+                self.radio_title_receiver = None;
+                self.active_playlist_index = Some(playlist_index);
+                self.selected_track_index = index;
+                self.active_track_index = index;
+                self.active_track_path = Some(info.path.clone());
+                self.pending_track_switch = None;
+                self.crossfade_started_for_path = None;
+                self.store_playback_metadata(&info);
+                self.remember_last_played_track(index, &info.path);
+                self.last_playback = Some(info.clone());
+                self.status_message = if crossfade_seconds > 0.05 {
+                    format!(
+                        "Crossfading to {} immediately through {}; preparing silence skip in the background.",
+                        display_file_name(&info.path),
+                        mode_label
+                    )
+                } else {
+                    format!(
+                        "Playing {} immediately through {}; preparing silence skip in the background.",
+                        display_file_name(&info.path),
+                        mode_label
+                    )
+                };
+                self.persist_playback_session();
+                self.save_state_silently();
+                self.error_message = None;
+            }
+            Err(error) => {
+                self.status_message = if live_position_compensation {
+                    "Fast playback failed; preparing updated playback without stopping the current audio...".to_owned()
+                } else if crossfade_seconds > 0.05 {
+                    format!(
+                        "Fast playback failed; preparing crossfade for {:.1} second(s)...",
+                        crossfade_seconds
+                    )
+                } else {
+                    format!("Fast playback failed; preparing {}...", display_file_name(&path))
+                };
+                self.error_message = Some(error.to_string());
+            }
+        }
+
+        let background_crossfade_seconds = if quick_started { 0.0 } else { crossfade_seconds };
+        let background_live_position_compensation = quick_started || live_position_compensation;
+        let background_upgrade = quick_started;
         let (sender, receiver) = mpsc::channel();
         let path_for_thread = path.clone();
 
         self.pending_prepare_cancel = Some(cancel);
         self.pending_prepared_track_receiver = Some(receiver);
-        self.status_message = if live_position_compensation {
-            "Preparing updated playback without stopping the current audio...".to_owned()
-        } else if crossfade_seconds > 0.05 {
-            format!("Preparing crossfade for {:.1} second(s)...", crossfade_seconds)
-        } else {
-            format!("Preparing {}...", display_file_name(&path))
-        };
-        self.error_message = None;
+        self.error_message = if quick_started { None } else { self.error_message.take() };
 
         thread::spawn(move || {
-            let result = AudioPlayer::prepare_file_with_cancel(path_for_thread, settings, start_seconds, Some(cancel_for_thread))
+            let result = AudioPlayer::prepare_file_with_cached_waveform(path_for_thread, settings, start_seconds, cached_waveform)
                 .map(|prepared| PreparedTrackPlayback {
                     request_id,
                     playlist_index,
                     index,
-                    crossfade_seconds,
-                    live_position_compensation,
-                    previous_position,
-                    previous_duration,
+                    crossfade_seconds: background_crossfade_seconds,
+                    live_position_compensation: background_live_position_compensation,
+                    background_upgrade,
                     prepared,
                     requested_at,
                 })
@@ -1574,8 +2248,7 @@ impl AudioOrbitApp {
             index,
             crossfade_seconds,
             live_position_compensation,
-            previous_position,
-            previous_duration,
+            background_upgrade,
             prepared: prepared_audio,
             requested_at,
         } = prepared;
@@ -1618,37 +2291,28 @@ impl AudioOrbitApp {
                 self.active_playlist_index = Some(playlist_index);
                 self.selected_track_index = index;
 
-                if crossfade_seconds > 0.05 {
-                    let started_at = Instant::now();
-                    let switch_after = Duration::from_secs_f32((crossfade_seconds * 0.5).max(0.1));
-                    self.pending_track_switch = Some(PendingTrackSwitch {
-                        switch_at: started_at + switch_after,
-                        started_at,
-                        previous_position: previous_position.unwrap_or_else(|| self.displayed_playback_position_seconds()),
-                        previous_duration: previous_duration.unwrap_or_else(|| self.displayed_playback_duration_seconds()),
-                        playlist_index,
-                        index,
-                        info: info.clone(),
-                    });
-                    self.status_message = format!(
-                        "Crossfading to {} through {}; display switches halfway through the mix.",
+                self.active_track_index = index;
+                self.active_track_path = Some(info.path.clone());
+                self.pending_track_switch = None;
+                self.crossfade_started_for_path = None;
+                self.store_playback_metadata(&info);
+                self.remember_last_played_track(index, &info.path);
+                self.last_playback = Some(info.clone());
+                self.status_message = if background_upgrade {
+                    format!("Silence-skip preparation finished for {}.", display_file_name(&info.path))
+                } else if live_position_compensation {
+                    format!("Applied sound profile and continued {} through {}.", display_file_name(&info.path), mode_label)
+                } else if crossfade_seconds > 0.05 {
+                    format!(
+                        "Crossfading to {} through {}; previous source is fading out.",
                         display_file_name(&info.path),
                         mode_label
-                    );
+                    )
                 } else {
-                    self.active_track_index = index;
-                    self.active_track_path = Some(info.path.clone());
-                    self.pending_track_switch = None;
-                    self.crossfade_started_for_path = None;
-                    self.store_playback_metadata(&info);
-                    self.remember_last_played_track(index, &info.path);
-                    self.last_playback = Some(info.clone());
-                    self.status_message = if live_position_compensation {
-                        format!("Applied sound profile and continued {} through {}.", display_file_name(&info.path), mode_label)
-                    } else {
-                        format!("Playing {} through {}.", display_file_name(&info.path), mode_label)
-                    };
-                }
+                    format!("Playing {} through {}.", display_file_name(&info.path), mode_label)
+                };
+                self.persist_playback_session();
+                self.save_state_silently();
                 self.error_message = None;
             }
             Err(error) => {
@@ -1706,9 +2370,8 @@ impl AudioOrbitApp {
             .as_ref()
             .map(AudioPlayer::is_playing)
             .unwrap_or(false);
-        let is_local_track_playing = self.active_radio_index.is_none() && self.active_track_path.is_some();
 
-        if self.state.playback.crossfade_enabled && is_currently_playing && is_local_track_playing {
+        if self.state.playback.crossfade_enabled && is_currently_playing {
             self.state.playback.crossfade_seconds.max(1) as f32
         } else {
             0.0
@@ -1745,16 +2408,55 @@ impl AudioOrbitApp {
         self.play_path_with_crossfade(path, Some(previous_index), 0.0, crossfade_seconds);
     }
 
+    fn current_waveform_for_seek(&self) -> Option<(Vec<f32>, Vec<f32>)> {
+        if let Some(playback) = &self.last_playback {
+            if !playback.waveform.is_empty() && !playback.waveform_brightness.is_empty() {
+                return Some((playback.waveform.clone(), playback.waveform_brightness.clone()));
+            }
+        }
+
+        let path = self.active_track_path.as_ref()?;
+        self.cached_waveform_for_track(self.active_track_index, path)
+    }
+
     fn seek_current(&mut self, seconds: f32) {
+        let settings = self
+            .player
+            .as_ref()
+            .and_then(AudioPlayer::current_settings)
+            .unwrap_or_else(|| self.current_settings());
+        if settings.skip_silence_enabled {
+            let Some(path) = self.active_track_path.clone() else {
+                return;
+            };
+            self.waveform_drag_position_seconds = None;
+            self.prepare_track_playback(path, self.active_track_index, seconds, 0.0, false);
+            return;
+        }
+
+        let cached_waveform = self.current_waveform_for_seek();
+        let known_duration_seconds = self
+            .last_playback
+            .as_ref()
+            .map(|playback| playback.original_duration_seconds)
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+            .or_else(|| {
+                self.active_track_path
+                    .as_ref()
+                    .and_then(|path| self.known_duration_for_track(self.active_track_index, path))
+            });
         let Some(player) = &mut self.player else {
             return;
         };
 
-        match player.seek_current(seconds) {
+        match player.seek_current_with_cached_waveform(seconds, cached_waveform, known_duration_seconds) {
             Ok(Some(info)) => {
                 self.status_message = format!("Seeked to {}.", format_duration(seconds));
                 self.store_playback_metadata(&info);
                 self.last_playback = Some(info);
+                self.waveform_drag_position_seconds = None;
+                self.persist_playback_session();
+                self.save_state_silently();
                 self.error_message = None;
             }
             Ok(None) => {}
@@ -1766,9 +2468,16 @@ impl AudioOrbitApp {
 
     fn schedule_current_profile_apply(&mut self) {
         self.pending_profile_apply_at = Some(Instant::now() + Duration::from_secs(3));
+        self.profile_apply_applied_until = None;
     }
 
     fn process_pending_profile_apply(&mut self) {
+        if let Some(until) = self.profile_apply_applied_until {
+            if Instant::now() >= until {
+                self.profile_apply_applied_until = None;
+            }
+        }
+
         let Some(apply_at) = self.pending_profile_apply_at else {
             return;
         };
@@ -1778,24 +2487,81 @@ impl AudioOrbitApp {
         }
 
         self.pending_profile_apply_at = None;
+        self.profile_apply_applied_until = Some(Instant::now() + Duration::from_secs(2));
         self.save_state_silently();
         self.apply_current_profile_live();
     }
 
+    fn profile_apply_status_text(&self) -> Option<String> {
+        let now = Instant::now();
+        if let Some(apply_at) = self.pending_profile_apply_at {
+            let seconds = apply_at.saturating_duration_since(now).as_secs_f32().ceil().max(1.0) as u64;
+            return Some(format!("Apply in {seconds}s..."));
+        }
+        if self
+            .profile_apply_applied_until
+            .map(|until| now < until)
+            .unwrap_or(false)
+        {
+            return Some("Sound profile applied.".to_owned());
+        }
+        None
+    }
+
     fn apply_current_profile_live(&mut self) {
+        let settings = self.current_settings();
+
+        if let Some(radio_index) = self.active_radio_index {
+            let Some(station) = self.state.radio_stations.get(radio_index).cloned() else {
+                return;
+            };
+            let crossfade_seconds = self.configured_manual_crossfade_seconds();
+            let play_result = {
+                let Some(player) = &mut self.player else {
+                    return;
+                };
+
+                if !(player.is_playing() || player.is_paused()) {
+                    return;
+                }
+
+                player.play_radio_stream_with_crossfade(&station.url, settings, crossfade_seconds)
+            };
+
+            match play_result {
+                Ok(()) => {
+                    self.active_tab = MainContentTab::Radio;
+                    self.active_radio_station_name = station.last_station_name.clone();
+                    self.active_radio_title = station.last_stream_title.clone();
+                    self.radio_started_at = Some(Instant::now());
+                    self.last_radio_title_lookup_at = Some(Instant::now());
+                    self.error_message = None;
+                    self.persist_playback_session();
+                    self.save_state_silently();
+                    self.start_radio_title_lookup(radio_index, station.url);
+                }
+                Err(error) => {
+                    self.error_message = Some(error.to_string());
+                }
+            }
+            return;
+        }
+
         let position = self.displayed_playback_position_seconds();
         let Some(path) = self.active_track_path.clone() else {
             return;
         };
-        let Some(player) = &self.player else {
-            return;
+        let (is_active, live_position_compensation) = {
+            let Some(player) = &self.player else {
+                return;
+            };
+            (player.is_playing() || player.is_paused(), player.is_playing())
         };
 
-        if !(player.is_playing() || player.is_paused()) {
+        if !is_active {
             return;
         }
 
-        let live_position_compensation = player.is_playing();
         self.prepare_track_playback(path, self.active_track_index, position, 0.0, live_position_compensation);
     }
 
@@ -1817,6 +2583,8 @@ impl AudioOrbitApp {
         self.remember_last_played_track(pending.index, &pending.info.path);
         self.store_playback_metadata(&pending.info);
         self.last_playback = Some(pending.info);
+        self.persist_playback_session();
+        self.save_state_silently();
     }
 
     fn displayed_playback_position_seconds(&self) -> f32 {
@@ -1851,13 +2619,18 @@ impl AudioOrbitApp {
     }
 
     fn process_keyboard_shortcuts(&mut self, context: &egui::Context) {
-        if self.show_folder_import_modal
+        let has_blocking_modal = self.show_folder_import_modal
             || self.active_panel_modal.is_some()
-            || self.show_update_check_confirmation
             || self.show_radio_add_modal
-            || self.details_modal.is_some()
-            || context.wants_keyboard_input()
-        {
+            || self.details_modal.is_some();
+        let undo_order = context.input(|input| {
+            input.key_pressed(egui::Key::Z) && (input.modifiers.ctrl || input.modifiers.command)
+        });
+        if !has_blocking_modal && undo_order {
+            self.undo_last_order_change();
+            return;
+        }
+        if has_blocking_modal || context.wants_keyboard_input() {
             return;
         }
 
@@ -2020,6 +2793,8 @@ impl AudioOrbitApp {
         self.crossfade_started_for_path = None;
         self.last_playback = None;
         self.status_message = "Playback stopped.".to_owned();
+        self.persist_playback_session();
+        self.save_state_silently();
     }
 
     fn pause_or_resume(&mut self) {
@@ -2032,6 +2807,8 @@ impl AudioOrbitApp {
                 self.status_message = "Playback resumed.".to_owned();
             }
         }
+        self.persist_playback_session();
+        self.save_state_silently();
     }
 
     fn refresh_output_device(&mut self) {
@@ -2065,111 +2842,103 @@ impl AudioOrbitApp {
         }
     }
 
-    fn check_for_updates(&mut self, confirmed_after_limit: bool) {
-        if self.update_check_receiver.is_some() {
-            self.error_message = Some("An update check is already running.".to_owned());
+    fn current_radio_recording_name(&self) -> String {
+        if let Some(index) = self.active_radio_index {
+            if let Some(station) = self.state.radio_stations.get(index) {
+                return self
+                    .active_radio_station_name
+                    .clone()
+                    .or_else(|| station.last_station_name.clone())
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| station.name.clone());
+            }
+        }
+        "internet-radio".to_owned()
+    }
+
+    fn toggle_radio_recording(&mut self) {
+        let is_recording = match self.player.as_ref() {
+            Some(player) => player.is_radio_recording(),
+            None => {
+                self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+                return;
+            }
+        };
+
+        if is_recording {
+            let result = self
+                .player
+                .as_mut()
+                .map(|player| player.stop_radio_recording());
+            match result {
+                Some(Ok(Some(info))) => {
+                    self.status_message = format!(
+                        "Saved radio recording: {} ({}).",
+                        info.path.display(),
+                        format_file_size(info.bytes_written)
+                    );
+                    self.error_message = None;
+                }
+                Some(Ok(None)) => {
+                    self.status_message = "No active radio recording.".to_owned();
+                }
+                Some(Err(error)) => {
+                    self.error_message = Some(error.to_string());
+                }
+                None => {
+                    self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+                }
+            }
             return;
         }
 
-        if self.update_check_count >= UPDATE_CHECKS_BEFORE_CONFIRMATION && !confirmed_after_limit {
-            self.show_update_check_confirmation = true;
+        if self.active_radio_index.is_none() {
+            self.error_message = Some("Start an internet radio station before recording.".to_owned());
+            return;
+        }
+
+        let folder = self.state.recording.resolved_output_folder();
+        let station_name = self.current_radio_recording_name();
+        let stream_title = self.active_radio_title.clone();
+        let result = self
+            .player
+            .as_mut()
+            .map(|player| player.start_radio_recording(&folder, &station_name, stream_title.as_deref()));
+        match result {
+            Some(Ok(path)) => {
+                self.status_message = format!("Recording internet radio to {}.", path.display());
+                self.error_message = None;
+            }
+            Some(Err(error)) => {
+                self.error_message = Some(error.to_string());
+            }
+            None => {
+                self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+            }
+        }
+    }
+
+    fn choose_recording_folder(&mut self) {
+        let initial_dir = self.state.recording.resolved_output_folder();
+        let mut dialog = FileDialog::new();
+        if initial_dir.exists() {
+            dialog = dialog.set_directory(initial_dir);
+        }
+        if let Some(path) = dialog.pick_folder() {
+            self.state.recording.output_folder = Some(path.clone());
+            self.status_message = format!("Radio recordings folder set to {}.", path.display());
             self.error_message = None;
-            self.status_message = "Confirm the extra release check before contacting GitHub again.".to_owned();
-            return;
-        }
-
-        self.show_update_check_confirmation = false;
-        self.update_check_count += 1;
-
-        match updater::check_for_update(self.state.update_settings.include_prereleases) {
-            Ok(check) => {
-                self.handle_update_check_result(check, false);
-            }
-            Err(error) => self.error_message = Some(error.to_string()),
+            self.save_state_silently();
         }
     }
 
-    fn start_automatic_update_check_if_due(&mut self) {
-        if self.update_check_receiver.is_some()
-            || self.update_check_count >= UPDATE_CHECKS_BEFORE_CONFIRMATION
-        {
-            return;
-        }
-
-        let now = current_unix_seconds();
-        let last_check = self.state.update_settings.last_auto_check_unix_seconds;
-        if now.saturating_sub(last_check) < AUTOMATIC_UPDATE_CHECK_INTERVAL_SECONDS {
-            return;
-        }
-
-        self.state.update_settings.last_auto_check_unix_seconds = now;
-        self.update_check_count += 1;
-        self.save_state_silently();
-
-        let include_prereleases = self.state.update_settings.include_prereleases;
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let result = updater::check_for_update(include_prereleases).map_err(|error| error.to_string());
-            let _ = sender.send(result);
-        });
-
-        self.update_check_receiver = Some(receiver);
-    }
-
-    fn process_update_check_events(&mut self) {
-        let Some(receiver) = &self.update_check_receiver else {
-            return;
-        };
-
-        match receiver.try_recv() {
-            Ok(Ok(check)) => {
-                self.update_check_receiver = None;
-                self.handle_update_check_result(check, true);
-            }
-            Ok(Err(error)) => {
-                self.update_check_receiver = None;
-                self.error_message = Some(format!("Automatic update check failed: {error}"));
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.update_check_receiver = None;
-            }
-        }
-    }
-
-    fn handle_update_check_result(&mut self, check: updater::UpdateCheck, automatic: bool) {
-        if check.is_update_available {
-            self.status_message = format!(
-                "Update available: v{}{}.",
-                check.latest_version,
-                if check.prerelease { " prerelease" } else { "" }
-            );
-            if automatic {
-                self.open_panel_modal(AppPanelModal::Updates);
-            }
-        } else if automatic {
-            self.status_message = format!("Audio Orbit is already on the latest release: v{}.", check.current_version);
+    fn open_recording_folder(&mut self) {
+        let folder = self.state.recording.resolved_output_folder();
+        if let Err(error) = fs::create_dir_all(&folder).and_then(|_| reveal_in_file_manager(&folder).map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.to_string()))) {
+            self.error_message = Some(format!("Failed to open recording folder: {error}"));
         } else {
-            self.status_message = format!("Audio Orbit is already on the latest release: v{}.", check.current_version);
-        }
-
-        self.last_update_check = Some(check);
-        self.error_message = None;
-    }
-
-    fn install_update(&mut self) {
-        let Some(check) = self.last_update_check.clone() else {
-            self.error_message = Some("Check for updates first.".to_owned());
-            return;
-        };
-
-        if !check.is_update_available {
-            self.status_message = "No newer update is available.".to_owned();
-            return;
-        }
-
-        if let Err(error) = updater::install_update(&check) {
-            self.error_message = Some(error.to_string());
+            self.status_message = format!("Opened radio recordings folder: {}.", folder.display());
+            self.error_message = None;
         }
     }
 
@@ -2273,6 +3042,8 @@ impl AudioOrbitApp {
         }
     }
     fn save_state_silently(&mut self) {
+        self.persist_repeat_selection_for_current_playlist();
+        self.remember_current_playlist_scroll_offset(self.state.ui.playlist_scroll_offset_y);
         if let Err(error) = save_state(&self.state) {
             self.error_message = Some(error.to_string());
         }
@@ -2629,22 +3400,8 @@ impl AudioOrbitApp {
 
 impl Drop for AudioOrbitApp {
     fn drop(&mut self) {
-        if let (Some(index), Some(path)) = (self.active_track_index, self.active_track_path.clone()) {
-            self.state.last_played_track = Some(LastPlayedTrack {
-                playlist_index: self.active_playlist_index.unwrap_or(self.state.selected_playlist_index),
-                track_path: path,
-            });
-            self.selected_track_index = Some(index);
-        }
-        if let Some(cancel) = self.pending_prepare_cancel.take() {
-            cancel.store(true, Ordering::Relaxed);
-        }
-        if let Some(cancel) = self.pending_waveform_cancel.take() {
-            cancel.store(true, Ordering::Relaxed);
-        }
-        self.pending_prepared_track_receiver = None;
-        self.pending_waveform_receiver = None;
-        self.pending_radio_playback_receiver = None;
+        self.persist_playback_session();
+        self.persist_repeat_selection_for_current_playlist();
         if let Some(player) = &mut self.player {
             player.stop();
         }
@@ -2664,13 +3421,13 @@ impl eframe::App for AudioOrbitApp {
         self.remember_window_geometry(context);
 
         self.process_media_key_events();
-        self.process_update_check_events();
         self.process_escape_navigation(context);
         self.process_keyboard_shortcuts(context);
         self.process_radio_playback_events();
         self.process_radio_title_events();
         self.refresh_radio_title_periodically();
         self.process_pending_profile_apply();
+        self.process_folder_scan_events();
         self.process_prepared_track_playback();
         self.process_waveform_analysis();
         self.process_pending_track_switch();
@@ -2698,6 +3455,7 @@ impl eframe::App for AudioOrbitApp {
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             self.render_library_panel(ui);
+                            ui.add_space(16.0);
                         });
                 });
         }
@@ -2714,11 +3472,16 @@ impl eframe::App for AudioOrbitApp {
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             self.render_profile_panel(ui);
+                            ui.add_space(16.0);
                         });
                 });
         }
 
-        if !self.status_message.is_empty() || !self.media_key_status.is_empty() || self.playlist_count_label().is_some() {
+        if self.profile_apply_status_text().is_some()
+            || !self.status_message.is_empty()
+            || !self.media_key_status.is_empty()
+            || self.playlist_count_label().is_some()
+        {
             egui::TopBottomPanel::bottom("status_panel").show(context, |ui| {
                 self.render_status_panel(ui);
             });
@@ -2736,10 +3499,6 @@ impl eframe::App for AudioOrbitApp {
             self.render_panel_modal(context, panel);
         }
 
-        if self.show_update_check_confirmation {
-            self.render_update_check_confirmation_modal(context);
-        }
-
         if self.show_radio_add_modal {
             self.render_radio_add_modal(context);
         }
@@ -2748,6 +3507,7 @@ impl eframe::App for AudioOrbitApp {
             self.render_details_modal(context);
         }
 
+        self.render_drag_feedback(context);
         self.render_error_toast(context);
     }
 }
@@ -2872,26 +3632,38 @@ impl AudioOrbitApp {
         }
     }
 
-    fn render_radio_title_copy_and_volume_controls(&mut self, ui: &mut egui::Ui, _has_now_playing: bool, icon_button_size: egui::Vec2) {
-        if self.active_tab == MainContentTab::Radio {
-            let has_active_radio = self.active_radio_index.is_some();
-            let has_radio_title = self.active_radio_stream_title_to_copy().is_some();
+    fn copy_current_radio_title(&mut self) {
+        let Some(radio_index) = self.active_radio_index else {
+            self.error_message = Some("Start an internet radio station before copying track info.".to_owned());
+            return;
+        };
+
+        let text = self
+            .active_radio_title
+            .clone()
+            .filter(|title| !title.trim().is_empty())
+            .or_else(|| {
+                self.active_radio_station_name
+                    .clone()
+                    .filter(|name| !name.trim().is_empty())
+            })
+            .or_else(|| self.state.radio_stations.get(radio_index).map(|station| station.name.clone()))
+            .unwrap_or_else(|| "Internet radio".to_owned());
+
+        self.pending_clipboard_text = Some(text.clone());
+        self.status_message = format!("Radio info copied: {text}.");
+        self.error_message = None;
+    }
+
+    fn render_copy_and_volume_controls(&mut self, ui: &mut egui::Ui, _has_now_playing: bool, icon_button_size: egui::Vec2) {
+        if self.active_radio_index.is_some() {
+            let copy_button_size = egui::vec2(if self.player_only_mode { 42.0 } else { 58.0 }, icon_button_size.y);
             if ui
-                .add_enabled(
-                    has_active_radio,
-                    egui::Button::new(egui::RichText::new(ui_icons::icon(Icon::Copy)).size(14.0))
-                        .min_size(icon_button_size),
-                )
-                .on_hover_text(if has_radio_title {
-                    "Copy the current radio song title"
-                } else if has_active_radio {
-                    "Refresh metadata if needed, then copy the current radio song title when available"
-                } else {
-                    "Start an internet radio station before copying the current title"
-                })
+                .add_sized(copy_button_size, egui::Button::new("Copy"))
+                .on_hover_text("Copy the current radio stream title. Falls back to the station name when no title is available.")
                 .clicked()
             {
-                self.copy_active_radio_title();
+                self.copy_current_radio_title();
             }
         }
 
@@ -2953,6 +3725,25 @@ impl AudioOrbitApp {
                     active_detail_color,
                     active_time_color,
                 )
+                .clicked()
+            {
+                self.play_previous_track();
+            }
+        }
+
+        if ui
+            .add_enabled(
+                self.player.is_some(),
+                egui::Button::new(play_label).min_size(play_button_size),
+            )
+            .clicked()
+        {
+            if context_is_active {
+                self.pause_or_resume();
+            } else if radio_controls_active {
+                if let Some(index) = self.state.selected_radio_index {
+                    self.play_radio_station(index);
+                }
             } else {
                 (
                     ellipsize_to_width_exact(ui, "Audio Orbit is ready", title_available_width, title_font.clone(), placeholder_title_color),
@@ -2962,7 +3753,12 @@ impl AudioOrbitApp {
                     placeholder_detail_color,
                     placeholder_time_color,
                 )
-            };
+                .clicked()
+            {
+                self.play_next_track();
+            }
+        }
+    }
 
             let painter = ui.painter();
             painter.text(
@@ -3035,19 +3831,28 @@ impl AudioOrbitApp {
         });
 
         if self.active_radio_index.is_some() {
-            let requested_points = (ui.available_width() / 3.4).round().clamp(64.0, 520.0) as usize;
+            let available_width = ui.available_width().max(96.0);
+            let visible_seconds = (available_width / RADIO_WAVEFORM_PIXELS_PER_SECOND)
+                .clamp(1.0, RADIO_WAVEFORM_MAX_VISIBLE_SECONDS);
+            let requested_points = (available_width / RADIO_WAVEFORM_BAR_PITCH_PIXELS)
+                .floor()
+                .clamp(1.0, 900.0) as usize + 1;
             let frame = self
                 .player
                 .as_ref()
-                .map(|player| player.radio_visualizer_frame(requested_points))
+                .map(|player| player.radio_visualizer_frame(requested_points, visible_seconds))
                 .unwrap_or_default();
-            let response = draw_radio_visualizer(ui, &frame);
-            response.on_hover_text("Internet radio streams are live: new decoded audio enters on the right, older audio moves left, and connection gaps stay empty.");
+            let response = draw_radio_waveform_strip(ui, &frame);
+            response.on_hover_text(format!(
+                "Internet radio streams are live: this is a rolling waveform history of about {:.0}s. It is not seekable.",
+                visible_seconds
+            ));
         } else if has_now_playing {
             let position = self.displayed_playback_position_seconds();
             let duration = self.displayed_playback_duration_seconds();
+            let visual_position = self.waveform_drag_position_seconds.unwrap_or(position);
             let progress = if duration > 0.0 {
-                (position / duration).clamp(0.0, 1.0)
+                (visual_position / duration).clamp(0.0, 1.0)
             } else {
                 0.0
             };
@@ -3073,10 +3878,33 @@ impl AudioOrbitApp {
                 .map(|playback| playback.original_duration_seconds)
                 .unwrap_or(duration);
             let response = draw_waveform_seek(ui, waveform, waveform_brightness, progress, silence_ranges, marker_duration);
-            if (response.clicked() || response.drag_stopped()) && duration > 0.0 {
-                if let Some(pointer) = response.interact_pointer_pos() {
-                    let next_position = ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration;
-                    self.seek_current(next_position);
+            if duration > 0.0 {
+                let pointer_position = response.interact_pointer_pos();
+                if response.drag_started() || response.dragged() {
+                    if let Some(pointer) = pointer_position {
+                        let next_position = ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration;
+                        self.waveform_drag_position_seconds = Some(next_position);
+                    }
+                }
+
+                if response.drag_stopped() {
+                    let next_position = self.waveform_drag_position_seconds.or_else(|| {
+                        pointer_position.map(|pointer| {
+                            ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration
+                        })
+                    });
+                    if let Some(next_position) = next_position {
+                        self.seek_current(next_position);
+                    }
+                    self.waveform_drag_position_seconds = None;
+                } else if response.clicked() {
+                    if let Some(pointer) = pointer_position {
+                        let next_position = ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration;
+                        self.seek_current(next_position);
+                    }
+                    self.waveform_drag_position_seconds = None;
+                } else if !response.hovered() && !ui.input(|input| input.pointer.primary_down()) {
+                    self.waveform_drag_position_seconds = None;
                 }
             }
         } else {
@@ -3127,7 +3955,7 @@ impl AudioOrbitApp {
                     self.render_playback_mode_or_recording_controls(ui, radio_controls_active, icon_button_size);
                 });
                 ui.horizontal(|ui| {
-                    self.render_radio_title_copy_and_volume_controls(ui, has_now_playing, icon_button_size);
+                    self.render_copy_and_volume_controls(ui, has_now_playing, icon_button_size);
                 });
             });
         } else if control_width < 620.0 {
@@ -3145,7 +3973,7 @@ impl AudioOrbitApp {
                     self.render_playback_mode_or_recording_controls(ui, radio_controls_active, icon_button_size);
                 });
                 ui.horizontal(|ui| {
-                    self.render_radio_title_copy_and_volume_controls(ui, has_now_playing, icon_button_size);
+                    self.render_copy_and_volume_controls(ui, has_now_playing, icon_button_size);
                 });
             });
         } else {
@@ -3160,7 +3988,7 @@ impl AudioOrbitApp {
                     stop_button_size,
                 );
                 self.render_playback_mode_or_recording_controls(ui, radio_controls_active, icon_button_size);
-                self.render_radio_title_copy_and_volume_controls(ui, has_now_playing, icon_button_size);
+                self.render_copy_and_volume_controls(ui, has_now_playing, icon_button_size);
             });
         }
 
@@ -3238,6 +4066,7 @@ impl AudioOrbitApp {
             if ui.button(ui_icons::label(Icon::Settings2, "Settings...")).clicked() {
                 self.open_panel_modal(AppPanelModal::Settings);
             }
+            ui.add_space(16.0);
             return;
         }
 
@@ -3355,6 +4184,7 @@ impl AudioOrbitApp {
         if ui.button(ui_icons::label(Icon::Settings2, "Settings...")).clicked() {
             self.open_panel_modal(AppPanelModal::Settings);
         }
+        ui.add_space(16.0);
     }
 
     fn render_current_playlist_controls(&mut self, ui: &mut egui::Ui) {
@@ -3399,9 +4229,12 @@ impl AudioOrbitApp {
                 });
 
             if next_group != selected_group {
+                self.remember_current_playlist_scroll_offset(self.state.ui.playlist_scroll_offset_y);
                 if let Some(playlist) = self.current_playlist_mut() {
                     playlist.set_selected_group(next_group);
                 }
+                let restored_offset = self.current_playlist_scroll_offset_y();
+                self.state.ui.playlist_scroll_offset_y = restored_offset;
                 self.ensure_selected_track_visible();
                 self.save_state_silently();
             }
@@ -3463,7 +4296,7 @@ impl AudioOrbitApp {
                 }
             });
         });
-        ui.add(egui::Label::new("Radio streams are live sources. They ignore shuffle, repeat, auto-play next, crossfade, silence skipping, and playback transitions.").wrap());
+        ui.add(egui::Label::new("Radio streams are live sources. They ignore shuffle, repeat, auto-play next, and silence skipping. Crossfade is used when switching sources if enabled.").wrap());
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
@@ -3479,6 +4312,15 @@ impl AudioOrbitApp {
                 .clicked()
             {
                 self.radio_show_favorites_only = true;
+            }
+        });
+
+        ui.horizontal(|ui| {
+            if ui.small_button("A-Z").on_hover_text("Sort radio stations A to Z").clicked() {
+                self.sort_radio_stations_by_name(true);
+            }
+            if ui.small_button("Z-A").on_hover_text("Sort radio stations Z to A").clicked() {
+                self.sort_radio_stations_by_name(false);
             }
         });
 
@@ -3554,13 +4396,21 @@ impl AudioOrbitApp {
         let mut remove_radio_index: Option<usize> = None;
         let mut play_radio_index: Option<usize> = None;
         let mut favorite_toggle_index: Option<usize> = None;
+        let mut reorder_radio_station: Option<(usize, usize)> = None;
+        let mut next_radio_drop_target_index: Option<usize> = self.radio_drop_target_index;
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .max_height(scroll_height)
             .show(ui, |ui| {
                 ui.set_width(row_width);
-                for (index, station) in visible_stations {
+                let visible_station_len = visible_stations.len();
+                let station_count = self.state.radio_stations.len();
+                let pointer_position = ui.input(|input| input.pointer.hover_pos().or(input.pointer.interact_pos()));
+                for (visible_row_index, (index, station)) in visible_stations.iter().cloned().enumerate() {
+                    let next_visible_station_index = visible_stations
+                        .get(visible_row_index + 1)
+                        .map(|(next_index, _)| *next_index);
                     let active = self.active_radio_index == Some(index);
                     let selected = active || (self.radio_selection_was_user_set && self.state.selected_radio_index == Some(index));
                     let display_stream_title = station
@@ -3669,10 +4519,12 @@ impl AudioOrbitApp {
                             }
                         },
                     );
+                    let mut context_rect = row_response.response.rect.expand(2.0);
+                    context_rect.min.x += 34.0;
                     let context_response = ui.interact(
-                        row_response.response.rect.expand(2.0),
+                        context_rect,
                         ui.make_persistent_id(("radio_station_context", index)),
-                        egui::Sense::click(),
+                        egui::Sense::click_and_drag(),
                     );
                     if context_response.clicked() {
                         self.state.selected_radio_index = Some(index);
@@ -3683,6 +4535,40 @@ impl AudioOrbitApp {
                         self.state.selected_radio_index = Some(index);
                         self.radio_selection_was_user_set = true;
                         play_radio_index = Some(index);
+                    }
+                    if context_response.drag_started() {
+                        self.dragging_radio_index = Some(index);
+                        self.radio_drop_target_index = None;
+                    }
+                    let pointer_over_row = pointer_position
+                        .map(|position| row_response.response.rect.expand(2.0).contains(position))
+                        .unwrap_or(false);
+                    if let Some(from) = self.dragging_radio_index {
+                        if pointer_over_row {
+                            let pointer_y = pointer_position
+                                .map(|position| position.y)
+                                .unwrap_or(row_response.response.rect.center().y);
+                            let drop_after = pointer_y >= row_response.response.rect.center().y;
+                            let to = if drop_after {
+                                next_visible_station_index.unwrap_or(station_count)
+                            } else {
+                                index
+                            };
+                            next_radio_drop_target_index = Some(to);
+                            if ui.input(|input| input.pointer.any_released()) && Self::valid_drop_target(from, to) {
+                                reorder_radio_station = Some((from, to));
+                                self.dragging_radio_index = None;
+                            }
+                        }
+                    }
+                    let radio_drop_target_for_paint = next_radio_drop_target_index
+                        .or(self.radio_drop_target_index)
+                        .filter(|to| self.dragging_radio_index.map(|from| Self::valid_drop_target(from, *to)).unwrap_or(false));
+                    if self.dragging_radio_index == Some(index) && radio_drop_target_for_paint.is_some() {
+                        paint_dragged_row_fade(ui, row_response.response.rect);
+                    }
+                    if visible_row_index == 0 && radio_drop_target_for_paint == Some(index) {
+                        paint_list_edge_separator(ui, row_response.response.rect, row_width, false);
                     }
                     if row_response.response.secondary_clicked() || context_response.secondary_clicked() {
                         self.state.selected_radio_index = Some(index);
@@ -3698,6 +4584,14 @@ impl AudioOrbitApp {
                             self.details_modal = Some(DetailsModal::Radio(index));
                             ui.close_menu();
                         }
+                        if ui.button("Move up").clicked() {
+                            self.move_radio_station(index, -1);
+                            ui.close_menu();
+                        }
+                        if ui.button("Move down").clicked() {
+                            self.move_radio_station(index, 1);
+                            ui.close_menu();
+                        }
                         if ui.button(ui_icons::label(Icon::Trash2, "Remove station")).clicked() {
                             remove_radio_index = Some(index);
                             ui.close_menu();
@@ -3707,10 +4601,24 @@ impl AudioOrbitApp {
                         row_response.response.scroll_to_me(Some(egui::Align::Center));
                         self.scroll_to_active_radio_requested = false;
                     }
-                    ui.separator();
+                    if visible_row_index + 1 < visible_station_len {
+                        let separator_drop_target = next_visible_station_index.unwrap_or(index + 1);
+                        paint_list_separator(ui, row_width, radio_drop_target_for_paint == Some(separator_drop_target));
+                    } else if radio_drop_target_for_paint == Some(station_count) {
+                        paint_list_edge_separator(ui, row_response.response.rect, row_width, true);
+                    }
                 }
             });
 
+        self.radio_drop_target_index = next_radio_drop_target_index;
+        if !ui.input(|input| input.pointer.primary_down()) {
+            self.dragging_radio_index = None;
+            self.radio_drop_target_index = None;
+        }
+        if let Some((from, to)) = reorder_radio_station {
+            self.radio_drop_target_index = None;
+            self.move_radio_station_to_index(from, to);
+        }
         if let Some(index) = favorite_toggle_index {
             if let Some(station) = self.state.radio_stations.get_mut(index) {
                 station.favorite = !station.favorite;
@@ -3823,7 +4731,13 @@ impl AudioOrbitApp {
         if self.show_track_search {
             ui.horizontal(|ui| {
                 ui.label(ui_icons::icon(Icon::Search));
-                let response = ui.text_edit_singleline(&mut self.track_search_query);
+
+                let reserved_controls_width = 352.0;
+                let search_input_width = (ui.available_width() - reserved_controls_width).clamp(140.0, 360.0);
+                let response = ui.add_sized(
+                    egui::vec2(search_input_width, ui.spacing().interact_size.y),
+                    egui::TextEdit::singleline(&mut self.track_search_query).hint_text("Search tracks or folders"),
+                );
                 if self.focus_track_search {
                     response.request_focus();
                     self.focus_track_search = false;
@@ -3833,23 +4747,20 @@ impl AudioOrbitApp {
                 }
 
                 let can_jump = !visible_indexes.is_empty() && !self.track_search_query.trim().is_empty();
-                if ui
-                    .add_enabled(can_jump, egui::Button::new(ui_icons::label(Icon::ArrowDown, "Next result")))
-                    .clicked()
-                {
+                if search_icon_text_button(ui, can_jump, Icon::ArrowDown, "Next").clicked() {
                     let next = visible_indexes[self.search_cursor % visible_indexes.len()];
                     self.selected_track_index = Some(next);
                     self.search_cursor = (self.search_cursor + 1) % visible_indexes.len().max(1);
                 }
 
-                if ui.button(ui_icons::label(Icon::X, "Clear")).clicked() {
+                if search_icon_text_button(ui, true, Icon::X, "Clear").clicked() {
                     self.track_search_query.clear();
                     self.search_cursor = 0;
                 }
                 ui.separator();
                 if ui
-                    .checkbox(&mut self.search_playback_filtered_only, "Play results only")
-                    .on_hover_text("When enabled, Next/auto-play stays inside the current search results. Turn it off to keep normal playlist playback while searching.")
+                    .checkbox(&mut self.search_playback_filtered_only, "Play results")
+                    .on_hover_text("When enabled, Next/auto-play stays inside the current search results until search is closed. Turn it off to keep normal playlist playback while searching.")
                     .changed()
                 {
                     self.state.ui.search_playback_filtered_only = self.search_playback_filtered_only;
@@ -3862,10 +4773,32 @@ impl AudioOrbitApp {
             }
         }
 
-        if self.state.playback.repeat_mode == RepeatMode::Selection {
-            let repeat_order = if self.state.playback.shuffle_enabled { "random playback" } else { "playlist order" };
-            ui.small(format!("Repeat selection mode: tick the tracks that should repeat in {repeat_order}."));
-        }
+        ui.horizontal(|ui| {
+            let sort_buttons_width = 74.0;
+            let helper_width = (ui.available_width() - sort_buttons_width).max(32.0);
+            if self.state.playback.repeat_mode == RepeatMode::Selection {
+                let repeat_order = if self.state.playback.shuffle_enabled { "random playback" } else { "playlist order" };
+                let helper = format!("Repeat selection mode: tick tracks or whole folders for {repeat_order}.");
+                let _ = render_ellipsized_single_line(
+                    ui,
+                    &helper,
+                    helper_width,
+                    egui::TextStyle::Small.resolve(ui.style()),
+                    ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.78),
+                );
+            } else {
+                ui.allocate_space(egui::vec2(helper_width, 18.0));
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Z-A").on_hover_text("Sort current playlist Z to A").clicked() {
+                    self.sort_current_playlist_by_name(false);
+                }
+                if ui.small_button("A-Z").on_hover_text("Sort current playlist A to Z").clicked() {
+                    self.sort_current_playlist_by_name(true);
+                }
+            });
+        });
 
         ui.separator();
 
@@ -3890,6 +4823,13 @@ impl AudioOrbitApp {
             })
             .unwrap_or_default();
 
+        let group_track_indexes: BTreeMap<String, Vec<usize>> = visible_tracks
+            .iter()
+            .fold(BTreeMap::new(), |mut groups, (index, track)| {
+                groups.entry(track.group.clone()).or_default().push(*index);
+                groups
+            });
+
         let add_targets: Vec<(usize, String, PlaylistKind)> = self
             .state
             .playlists
@@ -3901,9 +4841,11 @@ impl AudioOrbitApp {
         let mut last_group = String::new();
         let row_width = (ui.available_width() - 22.0).max(320.0);
         let scroll_height = ui.available_height();
+        let mut reorder_track: Option<(usize, usize)> = None;
+        let mut next_track_drop_target_index: Option<usize> = self.track_drop_target_index;
         let scroll_output = egui::ScrollArea::vertical()
             .id_salt("track_list_scroll")
-            .vertical_scroll_offset(self.state.ui.playlist_scroll_offset_y.max(0.0))
+            .vertical_scroll_offset(self.current_playlist_scroll_offset_y())
             .auto_shrink([false, false])
             .max_height(scroll_height)
             .show_viewport(ui, |ui, _viewport| {
@@ -3912,18 +4854,72 @@ impl AudioOrbitApp {
                 let sticky_top = visible_rect.top();
                 let mut viewport_group: Option<String> = None;
                 let mut next_group_header_top: Option<f32> = None;
-                for (index, track) in visible_tracks {
+                let visible_track_len = visible_tracks.len();
+                let track_count = self.current_playlist().map(|playlist| playlist.tracks.len()).unwrap_or(0);
+                let pointer_position = ui.input(|input| input.pointer.hover_pos().or(input.pointer.interact_pos()));
+                for (visible_row_index, (index, track)) in visible_tracks.iter().cloned().enumerate() {
+                    let next_visible_track_index = visible_tracks
+                        .get(visible_row_index + 1)
+                        .map(|(next_index, _)| *next_index);
                     if show_group_headers && track.group != last_group {
                         ui.add_space(6.0);
                         let group = track.group.clone();
                         let collapsed = self.collapsed_groups.contains(&group);
                         let mut toggle_group = false;
+                        let repeat_selection_mode = self.state.playback.repeat_mode == RepeatMode::Selection;
+                        let group_indexes = group_track_indexes.get(&group).cloned().unwrap_or_default();
                         let header_response = ui.horizontal(|ui| {
                             let icon = if collapsed { Icon::ChevronRight } else { Icon::ChevronDown };
                             if ui.small_button(ui_icons::icon(icon)).on_hover_text("Collapse/expand folder").clicked() {
                                 toggle_group = true;
                             }
+                            if repeat_selection_mode {
+                                let mut checked = !group_indexes.is_empty()
+                                    && group_indexes.iter().all(|index| self.selected_track_indexes.contains(index));
+                                if ui.checkbox(&mut checked, "").on_hover_text("Include this whole folder in repeat selection").changed() {
+                                    if checked {
+                                        for index in &group_indexes {
+                                            self.selected_track_indexes.insert(*index);
+                                        }
+                                    } else {
+                                        for index in &group_indexes {
+                                            self.selected_track_indexes.remove(index);
+                                        }
+                                    }
+                                    self.persist_repeat_selection_for_current_playlist();
+                                    self.save_state_silently();
+                                }
+                            }
                             ui.label(egui::RichText::new(group.as_str()).size(13.0).strong());
+                        });
+                        header_response.response.context_menu(|ui| {
+                            if self.state.playback.repeat_mode == RepeatMode::Selection {
+                                if ui.button("Select folder for repeat").clicked() {
+                                    for index in &group_indexes {
+                                        self.selected_track_indexes.insert(*index);
+                                    }
+                                    self.persist_repeat_selection_for_current_playlist();
+                                    self.save_state_silently();
+                                    ui.close_menu();
+                                }
+                                if ui.button("Remove folder from repeat").clicked() {
+                                    for index in &group_indexes {
+                                        self.selected_track_indexes.remove(index);
+                                    }
+                                    self.persist_repeat_selection_for_current_playlist();
+                                    self.save_state_silently();
+                                    ui.close_menu();
+                                }
+                                ui.separator();
+                            }
+                            if ui.button("Move folder up").clicked() {
+                                self.move_folder_group_in_current_playlist(&group, -1);
+                                ui.close_menu();
+                            }
+                            if ui.button("Move folder down").clicked() {
+                                self.move_folder_group_in_current_playlist(&group, 1);
+                                ui.close_menu();
+                            }
                         });
                         if toggle_group {
                             self.toggle_folder_group_collapsed_and_focus(&group);
@@ -3985,6 +4981,8 @@ impl AudioOrbitApp {
                                     } else {
                                         self.selected_track_indexes.remove(&index);
                                     }
+                                    self.persist_repeat_selection_for_current_playlist();
+                                    self.save_state_silently();
                                 }
                             }
 
@@ -4083,7 +5081,7 @@ impl AudioOrbitApp {
                     let context_response = ui.interact(
                         context_rect,
                         ui.make_persistent_id(("track_context", index)),
-                        egui::Sense::click(),
+                        egui::Sense::click_and_drag(),
                     );
                     if context_response.clicked() {
                         self.selected_track_index = Some(index);
@@ -4091,6 +5089,40 @@ impl AudioOrbitApp {
                     if context_response.double_clicked() {
                         self.selected_track_index = Some(index);
                         self.play_path(path.clone(), Some(index), 0.0);
+                    }
+                    if context_response.drag_started() {
+                        self.dragging_track_index = Some(index);
+                        self.track_drop_target_index = None;
+                    }
+                    let pointer_over_row = pointer_position
+                        .map(|position| row_response.response.rect.expand(2.0).contains(position))
+                        .unwrap_or(false);
+                    if let Some(from) = self.dragging_track_index {
+                        if pointer_over_row {
+                            let pointer_y = pointer_position
+                                .map(|position| position.y)
+                                .unwrap_or(row_response.response.rect.center().y);
+                            let drop_after = pointer_y >= row_response.response.rect.center().y;
+                            let to = if drop_after {
+                                next_visible_track_index.unwrap_or(track_count)
+                            } else {
+                                index
+                            };
+                            next_track_drop_target_index = Some(to);
+                            if ui.input(|input| input.pointer.any_released()) && Self::valid_drop_target(from, to) {
+                                reorder_track = Some((from, to));
+                                self.dragging_track_index = None;
+                            }
+                        }
+                    }
+                    let track_drop_target_for_paint = next_track_drop_target_index
+                        .or(self.track_drop_target_index)
+                        .filter(|to| self.dragging_track_index.map(|from| Self::valid_drop_target(from, *to)).unwrap_or(false));
+                    if self.dragging_track_index == Some(index) && track_drop_target_for_paint.is_some() {
+                        paint_dragged_row_fade(ui, row_response.response.rect);
+                    }
+                    if visible_row_index == 0 && track_drop_target_for_paint == Some(index) {
+                        paint_list_edge_separator(ui, row_response.response.rect, row_width, false);
                     }
                     if row_response.response.secondary_clicked() || context_response.secondary_clicked() {
                         self.selected_track_index = Some(index);
@@ -4105,10 +5137,15 @@ impl AudioOrbitApp {
                         row_response.response.scroll_to_me(Some(egui::Align::Center));
                         self.scroll_to_active_track_requested = false;
                     }
-                    ui.separator();
+                    if visible_row_index + 1 < visible_track_len {
+                        let separator_drop_target = next_visible_track_index.unwrap_or(index + 1);
+                        paint_list_separator(ui, row_width, track_drop_target_for_paint == Some(separator_drop_target));
+                    } else if track_drop_target_for_paint == Some(track_count) {
+                        paint_list_edge_separator(ui, row_response.response.rect, row_width, true);
+                    }
                 }
 
-                if show_group_headers {
+                if show_group_headers && self.current_playlist_scroll_offset_y() > 2.0 {
                     if let Some(group) = viewport_group {
                         let sticky_height = 24.0;
                         let push_offset_y = next_group_header_top
@@ -4140,7 +5177,16 @@ impl AudioOrbitApp {
                     }
                 }
             });
-        self.state.ui.playlist_scroll_offset_y = scroll_output.state.offset.y.max(0.0);
+        self.remember_current_playlist_scroll_offset(scroll_output.state.offset.y);
+        self.track_drop_target_index = next_track_drop_target_index;
+        if !ui.input(|input| input.pointer.primary_down()) {
+            self.dragging_track_index = None;
+            self.track_drop_target_index = None;
+        }
+        if let Some((from, to)) = reorder_track {
+            self.track_drop_target_index = None;
+            self.move_track_to_index_in_current_playlist(from, to);
+        }
     }
 
     fn render_track_row_context_menu(
@@ -4157,6 +5203,14 @@ impl AudioOrbitApp {
         }
         if ui.button(ui_icons::label(Icon::Info, "Details")).clicked() {
             self.details_modal = Some(DetailsModal::Track(path.clone()));
+            ui.close_menu();
+        }
+        if ui.button("Move up").clicked() {
+            self.move_track_in_current_playlist(index, -1);
+            ui.close_menu();
+        }
+        if ui.button("Move down").clicked() {
+            self.move_track_in_current_playlist(index, 1);
             ui.close_menu();
         }
         if ui.button(ui_icons::label(Icon::ExternalLink, "Show in File Explorer")).clicked() {
@@ -4328,15 +5382,16 @@ impl AudioOrbitApp {
             }
             ui.label(self.last_known_output_name.as_str());
         });
+        ui.add_space(16.0);
     }
 
     fn render_profile_transition_section(&mut self, ui: &mut egui::Ui) {
         ui.heading("Playback transitions");
-        ui.small("Crossfade and silence skipping are kept near the active sound profile because they affect how this profile feels during playback.");
+        ui.small("Crossfade and silence skipping are kept near the active sound profile because they affect how this profile feels during playback. Crossfade also applies when switching between music and internet radio sources.");
 
         let mut playback_changed = false;
         playback_changed |= ui
-            .checkbox(&mut self.state.playback.crossfade_enabled, "Crossfade tracks")
+            .checkbox(&mut self.state.playback.crossfade_enabled, "Crossfade source changes")
             .changed();
         if self.state.playback.crossfade_enabled {
             playback_changed |= ui
@@ -4354,17 +5409,31 @@ impl AudioOrbitApp {
         let mut profile_changed = false;
         if let Some(profile) = self.state.profiles.get_mut(profile_index) {
             profile_changed |= ui
-                .checkbox(&mut profile.settings.skip_silence_enabled, "Skip long silence")
+                .checkbox(&mut profile.settings.skip_silence_enabled, "Enable silence removal")
+                .on_hover_text("AIMP-style silence removal for local music files. Internet radio streams stay live and are not silence-skipped.")
                 .changed();
             if profile.settings.skip_silence_enabled {
                 profile_changed |= ui
                     .add(
-                        egui::Slider::new(&mut profile.settings.silence_threshold_seconds, 2u8..=30u8)
-                            .text("Skip gaps longer than (sec)"),
+                        egui::Slider::new(&mut profile.settings.silence_trigger_millis, 250u16..=10000u16)
+                            .text("Activation delay (ms)"),
                     )
-                    .on_hover_text("One continuous near-silent gap must last this long before Audio Orbit skips it.")
+                    .on_hover_text("A continuous silent section must last at least this long before Audio Orbit removes it. AIMP default: 2000 ms.")
                     .changed();
-                ui.small("Audio Orbit detects the near-silence level automatically, so this behaves like AIMP-style gap skipping without a manual gate control.");
+                profile_changed |= ui
+                    .add(
+                        egui::Slider::new(&mut profile.settings.silence_threshold_db, -90i16..=-20i16)
+                            .text("Detection threshold (dB)"),
+                    )
+                    .on_hover_text("Audio below this level is treated as silence. AIMP default shown in your screenshot: -60 dB.")
+                    .changed();
+                profile_changed |= ui
+                    .checkbox(
+                        &mut profile.settings.silence_trim_end_regardless_of_duration,
+                        "Remove silence at track end regardless of duration",
+                    )
+                    .on_hover_text("Matches AIMP's option for trimming ending silence even when the silent tail is shorter than the activation delay.")
+                    .changed();
             }
         }
         if profile_changed {
@@ -4378,11 +5447,12 @@ impl AudioOrbitApp {
         self.render_modal_backdrop(context, "panel_modal_backdrop");
         let screen_rect = context.screen_rect();
         let outer_padding = egui::vec2(28.0, 22.0);
+        let footer_height = self.modal_info_footer_reserved_height();
         let content_size = egui::vec2(
             (screen_rect.width() - outer_padding.x * 2.0).max(280.0),
-            (screen_rect.height() - outer_padding.y * 2.0).max(200.0),
+            (screen_rect.height() - outer_padding.y * 2.0 - footer_height).max(200.0),
         );
-        let scroll_height = (content_size.y - 112.0).max(120.0);
+        let scroll_height = (content_size.y - 88.0).max(120.0);
 
         egui::Area::new(egui::Id::new("panel_modal"))
             .order(egui::Order::Foreground)
@@ -4420,13 +5490,13 @@ impl AudioOrbitApp {
                                 ui.set_width(ui.available_width());
                                 match panel {
                                     AppPanelModal::Settings => self.render_settings_panel_content(ui),
-                                    AppPanelModal::Updates => self.render_update_settings_section(ui, false),
                                     AppPanelModal::Backup => self.render_backup_settings_section_inner(ui, false),
                                     AppPanelModal::About => self.render_about_section_inner(ui, false),
                                 }
                             });
                     });
             });
+        self.render_modal_info_footer_fixed(context, "panel_modal_info_footer", screen_rect);
     }
 
 
@@ -4436,9 +5506,6 @@ impl AudioOrbitApp {
             ui.heading("Panels");
             ui.small("Open a separate panel. Esc or the top-right X returns to the previous panel.");
             ui.horizontal_wrapped(|ui| {
-                if ui.button(ui_icons::label(Icon::Download, "Updates")).clicked() {
-                    self.open_panel_modal(AppPanelModal::Updates);
-                }
                 if ui.button(ui_icons::label(Icon::Archive, "Backup")).clicked() {
                     self.open_panel_modal(AppPanelModal::Backup);
                 }
@@ -4465,6 +5532,12 @@ impl AudioOrbitApp {
             ui.set_width(ui.available_width());
             self.render_profile_panel(ui);
         });
+        ui.add_space(12.0);
+
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            self.render_profile_panel(ui);
+        });
     }
 
     fn render_modal_backdrop(&self, context: &egui::Context, id: &'static str) {
@@ -4483,11 +5556,12 @@ impl AudioOrbitApp {
         let mut is_open = details.is_some();
         let screen_rect = context.screen_rect();
         let outer_padding = egui::vec2(28.0, 22.0);
+        let footer_height = self.modal_info_footer_reserved_height();
         let content_size = egui::vec2(
             (screen_rect.width() - outer_padding.x * 2.0).max(280.0),
-            (screen_rect.height() - outer_padding.y * 2.0).max(200.0),
+            (screen_rect.height() - outer_padding.y * 2.0 - footer_height).max(200.0),
         );
-        let scroll_height = (content_size.y - 92.0).max(120.0);
+        let scroll_height = (content_size.y - 64.0).max(120.0);
 
         egui::Area::new(egui::Id::new("details_modal"))
             .order(egui::Order::Foreground)
@@ -4513,8 +5587,7 @@ impl AudioOrbitApp {
                                 }
                             });
                         });
-                        self.render_modal_status_banner(ui);
-                        ui.add_space(8.0);
+                        ui.separator();
 
                         egui::ScrollArea::vertical()
                             .max_height(scroll_height)
@@ -4560,6 +5633,8 @@ impl AudioOrbitApp {
                             });
                     });
             });
+        self.render_modal_info_footer_fixed(context, "details_modal_info_footer", screen_rect);
+
         if context.input(|input| input.key_pressed(egui::Key::Escape)) {
             is_open = false;
         }
@@ -4634,90 +5709,15 @@ impl AudioOrbitApp {
         self.save_state_silently();
     }
 
-    fn render_update_check_confirmation_modal(&mut self, context: &egui::Context) {
-        let mut is_open = self.show_update_check_confirmation;
-        let screen_rect = context.screen_rect();
-        let card_width = (screen_rect.width() - 48.0).clamp(300.0, 560.0);
-
-        egui::Area::new(egui::Id::new("update_check_confirmation_scrim"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(screen_rect.left_top())
-            .show(context, |ui| {
-                let local_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, screen_rect.size());
-                let response = ui.allocate_rect(local_rect, egui::Sense::click());
-                ui.painter().rect_filled(local_rect, 0.0, egui::Color32::from_black_alpha(188));
-                response.on_hover_text("Confirm or cancel the release check.");
-            });
-
-        egui::Area::new(egui::Id::new("update_check_confirmation_modal"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(context, |ui| {
-                egui::Frame::window(ui.style())
-                    .inner_margin(egui::Margin::symmetric(18, 16))
-                    .show(ui, |ui| {
-                        ui.set_min_width(card_width);
-                        ui.set_max_width(card_width);
-
-                        ui.horizontal(|ui| {
-                            ui.vertical(|ui| {
-                                ui.heading(ui_icons::label(Icon::Info, "Confirm release check"));
-                                ui.add_space(2.0);
-                                ui.add(
-                                    egui::Label::new("GitHub release checks are still allowed, but Audio Orbit asks before making another request after repeated checks.")
-                                        .wrap(),
-                                );
-                            });
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                if ui
-                                    .add_sized(egui::vec2(36.0, 30.0), egui::Button::new(ui_icons::icon(Icon::X)))
-                                    .on_hover_text("Cancel")
-                                    .clicked()
-                                {
-                                    is_open = false;
-                                }
-                            });
-                        });
-
-                        ui.add_space(12.0);
-                        egui::Frame::group(ui.style()).show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.label(format!(
-                                "Checks this session: {}",
-                                self.update_check_count
-                            ));
-                            ui.small("Too many repeated GitHub API requests can be temporarily rate limited. Confirming only performs one additional release lookup now.");
-                        });
-
-                        ui.add_space(14.0);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let can_confirm = self.update_check_receiver.is_none();
-                            if ui
-                                .add_enabled(can_confirm, egui::Button::new(ui_icons::label(Icon::Search, "Check again")))
-                                .clicked()
-                            {
-                                self.check_for_updates(true);
-                                is_open = false;
-                            }
-
-                            if ui.button("Cancel").clicked() {
-                                is_open = false;
-                            }
-                        });
-                    });
-            });
-
-        self.show_update_check_confirmation = is_open;
-    }
-
     fn render_radio_add_modal(&mut self, context: &egui::Context) {
         self.render_modal_backdrop(context, "radio_add_modal_backdrop");
         let mut is_open = self.show_radio_add_modal;
         let screen_rect = context.screen_rect();
         let outer_padding = egui::vec2(28.0, 22.0);
+        let footer_height = self.modal_info_footer_reserved_height();
         let content_size = egui::vec2(
             (screen_rect.width() - outer_padding.x * 2.0).max(280.0),
-            (screen_rect.height() - outer_padding.y * 2.0).max(200.0),
+            (screen_rect.height() - outer_padding.y * 2.0 - footer_height).max(200.0),
         );
 
         egui::Area::new(egui::Id::new("radio_add_modal"))
@@ -4745,8 +5745,7 @@ impl AudioOrbitApp {
                             });
                         });
                         ui.add(egui::Label::new("Add a stream URL. If the name is empty, Audio Orbit tries to read the station name from stream headers and falls back to the stream host.").wrap());
-                        self.render_modal_status_banner(ui);
-                        ui.add_space(10.0);
+                        ui.separator();
 
                         let form_width = ui.available_width().min(620.0);
                         ui.allocate_ui_with_layout(
@@ -4777,11 +5776,46 @@ impl AudioOrbitApp {
                         );
                     });
             });
+        self.render_modal_info_footer_fixed(context, "radio_add_modal_info_footer", screen_rect);
+
         if context.input(|input| input.key_pressed(egui::Key::Escape)) {
             is_open = false;
         }
 
         self.show_radio_add_modal = is_open;
+    }
+
+    fn render_recording_settings_section(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Recording");
+        ui.small("Internet radio recordings are saved from the original stream bytes before volume, orbit, silence skip, or any other playback processing.");
+        let folder = self.state.recording.resolved_output_folder();
+        ui.label("Radio recording folder");
+        ui.horizontal_wrapped(|ui| {
+            ui.monospace(folder.display().to_string());
+            if ui.button(ui_icons::label(Icon::FolderOpen, "Choose folder...")).clicked() {
+                self.choose_recording_folder();
+            }
+            if ui.button(ui_icons::label(Icon::ExternalLink, "Open current folder")).clicked() {
+                self.open_recording_folder();
+            }
+            if ui.button("Reset default").clicked() {
+                self.state.recording.output_folder = None;
+                self.status_message = "Radio recording folder reset to .audio-orbit-records next to the executable.".to_owned();
+                self.error_message = None;
+                self.save_state_silently();
+            }
+        });
+        if let Some(info) = self.player.as_ref().and_then(|player| player.radio_recording_info()) {
+            ui.colored_label(
+                egui::Color32::RED,
+                format!(
+                    "Recording: {} · {} · {}",
+                    info.path.display(),
+                    format_duration(info.started_at.elapsed().as_secs_f32()),
+                    format_file_size(info.bytes_written)
+                ),
+            );
+        }
     }
 
     fn render_recording_settings_section(&mut self, ui: &mut egui::Ui) {
@@ -4885,7 +5919,7 @@ impl AudioOrbitApp {
         }
 
         playback_changed |= ui
-            .checkbox(&mut self.state.playback.crossfade_enabled, "Crossfade tracks")
+            .checkbox(&mut self.state.playback.crossfade_enabled, "Crossfade source changes")
             .changed();
         if self.state.playback.crossfade_enabled {
             playback_changed |= ui
@@ -4903,17 +5937,31 @@ impl AudioOrbitApp {
         let mut profile_changed = false;
         if let Some(profile) = self.state.profiles.get_mut(profile_index) {
             profile_changed |= ui
-                .checkbox(&mut profile.settings.skip_silence_enabled, "Skip long silence")
+                .checkbox(&mut profile.settings.skip_silence_enabled, "Enable silence removal")
+                .on_hover_text("AIMP-style silence removal for local music files. Internet radio streams stay live and are not silence-skipped.")
                 .changed();
             if profile.settings.skip_silence_enabled {
                 profile_changed |= ui
                     .add(
-                        egui::Slider::new(&mut profile.settings.silence_threshold_seconds, 2u8..=30u8)
-                            .text("Skip gaps longer than (sec)"),
+                        egui::Slider::new(&mut profile.settings.silence_trigger_millis, 250u16..=10000u16)
+                            .text("Activation delay (ms)"),
                     )
-                    .on_hover_text("One continuous near-silent gap must last this long before Audio Orbit skips it.")
+                    .on_hover_text("A continuous silent section must last at least this long before Audio Orbit removes it. AIMP default: 2000 ms.")
                     .changed();
-                ui.small("Audio Orbit detects the near-silence level automatically, so this behaves like AIMP-style gap skipping without a manual gate control.");
+                profile_changed |= ui
+                    .add(
+                        egui::Slider::new(&mut profile.settings.silence_threshold_db, -90i16..=-20i16)
+                            .text("Detection threshold (dB)"),
+                    )
+                    .on_hover_text("Audio below this level is treated as silence. AIMP default shown in your screenshot: -60 dB.")
+                    .changed();
+                profile_changed |= ui
+                    .checkbox(
+                        &mut profile.settings.silence_trim_end_regardless_of_duration,
+                        "Remove silence at track end regardless of duration",
+                    )
+                    .on_hover_text("Matches AIMP's option for trimming ending silence even when the silent tail is shorter than the activation delay.")
+                    .changed();
             }
         }
         if profile_changed {
@@ -4925,7 +5973,7 @@ impl AudioOrbitApp {
         if show_title {
             ui.heading("Backup and data");
         }
-        ui.small("The ZIP backup stores the full app state: music folders, playlists, Favorites, sound profiles, playback settings, and update settings.");
+        ui.small("The ZIP backup stores the full app state: music folders, playlists, Favorites, sound profiles, playback settings, recording settings, and UI settings.");
 
         ui.horizontal_wrapped(|ui| {
             if ui.button(ui_icons::label(Icon::Download, "Export full backup ZIP")).clicked() {
@@ -4938,107 +5986,6 @@ impl AudioOrbitApp {
 
         if let Some(path) = app_data_dir() {
             ui.small(format!("Portable data folder: {}", path.display()));
-        }
-    }
-
-    fn render_update_settings_section(&mut self, ui: &mut egui::Ui, show_modal_button: bool) {
-        if show_modal_button {
-            ui.heading("Updates");
-        }
-        let prerelease_changed = ui
-            .checkbox(
-                &mut self.state.update_settings.include_prereleases,
-                "Also watch prereleases",
-            )
-            .changed();
-        if prerelease_changed {
-            self.save_state_silently();
-        }
-
-        ui.small(if self.state.update_settings.include_prereleases {
-            "Mode: stable releases and prereleases."
-        } else {
-            "Mode: latest stable release only."
-        });
-
-        ui.horizontal_wrapped(|ui| {
-            let check_status = if self.update_check_receiver.is_some() {
-                format!(
-                    "Checks this session: {} · checking...",
-                    self.update_check_count
-                )
-            } else if self.update_check_count >= UPDATE_CHECKS_BEFORE_CONFIRMATION {
-                format!(
-                    "Checks this session: {} · confirmation required for each extra check",
-                    self.update_check_count
-                )
-            } else {
-                format!(
-                    "Checks this session: {} · confirmation starts after {}",
-                    self.update_check_count,
-                    UPDATE_CHECKS_BEFORE_CONFIRMATION
-                )
-            };
-            ui.label(check_status);
-
-            let can_check = self.update_check_receiver.is_none();
-            if ui
-                .add_enabled(can_check, egui::Button::new(ui_icons::label(Icon::Search, "Check releases")))
-                .clicked()
-            {
-                self.check_for_updates(false);
-            }
-
-            if show_modal_button && ui.button(ui_icons::label(Icon::Download, "Open Updates panel")).clicked() {
-                self.open_panel_modal(AppPanelModal::Updates);
-            }
-
-            if ui.button(ui_icons::label(Icon::ExternalLink, "Open releases" )).clicked() {
-                if let Err(error) = updater::open_releases_page() {
-                    self.error_message = Some(error.to_string());
-                }
-            }
-        });
-
-        if self.update_check_count >= UPDATE_CHECKS_BEFORE_CONFIRMATION {
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                "Further release checks are allowed, but Audio Orbit will ask before contacting GitHub again because repeated requests may trigger temporary API rate limiting.",
-            );
-        }
-
-        if let Some(check) = self.last_update_check.clone() {
-            ui.label(format!("Running build: {}", app_version_label()));
-            ui.label(format!("Current release version: v{}", check.current_version));
-            ui.label(format!(
-                "Latest version: v{}{}",
-                check.latest_version,
-                if check.prerelease { " prerelease" } else { "" }
-            ));
-
-            if check.is_update_available {
-                ui.colored_label(egui::Color32::LIGHT_GREEN, "A newer executable is available.");
-            } else {
-                ui.colored_label(egui::Color32::LIGHT_GREEN, "Latest is OK. No update is required.");
-            }
-
-            if let Some(asset_name) = &check.asset_name {
-                ui.small(format!("Asset: {asset_name}"));
-            } else {
-                ui.small("No Windows executable asset was found on the selected release.");
-            }
-
-            let can_install = check.is_update_available && check.asset_download_url.is_some();
-            if ui
-                .add_enabled(can_install, egui::Button::new(ui_icons::label(Icon::Download, "Replace current executable")))
-                .clicked()
-            {
-                self.install_update();
-            }
-        } else {
-            ui.small(format!("Running build: {}", app_version_label()));
-            ui.small(format!("Repository: {}", updater::repository_label()));
-            ui.small("No release check has been run in this app session.");
         }
     }
 
@@ -5061,6 +6008,10 @@ impl AudioOrbitApp {
         ui.add(egui::Label::new("Lofty — Rust audio metadata reader used for duration, bitrate, sample rate, and tags. License: MIT OR Apache-2.0. GitHub: https://github.com/Serial-ATA/lofty-rs").wrap());
 
         ui.add_space(10.0);
+        ui.heading("External components");
+        ui.add(egui::Label::new("RustFFT — high-performance pure Rust FFT used for Audio Orbit waveform/spectrum analysis. License: MIT OR Apache-2.0. GitHub: https://github.com/ejmahler/RustFFT").wrap());
+
+        ui.add_space(10.0);
         ui.heading("Keyboard shortcuts");
         ui.small("AIMP-style in-app controls are available while no text field is focused.");
         ui.label("Space — Play / pause");
@@ -5069,52 +6020,92 @@ impl AudioOrbitApp {
         ui.label("Left / Right — Seek 10 seconds backward / forward");
         ui.label("Ctrl + Left / Ctrl + Right — Previous / next track");
         ui.label("Ctrl + F — Show or hide track search");
+        ui.label("Ctrl + Z — Undo last track/radio order change");
         ui.label("M — Player-only / full layout");
         ui.label("Ctrl + L — Show or hide Library panel");
         ui.label("Ctrl + P — Show or hide Sound profiles panel");
-    }
-
-    fn render_modal_status_banner(&self, ui: &mut egui::Ui) {
-        if !self.has_modal_info_message() {
-            return;
-        }
-
-        ui.add_space(10.0);
-        let (icon, message, color) = if let Some(error) = &self.error_message {
-            (Icon::Info, error.as_str(), egui::Color32::LIGHT_RED)
-        } else {
-            (Icon::Info, self.status_message.as_str(), ui.visuals().text_color())
-        };
-
-        egui::Frame::new()
-            .fill(egui::Color32::from_black_alpha(96))
-            .corner_radius(egui::CornerRadius::same(12))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(24)))
-            .inner_margin(egui::Margin::symmetric(12, 8))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(egui::RichText::new(ui_icons::icon(icon)).color(color));
-                    ui.add(egui::Label::new(egui::RichText::new(message).color(color)).wrap());
-                });
-            });
     }
 
     fn has_modal_info_message(&self) -> bool {
         !self.status_message.is_empty() || self.error_message.is_some()
     }
 
+    fn modal_info_footer_reserved_height(&self) -> f32 {
+        if let Some(error) = &self.error_message {
+            let estimated_lines = error
+                .lines()
+                .map(|line| (line.chars().count() as f32 / 92.0).ceil().max(1.0))
+                .sum::<f32>()
+                .max(1.0);
+            return 34.0 + (estimated_lines * 18.0).min(48.0);
+        }
+
+        if !self.status_message.is_empty() {
+            let estimated_lines = self
+                .status_message
+                .lines()
+                .map(|line| (line.chars().count() as f32 / 110.0).ceil().max(1.0))
+                .sum::<f32>()
+                .max(1.0);
+            return 34.0 + (estimated_lines * 18.0).min(24.0);
+        }
+
+        0.0
+    }
+
+    fn render_modal_info_footer_fixed(&self, context: &egui::Context, id: &'static str, modal_rect: egui::Rect) {
+        if !self.has_modal_info_message() {
+            return;
+        }
+
+        let footer_height = self.modal_info_footer_reserved_height();
+        let top_left = egui::pos2(modal_rect.left(), modal_rect.bottom() - footer_height);
+        egui::Area::new(egui::Id::new(id))
+            .order(egui::Order::Foreground)
+            .fixed_pos(top_left)
+            .show(context, |ui| {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_black_alpha(244))
+                    .corner_radius(egui::CornerRadius::same(0))
+                    .inner_margin(egui::Margin::symmetric(28, 8))
+                    .show(ui, |ui| {
+                        ui.set_min_size(egui::vec2((modal_rect.width() - 56.0).max(220.0), footer_height));
+                        let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+                        let rect = ui.max_rect();
+                        ui.painter().line_segment([rect.left_top(), rect.right_top()], stroke);
+                        ui.add_space(4.0);
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_black_alpha(92))
+                            .corner_radius(egui::CornerRadius::same(0))
+                            .inner_margin(egui::Margin::symmetric(10, 6))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                let max_text_height = if self.error_message.is_some() { 48.0 } else { 24.0 };
+                                egui::ScrollArea::vertical()
+                                    .max_height(max_text_height)
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        if let Some(error) = &self.error_message {
+                                            ui.add(egui::Label::new(egui::RichText::new(error.as_str()).color(egui::Color32::LIGHT_RED)).wrap());
+                                        } else {
+                                            ui.add(egui::Label::new(self.status_message.as_str()).wrap());
+                                        }
+                                    });
+                            });
+                    });
+            });
+    }
+
     fn playlist_count_label(&self) -> Option<String> {
         if self.active_tab != MainContentTab::Music {
             return None;
         }
-
         let playlist = self.current_playlist()?;
         let total = playlist.tracks.len();
         if total == 0 {
             return None;
         }
-
         let visible = self.visible_track_indexes().len();
         if self.show_track_search && !self.track_search_query.trim().is_empty() && visible != total {
             Some(format!("{visible}/{total} tracks"))
@@ -5124,23 +6115,40 @@ impl AudioOrbitApp {
     }
 
     fn render_status_panel(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(2.0);
+        let count_label = self.playlist_count_label();
+        let body_font = egui::TextStyle::Body.resolve(ui.style());
+        let small_font = egui::TextStyle::Small.resolve(ui.style());
+        let text_color = ui.visuals().widgets.inactive.fg_stroke.color;
+        let count_width = count_label
+            .as_ref()
+            .map(|label| text_width(ui, label, small_font.clone(), text_color) + 18.0)
+            .unwrap_or(0.0);
+        let available_width = ui.available_width();
+        let media_width = if self.media_key_status.is_empty() {
+            0.0
+        } else {
+            (text_width(ui, &self.media_key_status, small_font.clone(), text_color) + 16.0)
+                .min(available_width * 0.35)
+        };
+        let primary_status = self
+            .profile_apply_status_text()
+            .unwrap_or_else(|| self.status_message.clone());
+        let separator_width = if !primary_status.is_empty() && !self.media_key_status.is_empty() { 12.0 } else { 0.0 };
+        let available_status_width = (available_width - count_width - media_width - separator_width - 12.0).max(48.0);
+
         ui.horizontal(|ui| {
-            let mut has_left_content = false;
-
-            if !self.status_message.is_empty() {
-                ui.add(egui::Label::new(self.status_message.as_str()).truncate());
-                has_left_content = true;
-            }
-
-            if !self.media_key_status.is_empty() {
-                if has_left_content {
+            if !primary_status.is_empty() {
+                render_ellipsized_single_line(ui, &primary_status, available_status_width, body_font.clone(), text_color);
+                if !self.media_key_status.is_empty() {
                     ui.separator();
                 }
-                ui.small(self.media_key_status.as_str());
+            }
+            if !self.media_key_status.is_empty() {
+                let width = media_width.max(48.0);
+                render_ellipsized_single_line(ui, &self.media_key_status, width, small_font.clone(), text_color);
             }
 
-            if let Some(count_label) = self.playlist_count_label() {
+            if let Some(count_label) = count_label {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.small(count_label);
                 });
@@ -5172,6 +6180,45 @@ impl AudioOrbitApp {
                         egui::ScrollArea::vertical()
                             .max_height(108.0)
                             .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.add(egui::Label::new(egui::RichText::new(error_message.as_str()).color(egui::Color32::from_rgb(255, 112, 112))).wrap());
+                            });
+                    });
+            });
+    }
+
+    fn render_drag_feedback(&self, context: &egui::Context) {
+        if self.dragging_track_index.is_some() || self.dragging_radio_index.is_some() {
+            context.set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
+    }
+
+    fn render_error_toast(&mut self, context: &egui::Context) {
+        let Some(error_message) = self.error_message.clone() else {
+            return;
+        };
+
+        let screen_rect = context.screen_rect();
+        let estimated_width = (error_message.chars().count() as f32 * 7.0 + 34.0).clamp(260.0, 720.0);
+        let width = estimated_width.min((screen_rect.width() - 32.0).max(260.0));
+        let estimated_lines = (error_message.chars().count() as f32 / 90.0).ceil().max(1.0);
+        let max_height = (estimated_lines * 18.0 + 16.0).clamp(32.0, 112.0);
+        egui::Area::new(egui::Id::new("error_toast_overlay"))
+            .order(egui::Order::Tooltip)
+            .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -12.0])
+            .show(context, |ui| {
+                ui.set_width(width);
+                egui::Frame::new()
+                    .fill(egui::Color32::from_black_alpha(238))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(150, 54, 62)))
+                    .corner_radius(egui::CornerRadius::same(0))
+                    .inner_margin(egui::Margin::symmetric(12, 7))
+                    .show(ui, |ui| {
+                        ui.set_width(width);
+                        egui::ScrollArea::vertical()
+                            .max_height(max_height)
+                            .auto_shrink([false, true])
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 ui.add(egui::Label::new(egui::RichText::new(error_message.as_str()).color(egui::Color32::from_rgb(255, 112, 112))).wrap());
@@ -5278,42 +6325,6 @@ impl AudioOrbitApp {
 }
 
 
-
-fn backup_default_file_name() -> String {
-    let (year, month, day, hour, minute, second) = utc_timestamp_parts(current_unix_seconds());
-    format!("audio-orbit-backup-{year:04}-{month:02}-{day:02}-{hour:02}-{minute:02}-{second:02}.zip")
-}
-
-fn utc_timestamp_parts(seconds: u64) -> (i32, u32, u32, u32, u32, u32) {
-    let days = (seconds / 86_400) as i64;
-    let seconds_of_day = seconds % 86_400;
-    let hour = (seconds_of_day / 3_600) as u32;
-    let minute = ((seconds_of_day % 3_600) / 60) as u32;
-    let second = (seconds_of_day % 60) as u32;
-
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let mut year = yoe as i32 + era as i32 * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = (mp + if mp < 10 { 3 } else { -9 }) as u32;
-    if month <= 2 {
-        year += 1;
-    }
-
-    (year, month, day, hour, minute, second)
-}
-
-fn current_unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
-}
-
 fn media_key_status_message(
     registered: &[media_keys::MediaKeyCommand],
     failed: &[media_keys::MediaKeyCommand],
@@ -5353,14 +6364,14 @@ fn fetch_radio_stream_metadata(url: &str) -> Option<RadioStreamMetadata> {
         .get("icy-name")
         .or_else(|| headers.get("x-audiocast-name"))
         .or_else(|| headers.get("icy-description"))
-        .and_then(|value| value.to_str().ok())
-        .map(clean_radio_metadata_value)
+        .map(|value| decode_radio_text_bytes(value.as_bytes()))
+        .map(|value| clean_radio_metadata_value(&value))
         .filter(|value| !value.is_empty());
 
     let stream_title = headers
         .get("icy-title")
-        .and_then(|value| value.to_str().ok())
-        .map(clean_radio_metadata_value)
+        .map(|value| decode_radio_text_bytes(value.as_bytes()))
+        .map(|value| clean_radio_metadata_value(&value))
         .filter(|value| !value.is_empty())
         .or_else(|| {
             let metadata_interval = headers
@@ -5385,20 +6396,161 @@ fn read_icy_stream_title<R: Read>(reader: &mut R, metadata_interval: usize) -> O
         return None;
     }
 
+    // Some stations return an empty first ICY metadata block. Read a few blocks
+    // from the metadata request so the visible title can update while radio keeps
+    // playing, without mixing ICY bytes into the playback stream.
     let mut audio_buffer = vec![0_u8; metadata_interval];
-    reader.read_exact(&mut audio_buffer).ok()?;
+    for _ in 0..6 {
+        reader.read_exact(&mut audio_buffer).ok()?;
 
-    let mut length_byte = [0_u8; 1];
-    reader.read_exact(&mut length_byte).ok()?;
-    let metadata_length = length_byte[0] as usize * 16;
-    if metadata_length == 0 || metadata_length > 4096 {
-        return None;
+        let mut length_byte = [0_u8; 1];
+        reader.read_exact(&mut length_byte).ok()?;
+        let metadata_length = length_byte[0] as usize * 16;
+        if metadata_length == 0 {
+            continue;
+        }
+        if metadata_length > 4096 {
+            return None;
+        }
+
+        let mut metadata = vec![0_u8; metadata_length];
+        reader.read_exact(&mut metadata).ok()?;
+        let metadata = decode_radio_text_bytes(&metadata);
+        if let Some(title) = parse_icy_stream_title(&metadata) {
+            return Some(title);
+        }
     }
 
-    let mut metadata = vec![0_u8; metadata_length];
-    reader.read_exact(&mut metadata).ok()?;
-    let metadata = String::from_utf8_lossy(&metadata);
-    parse_icy_stream_title(&metadata)
+    None
+}
+
+fn playlist_scroll_key(index: usize, playlist: &Playlist) -> String {
+    let group = playlist.selected_group.as_deref().unwrap_or("__all__");
+    let source = playlist
+        .source_folder
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!("{index}|{}|{}|{}", playlist.name, source, group)
+}
+
+fn decode_radio_text_bytes(bytes: &[u8]) -> String {
+    if let Ok(value) = std::str::from_utf8(bytes) {
+        return value.to_owned();
+    }
+
+    bytes
+        .iter()
+        .map(|byte| match *byte {
+            0x80 => '€',
+            0x82 => '‚',
+            0x84 => '„',
+            0x85 => '…',
+            0x86 => '†',
+            0x87 => '‡',
+            0x89 => '‰',
+            0x8A => 'Š',
+            0x8B => '‹',
+            0x8C => 'Ś',
+            0x8D => 'Ť',
+            0x8E => 'Ž',
+            0x8F => 'Ź',
+            0x91 => '‘',
+            0x92 => '’',
+            0x93 => '“',
+            0x94 => '”',
+            0x95 => '•',
+            0x96 => '–',
+            0x97 => '—',
+            0x99 => '™',
+            0x9A => 'š',
+            0x9B => '›',
+            0x9C => 'ś',
+            0x9D => 'ť',
+            0x9E => 'ž',
+            0x9F => 'ź',
+            0xA1 => 'ˇ',
+            0xA2 => '˘',
+            0xA3 => 'Ł',
+            0xA5 => 'Ą',
+            0xAA => 'Ş',
+            0xAF => 'Ż',
+            0xB2 => '˛',
+            0xB3 => 'ł',
+            0xB9 => 'ą',
+            0xBA => 'ş',
+            0xBC => 'Ľ',
+            0xBD => '˝',
+            0xBE => 'ľ',
+            0xBF => 'ż',
+            0xC0 => 'Ŕ',
+            0xC1 => 'Á',
+            0xC2 => 'Â',
+            0xC3 => 'Ă',
+            0xC4 => 'Ä',
+            0xC5 => 'Ĺ',
+            0xC6 => 'Ć',
+            0xC7 => 'Ç',
+            0xC8 => 'Č',
+            0xC9 => 'É',
+            0xCA => 'Ę',
+            0xCB => 'Ë',
+            0xCC => 'Ě',
+            0xCD => 'Í',
+            0xCE => 'Î',
+            0xCF => 'Ď',
+            0xD0 => 'Đ',
+            0xD1 => 'Ń',
+            0xD2 => 'Ň',
+            0xD3 => 'Ó',
+            0xD4 => 'Ô',
+            0xD5 => 'Ő',
+            0xD6 => 'Ö',
+            0xD7 => '×',
+            0xD8 => 'Ř',
+            0xD9 => 'Ů',
+            0xDA => 'Ú',
+            0xDB => 'Ű',
+            0xDC => 'Ü',
+            0xDD => 'Ý',
+            0xDE => 'Ţ',
+            0xDF => 'ß',
+            0xE0 => 'ŕ',
+            0xE1 => 'á',
+            0xE2 => 'â',
+            0xE3 => 'ă',
+            0xE4 => 'ä',
+            0xE5 => 'ĺ',
+            0xE6 => 'ć',
+            0xE7 => 'ç',
+            0xE8 => 'č',
+            0xE9 => 'é',
+            0xEA => 'ę',
+            0xEB => 'ë',
+            0xEC => 'ě',
+            0xED => 'í',
+            0xEE => 'î',
+            0xEF => 'ď',
+            0xF0 => 'đ',
+            0xF1 => 'ń',
+            0xF2 => 'ň',
+            0xF3 => 'ó',
+            0xF4 => 'ô',
+            0xF5 => 'ő',
+            0xF6 => 'ö',
+            0xF7 => '÷',
+            0xF8 => 'ř',
+            0xF9 => 'ů',
+            0xFA => 'ú',
+            0xFB => 'ű',
+            0xFC => 'ü',
+            0xFD => 'ý',
+            0xFE => 'ţ',
+            0xFF => '˙',
+            0x00..=0x7F => *byte as char,
+            _ => ' ',
+        })
+        .collect()
 }
 
 fn parse_icy_stream_title(metadata: &str) -> Option<String> {
@@ -5419,6 +6571,88 @@ fn clean_radio_metadata_value(value: &str) -> String {
         .to_owned()
 }
 
+
+fn search_icon_text_button(ui: &mut egui::Ui, enabled: bool, icon: Icon, text: &str) -> egui::Response {
+    let icon_text = ui_icons::icon(icon);
+    let icon_font = egui::FontId::proportional(14.0);
+    let text_font = egui::TextStyle::Button.resolve(ui.style());
+    let button_height = ui.spacing().interact_size.y;
+    let horizontal_padding = ui.spacing().button_padding.x.max(6.0);
+    let icon_width = text_width(
+        ui,
+        &icon_text,
+        icon_font.clone(),
+        ui.visuals().widgets.inactive.fg_stroke.color,
+    ).ceil();
+    let text_width = text_width(
+        ui,
+        text,
+        text_font.clone(),
+        ui.visuals().widgets.inactive.fg_stroke.color,
+    ).ceil();
+    let icon_gap = 5.0;
+    let button_width = (horizontal_padding * 2.0 + icon_width + icon_gap + text_width).ceil().max(44.0);
+
+    let response = ui.add_enabled(
+        enabled,
+        egui::Button::new("").min_size(egui::vec2(button_width, button_height)),
+    );
+    let visuals = ui.style().interact(&response);
+    let text_color = if enabled {
+        visuals.fg_stroke.color
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    let icon_left = response.rect.left() + horizontal_padding;
+    let text_left = icon_left + icon_width + icon_gap;
+    let center_y = response.rect.center().y;
+
+    ui.painter().text(
+        egui::pos2(icon_left, center_y),
+        egui::Align2::LEFT_CENTER,
+        icon_text,
+        icon_font,
+        text_color,
+    );
+    ui.painter().text(
+        egui::pos2(text_left, center_y),
+        egui::Align2::LEFT_CENTER,
+        text,
+        text_font,
+        text_color,
+    );
+
+    response
+}
+
+fn render_ellipsized_single_line(
+    ui: &mut egui::Ui,
+    value: &str,
+    width: f32,
+    font_id: egui::FontId,
+    color: egui::Color32,
+) -> egui::Response {
+    let trimmed = value.trim();
+    let desired_size = egui::vec2(width, ui.spacing().interact_size.y);
+    if trimmed.is_empty() {
+        return ui.allocate_response(desired_size, egui::Sense::hover());
+    }
+
+    let clipped = ellipsize_to_width_exact(ui, trimmed, width, font_id.clone(), color);
+    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
+    ui.painter().text(
+        rect.left_center(),
+        egui::Align2::LEFT_CENTER,
+        clipped.as_str(),
+        font_id,
+        color,
+    );
+
+    if clipped != trimmed {
+        return response.on_hover_text(trimmed);
+    }
+    response
+}
 
 fn text_width(ui: &egui::Ui, value: &str, font_id: egui::FontId, color: egui::Color32) -> f32 {
     if value.trim().is_empty() {
@@ -5513,6 +6747,49 @@ fn fallback_radio_station_name(url: &str) -> String {
     }
 }
 
+fn normalize_search_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() {
+                ch.to_lowercase().next().unwrap_or(ch)
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn track_matches_search_query(track: &Track, query: &str) -> bool {
+    let query = normalize_search_text(query);
+    if query.is_empty() {
+        return true;
+    }
+
+    let haystack = normalize_search_text(&format!(
+        "{} {} {} {}",
+        track.title,
+        track.group,
+        track.path.display(),
+        display_parent(&track.path)
+    ));
+
+    query
+        .split_whitespace()
+        .all(|token| haystack.contains(token))
+}
+
+fn naturalish_key(value: &str) -> String {
+    normalize_search_text(value)
+}
+
+fn same_text(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
 fn ensure_state_is_valid(state: &mut SavedState) {
     if !state.playlists.iter().any(|playlist| playlist.kind == PlaylistKind::Favorites) {
         state.playlists.insert(0, Playlist::favorites());
@@ -5524,8 +6801,21 @@ fn ensure_state_is_valid(state: &mut SavedState) {
         } else if playlist.source_folder.is_some() {
             playlist.kind = PlaylistKind::Folder;
         }
-        playlist.sort_tracks();
         playlist.set_selected_group(playlist.selected_group.clone());
+        let track_paths: Vec<PathBuf> = playlist.tracks.iter().map(|track| track.path.clone()).collect();
+        playlist
+            .repeat_selection
+            .retain(|selected_path| track_paths.iter().any(|track_path| same_path(track_path, selected_path)));
+        let mut deduped_repeat_selection: Vec<PathBuf> = Vec::new();
+        for selected_path in playlist.repeat_selection.drain(..) {
+            if !deduped_repeat_selection
+                .iter()
+                .any(|existing_path| same_path(existing_path.as_path(), selected_path.as_path()))
+            {
+                deduped_repeat_selection.push(selected_path);
+            }
+        }
+        playlist.repeat_selection = deduped_repeat_selection;
     }
 
     if state.playlists.is_empty() {
@@ -5549,9 +6839,27 @@ fn ensure_state_is_valid(state: &mut SavedState) {
         }
     }
 
+
+    if !state.playback_session.position_seconds.is_finite() || state.playback_session.position_seconds < 0.0 {
+        state.playback_session.position_seconds = 0.0;
+    }
+    if !matches!(state.playback_session.source.as_str(), "music" | "track" | "radio") {
+        state.playback_session = PlaybackSession::default();
+    }
+    if let Some(index) = state.playback_session.radio_index {
+        if index >= state.radio_stations.len() {
+            state.playback_session.radio_index = None;
+            state.playback_session.was_active = false;
+        }
+    }
+
     if !state.ui.playlist_scroll_offset_y.is_finite() || state.ui.playlist_scroll_offset_y < 0.0 {
         state.ui.playlist_scroll_offset_y = 0.0;
     }
+    state
+        .ui
+        .playlist_scroll_offsets
+        .retain(|_, offset| offset.is_finite() && *offset >= 0.0);
 }
 
 fn next_valid_track_index(previous_index: usize, remaining_len: usize) -> Option<usize> {
@@ -5611,99 +6919,100 @@ fn paint_sticky_folder_header(
     (rect, icon_rect)
 }
 
-fn waveform_bar_color(ui: &egui::Ui, played: bool, silence: bool) -> egui::Color32 {
-    if silence {
-        egui::Color32::from_rgb(238, 194, 74)
-    } else if played {
-        egui::Color32::from_rgb(58, 132, 245)
-    } else {
-        ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.36)
-    }
-}
-
-fn draw_waveform_bar(
-    painter: &egui::Painter,
-    x1: f32,
-    x2: f32,
-    center_y: f32,
-    height: f32,
-    color: egui::Color32,
-) {
-    if x2 <= x1 || height <= 0.5 {
-        return;
-    }
-
-    let half_height = height * 0.5;
-    let rect = egui::Rect::from_min_max(
-        egui::pos2(x1, center_y - half_height),
-        egui::pos2(x2, center_y + half_height),
+fn paint_dragged_row_fade(ui: &egui::Ui, rect: egui::Rect) {
+    let painter = ui.painter();
+    painter.rect_filled(rect, 4.0, egui::Color32::from_black_alpha(150));
+    painter.rect_stroke(
+        rect,
+        4.0,
+        egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color.linear_multiply(0.70)),
+        egui::StrokeKind::Inside,
     );
-    painter.rect_filled(rect, 0.0, color);
 }
 
-fn shaped_waveform_height(value: f32, rect_height: f32, live: bool) -> f32 {
-    let value = value.clamp(0.0, 1.0);
-    if value <= 0.003 {
-        return 1.1;
-    }
-
-    // AIMP-style seek waveforms are an amplitude envelope, not a full-height VU
-    // meter. Keep the ceiling below the full rectangle so mastered radio streams
-    // still show musical movement instead of a saturated barcode.
-    let shaped = value.powf(if live { 1.18 } else { 1.08 });
-    let min_height = rect_height * 0.035;
-    let max_height = rect_height * if live { 0.64 } else { 0.78 };
-    (min_height + shaped * (max_height - min_height)).clamp(1.1, rect_height - 6.0)
+fn paint_list_separator_line(ui: &egui::Ui, left: f32, right: f32, y: f32, highlighted: bool) {
+    let color = if highlighted {
+        egui::Color32::from_rgb(78, 148, 255)
+    } else {
+        ui.visuals().widgets.noninteractive.bg_stroke.color
+    };
+    let stroke_width = if highlighted { 2.0 } else { 1.0 };
+    let y = y.round() + 0.5;
+    ui.painter().line_segment(
+        [egui::pos2(left, y), egui::pos2(right, y)],
+        egui::Stroke::new(stroke_width, color),
+    );
 }
 
-fn draw_radio_visualizer(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egui::Response {
-    let desired_size = egui::vec2(ui.available_width(), 46.0);
+fn paint_list_separator(ui: &mut egui::Ui, width: f32, highlighted: bool) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
+    paint_list_separator_line(ui, rect.left(), rect.right(), rect.center().y, highlighted);
+}
+
+fn paint_list_edge_separator(ui: &egui::Ui, row_rect: egui::Rect, width: f32, after: bool) {
+    let y = if after { row_rect.bottom() } else { row_rect.top() - 1.0 };
+    paint_list_separator_line(ui, row_rect.left(), row_rect.left() + width, y, true);
+}
+
+fn draw_radio_waveform_strip(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egui::Response {
+    let desired_size = egui::vec2(ui.available_width().max(96.0).floor(), 46.0);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
     let painter = ui.painter();
 
     painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(210));
 
-    let bar_count = (rect.width() / 3.4).round().clamp(64.0, 520.0) as usize;
-    let gap = 0.75;
-    let bar_width = ((rect.width() - gap * bar_count.saturating_sub(1) as f32) / bar_count.max(1) as f32)
-        .clamp(0.65, 2.2);
-    let pitch = bar_width + gap;
-    let bucket_seconds = if frame.bucket_seconds > 0.0 { frame.bucket_seconds } else { 1.0 / 12.0 };
-
-    let center_y = rect.center().y;
-    let base_color = waveform_bar_color(ui, false, false).linear_multiply(0.72);
-    for index in 0..bar_count {
-        let x1 = rect.left() + index as f32 * pitch;
-        let x2 = (x1 + bar_width).min(rect.right());
-        draw_waveform_bar(painter, x1, x2, center_y, 1.1, base_color);
+    if frame.bars.is_empty() {
+        return response;
     }
 
-    let active_color = ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.88);
+    let center_y = rect.center().y.round();
+    let live_color = egui::Color32::from_rgb(78, 148, 255);
+    let start_x = rect.left().round() + 0.5;
+    let right_x = rect.right().round() - 0.5;
+    let stroke = egui::Stroke::new(WAVEFORM_BAR_WIDTH_PIXELS, live_color);
 
-    for bar in &frame.bars {
-        let offset = bar.age_seconds.max(0.0) / bucket_seconds;
-        let x2 = rect.right() - offset * pitch;
-        let x1 = x2 - bar_width;
-        if x1 >= rect.right() || x2 <= rect.left() {
-            continue;
+    for (bar_index, bar) in frame.bars.iter().enumerate() {
+        let x = start_x + bar_index as f32 * RADIO_WAVEFORM_BAR_PITCH_PIXELS;
+        if x > right_x {
+            break;
         }
 
         let value = bar.peak.clamp(0.0, 1.0);
         if value <= 0.004 {
             continue;
         }
-        let height = shaped_waveform_height(value, rect.height(), true);
-        draw_waveform_bar(
-            painter,
-            x1.max(rect.left()),
-            x2.min(rect.right()),
-            center_y,
-            height,
-            active_color,
+
+        let eased = value.powf(1.12);
+        let height = (rect.height() * 0.72 * eased)
+            .max(1.5)
+            .min(rect.height() - 5.0);
+        painter.line_segment(
+            [
+                egui::pos2(x, center_y - height * 0.5),
+                egui::pos2(x, center_y + height * 0.5),
+            ],
+            stroke,
         );
     }
 
     response
+}
+
+fn sample_waveform_column(waveform: &[f32], column: usize, columns: usize) -> f32 {
+    if waveform.is_empty() || columns == 0 {
+        return 0.0;
+    }
+
+    let len = waveform.len();
+    let start = ((column as f32 / columns as f32) * len as f32)
+        .floor()
+        .clamp(0.0, len.saturating_sub(1) as f32) as usize;
+    let end = (((column + 1) as f32 / columns as f32) * len as f32)
+        .ceil()
+        .clamp((start + 1) as f32, len as f32) as usize;
+    let slice = &waveform[start..end];
+    let stride = (slice.len() / 24).max(1);
+    slice.iter().step_by(stride).copied().fold(0.0_f32, f32::max)
 }
 
 fn draw_waveform_seek(
@@ -5714,7 +7023,7 @@ fn draw_waveform_seek(
     silence_ranges: &[(f32, f32)],
     duration_seconds: f32,
 ) -> egui::Response {
-    let desired_size = egui::vec2(ui.available_width(), 46.0);
+    let desired_size = egui::vec2(ui.available_width().max(96.0).floor(), 46.0);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click_and_drag());
     let painter = ui.painter();
 
@@ -5729,48 +7038,70 @@ fn draw_waveform_seek(
 
     let progress = progress.clamp(0.0, 1.0);
     let progress_x = rect.left() + rect.width() * progress;
-    let target_points = (rect.width() / 1.65).round().clamp(140.0, 2200.0) as usize;
-    let step = (waveform.len() as f32 / target_points.max(1) as f32).ceil().max(1.0) as usize;
-    let rendered_points = (waveform.len() + step - 1) / step;
-    let gap = 0.85;
-    let bar_width = ((rect.width() - gap * rendered_points.saturating_sub(1) as f32) / rendered_points.max(1) as f32)
-        .clamp(0.75, 2.2);
+    let column_count = (rect.width() / RADIO_WAVEFORM_BAR_PITCH_PIXELS)
+        .floor()
+        .max(1.0) as usize + 1;
+    let mut values = Vec::with_capacity(column_count);
+    for column in 0..column_count {
+        values.push(sample_waveform_column(waveform, column, column_count));
+    }
+    let peak = values.iter().copied().fold(0.0_f32, f32::max).max(0.08);
+    let dynamic_range = peak.max(0.05);
 
-    for (bar_index, chunk) in waveform.chunks(step).enumerate() {
-        let value = chunk
-            .iter()
-            .copied()
-            .filter(|value| value.is_finite())
-            .fold(0.0_f32, f32::max);
-        let x1 = rect.left() + bar_index as f32 * (bar_width + gap);
-        let x2 = (x1 + bar_width).min(rect.right());
-        if x1 >= rect.right() {
+    let unplayed_color = egui::Color32::from_rgb(92, 98, 110);
+    let played_color = egui::Color32::from_rgb(78, 148, 255);
+    let silence_color = egui::Color32::from_rgb(238, 194, 74);
+    let center_y = rect.center().y.round();
+    let start_x = rect.left().round() + 0.5;
+    let right_x = rect.right().round() - 0.5;
+
+    for (bar_index, value) in values.iter().enumerate() {
+        let normalized = (*value / dynamic_range).clamp(0.018, 1.0);
+        let eased = normalized.powf(1.08);
+        let x = start_x + bar_index as f32 * RADIO_WAVEFORM_BAR_PITCH_PIXELS;
+        if x > right_x {
             break;
         }
 
-        let height = shaped_waveform_height(value, rect.height(), false);
+        let height = (rect.height() * 0.84 * eased).max(2.0).min(rect.height() - 4.0);
         let bar_start_seconds = if duration_seconds > 0.0 {
-            (bar_index * step) as f32 / waveform.len().max(1) as f32 * duration_seconds
+            bar_index as f32 / column_count.max(1) as f32 * duration_seconds
         } else {
             0.0
         };
         let bar_end_seconds = if duration_seconds > 0.0 {
-            ((bar_index + 1) * step).min(waveform.len()) as f32 / waveform.len().max(1) as f32 * duration_seconds
+            (bar_index + 1) as f32 / column_count.max(1) as f32 * duration_seconds
         } else {
             0.0
         };
         let is_silence = duration_seconds > 0.0
             && silence_ranges.iter().any(|(start, end)| *end > bar_start_seconds && *start < bar_end_seconds);
-        let color = waveform_bar_color(ui, x1 <= progress_x, is_silence);
 
-        draw_waveform_bar(painter, x1, x2, center_y, height, color);
+        let color = if is_silence {
+            silence_color
+        } else if x <= progress_x {
+            played_color
+        } else {
+            unplayed_color
+        };
+        painter.line_segment(
+            [
+                egui::pos2(x, center_y - height * 0.5),
+                egui::pos2(x, center_y + height * 0.5),
+            ],
+            egui::Stroke::new(WAVEFORM_BAR_WIDTH_PIXELS, color),
+        );
     }
 
-    let playhead = egui::Rect::from_min_max(
-        egui::pos2(progress_x - 1.0, rect.top() + 4.0),
-        egui::pos2(progress_x + 1.0, rect.bottom() - 4.0),
-    );
-    painter.rect_filled(playhead, 0.0, egui::Color32::WHITE.linear_multiply(0.85));
+    if response.dragged() {
+        painter.line_segment(
+            [
+                egui::pos2(progress_x.round() + 0.5, rect.top() + 4.0),
+                egui::pos2(progress_x.round() + 0.5, rect.bottom() - 4.0),
+            ],
+            egui::Stroke::new(1.0, egui::Color32::WHITE.linear_multiply(0.75)),
+        );
+    }
 
     response
 }
@@ -5929,7 +7260,11 @@ fn detail_row(ui: &mut egui::Ui, label: &str, value: &str) {
 }
 
 fn reveal_in_file_manager(path: &Path) -> anyhow::Result<()> {
-    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    };
     let looks_like_file = target.is_file() || (!target.is_dir() && path.extension().is_some());
     let folder = if looks_like_file {
         target.parent().map(Path::to_path_buf).unwrap_or_else(|| target.clone())
@@ -5941,7 +7276,7 @@ fn reveal_in_file_manager(path: &Path) -> anyhow::Result<()> {
     {
         if looks_like_file {
             Command::new("explorer.exe")
-                .arg(format!("/select,{}", target.display()))
+                .arg(format!(r#"/select,"{}""#, target.display()))
                 .spawn()?;
         } else {
             Command::new("explorer.exe")
@@ -5957,3 +7292,4 @@ fn reveal_in_file_manager(path: &Path) -> anyhow::Result<()> {
         Ok(())
     }
 }
+
