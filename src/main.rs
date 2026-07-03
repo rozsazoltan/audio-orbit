@@ -2868,7 +2868,11 @@ impl AudioOrbitApp {
         self.update_check_receiver = Some(receiver);
         self.update_check_started_at = Some(Instant::now());
         if manual {
-            self.status_message = "Checking for updates...".to_owned();
+            self.status_message = if include_prereleases {
+                "Checking for prerelease updates...".to_owned()
+            } else {
+                "Checking for stable updates...".to_owned()
+            };
         }
         self.error_message = None;
     }
@@ -2889,9 +2893,11 @@ impl AudioOrbitApp {
             match result {
                 Ok(check) => {
                     if check.is_update_available {
-                        self.status_message = format!("Update available: v{}.", check.latest_version);
+                        let release_type = if check.prerelease { "Prerelease" } else { "Stable" };
+                        self.status_message = format!("{release_type} update available: v{}.", check.latest_version);
                     } else {
-                        self.status_message = format!("Audio Orbit is up to date: v{}.", check.current_version);
+                        let release_type = if check.prerelease { "prerelease" } else { "stable" };
+                        self.status_message = format!("No newer {release_type} release is available. Current version: v{}.", check.current_version);
                     }
                     self.error_message = None;
                     self.last_update_check = Some(check);
@@ -2955,6 +2961,32 @@ impl AudioOrbitApp {
         self.update_install_receiver = Some(receiver);
         self.update_install_started_at = Some(Instant::now());
         self.status_message = "Downloading and installing update...".to_owned();
+        self.error_message = None;
+    }
+
+    fn start_switch_to_stable_install(&mut self) {
+        if self.update_install_receiver.is_some() {
+            self.status_message = "Update install is already running.".to_owned();
+            return;
+        }
+
+        self.state.update_settings.include_prereleases = false;
+        self.last_update_check = None;
+        self.persist_playback_session();
+        self.persist_repeat_selection_for_current_playlist();
+        let _ = save_state(&self.state);
+
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = updater::check_latest_stable()
+                .and_then(|check| updater::install_update(&check))
+                .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+
+        self.update_install_receiver = Some(receiver);
+        self.update_install_started_at = Some(Instant::now());
+        self.status_message = "Switching back to the latest stable release...".to_owned();
         self.error_message = None;
     }
 
@@ -5894,16 +5926,27 @@ impl AudioOrbitApp {
             updater::repository_label()
         ));
 
-        let mut update_settings_changed = false;
-        update_settings_changed |= ui
-            .checkbox(
-                &mut self.state.update_settings.include_prereleases,
-                "Include prerelease builds",
+        if self.state.update_settings.include_prereleases {
+            let mut checked = true;
+            ui.add_enabled(
+                false,
+                egui::Checkbox::new(&mut checked, "Watch prerelease builds"),
             )
-            .on_hover_text("When enabled, update checks use the newest non-draft GitHub release, including prereleases.")
-            .changed();
-        if update_settings_changed {
-            self.save_state_silently();
+            .on_hover_text("Prerelease watching can only be turned off by switching back to the latest stable release.");
+            ui.small("Prerelease checks use the newest GitHub prerelease build that is newer than the current app version.");
+        } else {
+            let mut enable_prereleases = false;
+            if ui
+                .checkbox(&mut enable_prereleases, "Watch prerelease builds")
+                .on_hover_text("Enables checks for the latest GitHub prerelease build. After enabling it, use Switch back to stable to return to stable releases.")
+                .changed()
+                && enable_prereleases
+            {
+                self.state.update_settings.include_prereleases = true;
+                self.last_update_check = None;
+                self.save_state_silently();
+                self.start_update_check(true);
+            }
         }
 
         ui.add_space(8.0);
@@ -5915,6 +5958,14 @@ impl AudioOrbitApp {
                 .clicked()
             {
                 self.start_update_check(true);
+            }
+            if self.state.update_settings.include_prereleases
+                && ui
+                    .add_enabled(!checking && !installing, egui::Button::new(ui_icons::label(Icon::Download, "Switch back to stable")))
+                    .on_hover_text("Disables prerelease watching, downloads the latest stable release, replaces the executable, and restarts Audio Orbit.")
+                    .clicked()
+            {
+                self.start_switch_to_stable_install();
             }
             if ui
                 .add_enabled(!installing, egui::Button::new(ui_icons::label(Icon::ExternalLink, "Open releases")))
@@ -5944,7 +5995,11 @@ impl AudioOrbitApp {
         if let Some(check) = check {
             ui.separator();
             ui.label(format!("Current version: v{}", check.current_version));
-            ui.label(format!("Latest version: v{}", check.latest_version));
+            ui.label(format!(
+                "Latest {} version: v{}",
+                if check.prerelease { "prerelease" } else { "stable" },
+                check.latest_version
+            ));
             ui.label(format!(
                 "Release type: {}",
                 if check.prerelease { "prerelease" } else { "stable" }
@@ -5956,7 +6011,13 @@ impl AudioOrbitApp {
             }
 
             if check.is_update_available {
-                ui.colored_label(egui::Color32::LIGHT_GREEN, "A newer Audio Orbit release is available.");
+                ui.colored_label(
+                    egui::Color32::LIGHT_GREEN,
+                    format!(
+                        "A newer Audio Orbit {} release is available.",
+                        if check.prerelease { "prerelease" } else { "stable" }
+                    ),
+                );
                 if ui
                     .add_enabled(
                         !checking && !installing && check.asset_download_url.is_some(),
@@ -5968,7 +6029,13 @@ impl AudioOrbitApp {
                     self.start_update_install(check);
                 }
             } else {
-                ui.colored_label(egui::Color32::LIGHT_GREEN, "Audio Orbit is up to date.");
+                ui.colored_label(
+                    egui::Color32::LIGHT_GREEN,
+                    format!(
+                        "No newer {} release is available.",
+                        if check.prerelease { "prerelease" } else { "stable" }
+                    ),
+                );
             }
         } else {
             ui.small("No update check result yet.");
