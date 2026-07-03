@@ -899,8 +899,9 @@ impl AudioOrbitApp {
         self.last_playback.as_ref().map(|playback| {
             if self.player_only_mode {
                 format!(
-                    "{} · {}",
-                    format_duration(playback.original_duration_seconds),
+                    "{}k · {} ch · {}",
+                    playback.sample_rate / 1000,
+                    playback.input_channels,
                     playback.size_bytes.map(format_file_size).unwrap_or_else(|| "unknown size".to_owned())
                 )
             } else {
@@ -925,6 +926,13 @@ impl AudioOrbitApp {
         }
 
         if self.active_track_path.is_some() || self.pending_track_switch.is_some() {
+            if self.player_only_mode {
+                return self
+                    .last_playback
+                    .as_ref()
+                    .map(|playback| display_parent(&playback.path))
+                    .unwrap_or_default();
+            }
             let position = self
                 .waveform_drag_position_seconds
                 .unwrap_or_else(|| self.displayed_playback_position_seconds());
@@ -2905,6 +2913,7 @@ impl eframe::App for AudioOrbitApp {
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             self.render_library_panel(ui);
+                            ui.add_space(16.0);
                         });
                 });
         }
@@ -2921,6 +2930,7 @@ impl eframe::App for AudioOrbitApp {
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             self.render_profile_panel(ui);
+                            ui.add_space(16.0);
                         });
                 });
         }
@@ -3254,7 +3264,7 @@ impl AudioOrbitApp {
         });
 
         if self.active_radio_index.is_some() {
-            let available_width = ui.available_width().max(96.0);
+            let available_width = (ui.available_width() - 4.0).max(96.0);
             let visible_seconds = (available_width / RADIO_WAVEFORM_PIXELS_PER_SECOND)
                 .clamp(1.0, RADIO_WAVEFORM_MAX_VISIBLE_SECONDS);
             let requested_points = (available_width / RADIO_WAVEFORM_BAR_PITCH_PIXELS)
@@ -3489,6 +3499,7 @@ impl AudioOrbitApp {
             if ui.button(ui_icons::label(Icon::Settings2, "Settings...")).clicked() {
                 self.open_panel_modal(AppPanelModal::Settings);
             }
+            ui.add_space(16.0);
             return;
         }
 
@@ -3606,6 +3617,7 @@ impl AudioOrbitApp {
         if ui.button(ui_icons::label(Icon::Settings2, "Settings...")).clicked() {
             self.open_panel_modal(AppPanelModal::Settings);
         }
+        ui.add_space(16.0);
     }
 
     fn render_current_playlist_controls(&mut self, ui: &mut egui::Ui) {
@@ -3821,7 +3833,8 @@ impl AudioOrbitApp {
             .max_height(scroll_height)
             .show(ui, |ui| {
                 ui.set_width(row_width);
-                for (index, station) in visible_stations {
+                let visible_station_len = visible_stations.len();
+                for (visible_row_index, (index, station)) in visible_stations.into_iter().enumerate() {
                     let active = self.active_radio_index == Some(index);
                     let selected = active || (self.radio_selection_was_user_set && self.state.selected_radio_index == Some(index));
                     let display_stream_title = station
@@ -3948,6 +3961,25 @@ impl AudioOrbitApp {
                     if context_response.drag_started() {
                         self.dragging_radio_index = Some(index);
                     }
+                    if self.dragging_radio_index == Some(index) {
+                        ui.painter().rect_stroke(
+                            row_response.response.rect.shrink(1.0),
+                            4.0,
+                            egui::Stroke::new(1.0, ui.visuals().selection.bg_fill),
+                            egui::StrokeKind::Inside,
+                        );
+                    } else if self.dragging_radio_index.is_some() && context_response.hovered() {
+                        let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|position| position.y)).unwrap_or(row_response.response.rect.center().y);
+                        let y = if pointer_y < row_response.response.rect.center().y {
+                            row_response.response.rect.top()
+                        } else {
+                            row_response.response.rect.bottom()
+                        };
+                        ui.painter().line_segment(
+                            [egui::pos2(row_response.response.rect.left(), y), egui::pos2(row_response.response.rect.right(), y)],
+                            egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                        );
+                    }
                     if context_response.hovered() && ui.input(|input| input.pointer.any_released()) {
                         if let Some(from) = self.dragging_radio_index.take() {
                             if from != index {
@@ -3986,7 +4018,9 @@ impl AudioOrbitApp {
                         row_response.response.scroll_to_me(Some(egui::Align::Center));
                         self.scroll_to_active_radio_requested = false;
                     }
-                    ui.separator();
+                    if visible_row_index + 1 < visible_station_len {
+                        ui.separator();
+                    }
                 }
             });
 
@@ -4148,9 +4182,21 @@ impl AudioOrbitApp {
         }
 
         ui.horizontal(|ui| {
+            let sort_buttons_width = 74.0;
+            let helper_width = (ui.available_width() - sort_buttons_width).max(32.0);
             if self.state.playback.repeat_mode == RepeatMode::Selection {
                 let repeat_order = if self.state.playback.shuffle_enabled { "random playback" } else { "playlist order" };
-                ui.small(format!("Repeat selection mode: tick tracks or whole folders for {repeat_order}."));
+                let helper = format!("Repeat selection mode: tick tracks or whole folders for {repeat_order}.");
+                let response = render_ellipsized_single_line(
+                    ui,
+                    &helper,
+                    helper_width,
+                    egui::TextStyle::Small.resolve(ui.style()),
+                    ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.78),
+                );
+                response.on_hover_text(helper);
+            } else {
+                ui.allocate_space(egui::vec2(helper_width, 18.0));
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -4216,7 +4262,8 @@ impl AudioOrbitApp {
                 let sticky_top = visible_rect.top();
                 let mut viewport_group: Option<String> = None;
                 let mut next_group_header_top: Option<f32> = None;
-                for (index, track) in visible_tracks {
+                let visible_track_len = visible_tracks.len();
+                for (visible_row_index, (index, track)) in visible_tracks.into_iter().enumerate() {
                     if show_group_headers && track.group != last_group {
                         ui.add_space(6.0);
                         let group = track.group.clone();
@@ -4449,6 +4496,25 @@ impl AudioOrbitApp {
                     if context_response.drag_started() {
                         self.dragging_track_index = Some(index);
                     }
+                    if self.dragging_track_index == Some(index) {
+                        ui.painter().rect_stroke(
+                            row_response.response.rect.shrink(1.0),
+                            4.0,
+                            egui::Stroke::new(1.0, ui.visuals().selection.bg_fill),
+                            egui::StrokeKind::Inside,
+                        );
+                    } else if self.dragging_track_index.is_some() && context_response.hovered() {
+                        let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|position| position.y)).unwrap_or(row_response.response.rect.center().y);
+                        let y = if pointer_y < row_response.response.rect.center().y {
+                            row_response.response.rect.top()
+                        } else {
+                            row_response.response.rect.bottom()
+                        };
+                        ui.painter().line_segment(
+                            [egui::pos2(row_response.response.rect.left(), y), egui::pos2(row_response.response.rect.right(), y)],
+                            egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                        );
+                    }
                     if context_response.hovered() && ui.input(|input| input.pointer.any_released()) {
                         if let Some(from) = self.dragging_track_index.take() {
                             if from != index {
@@ -4469,7 +4535,9 @@ impl AudioOrbitApp {
                         row_response.response.scroll_to_me(Some(egui::Align::Center));
                         self.scroll_to_active_track_requested = false;
                     }
-                    ui.separator();
+                    if visible_row_index + 1 < visible_track_len {
+                        ui.separator();
+                    }
                 }
 
                 if show_group_headers && self.state.ui.playlist_scroll_offset_y > 2.0 {
@@ -4706,6 +4774,7 @@ impl AudioOrbitApp {
             }
             ui.label(self.last_known_output_name.as_str());
         });
+        ui.add_space(16.0);
     }
 
     fn render_profile_transition_section(&mut self, ui: &mut egui::Ui) {
@@ -5447,8 +5516,10 @@ impl AudioOrbitApp {
         };
 
         let screen_rect = context.screen_rect();
-        let horizontal_margin = 16.0;
-        let width = (screen_rect.width() - horizontal_margin * 2.0).max(240.0);
+        let estimated_width = (error_message.chars().count() as f32 * 7.0 + 34.0).clamp(260.0, 720.0);
+        let width = estimated_width.min((screen_rect.width() - 32.0).max(260.0));
+        let estimated_lines = (error_message.chars().count() as f32 / 90.0).ceil().max(1.0);
+        let max_height = (estimated_lines * 18.0 + 16.0).clamp(32.0, 112.0);
         egui::Area::new(egui::Id::new("error_toast_overlay"))
             .order(egui::Order::Tooltip)
             .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -12.0])
@@ -5462,8 +5533,8 @@ impl AudioOrbitApp {
                     .show(ui, |ui| {
                         ui.set_width(width);
                         egui::ScrollArea::vertical()
-                            .max_height(82.0)
-                            .auto_shrink([false, false])
+                            .max_height(max_height)
+                            .auto_shrink([false, true])
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 ui.add(egui::Label::new(egui::RichText::new(error_message.as_str()).color(egui::Color32::from_rgb(255, 112, 112))).wrap());
@@ -5674,14 +5745,14 @@ fn render_ellipsized_single_line(
     width: f32,
     font_id: egui::FontId,
     color: egui::Color32,
-) {
+) -> egui::Response {
     let trimmed = value.trim();
+    let desired_size = egui::vec2(width, ui.spacing().interact_size.y);
     if trimmed.is_empty() {
-        return;
+        return ui.allocate_response(desired_size, egui::Sense::hover());
     }
 
     let clipped = ellipsize_to_width_exact(ui, trimmed, width, font_id.clone(), color);
-    let desired_size = egui::vec2(width, ui.spacing().interact_size.y);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
     ui.painter().text(
         rect.left_center(),
@@ -5692,8 +5763,9 @@ fn render_ellipsized_single_line(
     );
 
     if clipped != trimmed {
-        response.on_hover_text(trimmed);
+        return response.on_hover_text(trimmed);
     }
+    response
 }
 
 fn text_width(ui: &egui::Ui, value: &str, font_id: egui::FontId, color: egui::Color32) -> f32 {
@@ -5958,7 +6030,7 @@ fn paint_sticky_folder_header(
 }
 
 fn draw_radio_waveform_strip(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) -> egui::Response {
-    let desired_size = egui::vec2(ui.available_width(), 46.0);
+    let desired_size = egui::vec2((ui.available_width() - 4.0).max(96.0).floor(), 46.0);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
     let painter = ui.painter();
 
@@ -6001,6 +6073,23 @@ fn draw_radio_waveform_strip(ui: &mut egui::Ui, frame: &RadioVisualizerFrame) ->
     response
 }
 
+fn sample_waveform_column(waveform: &[f32], column: usize, columns: usize) -> f32 {
+    if waveform.is_empty() || columns == 0 {
+        return 0.0;
+    }
+
+    let len = waveform.len();
+    let start = ((column as f32 / columns as f32) * len as f32)
+        .floor()
+        .clamp(0.0, len.saturating_sub(1) as f32) as usize;
+    let end = (((column + 1) as f32 / columns as f32) * len as f32)
+        .ceil()
+        .clamp((start + 1) as f32, len as f32) as usize;
+    let slice = &waveform[start..end];
+    let stride = (slice.len() / 24).max(1);
+    slice.iter().step_by(stride).copied().fold(0.0_f32, f32::max)
+}
+
 fn draw_waveform_seek(
     ui: &mut egui::Ui,
     waveform: &[f32],
@@ -6009,7 +6098,7 @@ fn draw_waveform_seek(
     silence_ranges: &[(f32, f32)],
     duration_seconds: f32,
 ) -> egui::Response {
-    let desired_size = egui::vec2(ui.available_width(), 46.0);
+    let desired_size = egui::vec2((ui.available_width() - 4.0).max(96.0).floor(), 46.0);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click_and_drag());
     let painter = ui.painter();
 
@@ -6021,16 +6110,15 @@ fn draw_waveform_seek(
 
     let progress = progress.clamp(0.0, 1.0);
     let progress_x = rect.left() + rect.width() * progress;
-    let target_points = (rect.width() / RADIO_WAVEFORM_BAR_PITCH_PIXELS)
+    let column_count = (rect.width() / RADIO_WAVEFORM_BAR_PITCH_PIXELS)
         .floor()
-        .clamp(1.0, 2048.0) as usize;
-    let step = (waveform.len() as f32 / target_points.max(1) as f32).ceil().max(1.0) as usize;
-    let peak = waveform.iter().copied().fold(0.0_f32, f32::max).max(0.08);
-    let mut sorted = waveform.to_vec();
-    sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-    let floor_index = ((sorted.len().saturating_sub(1)) as f32 * 0.10) as usize;
-    let noise_floor = sorted.get(floor_index).copied().unwrap_or(0.0).min(peak * 0.50);
-    let dynamic_range = (peak - noise_floor).max(0.05);
+        .max(1.0) as usize + 1;
+    let mut values = Vec::with_capacity(column_count);
+    for column in 0..column_count {
+        values.push(sample_waveform_column(waveform, column, column_count));
+    }
+    let peak = values.iter().copied().fold(0.0_f32, f32::max).max(0.08);
+    let dynamic_range = peak.max(0.05);
 
     let unplayed_color = egui::Color32::from_rgb(92, 98, 110);
     let played_color = egui::Color32::from_rgb(78, 148, 255);
@@ -6039,9 +6127,8 @@ fn draw_waveform_seek(
     let start_x = rect.left().round() + 0.5;
     let right_x = rect.right().round() - 0.5;
 
-    for (bar_index, chunk) in waveform.chunks(step).enumerate() {
-        let value = chunk.iter().copied().fold(0.0_f32, f32::max);
-        let normalized = ((value - noise_floor) / dynamic_range).clamp(0.018, 1.0);
+    for (bar_index, value) in values.iter().enumerate() {
+        let normalized = (*value / dynamic_range).clamp(0.018, 1.0);
         let eased = normalized.powf(1.08);
         let x = start_x + bar_index as f32 * RADIO_WAVEFORM_BAR_PITCH_PIXELS;
         if x > right_x {
@@ -6050,12 +6137,12 @@ fn draw_waveform_seek(
 
         let height = (rect.height() * 0.84 * eased).max(2.0).min(rect.height() - 4.0);
         let bar_start_seconds = if duration_seconds > 0.0 {
-            (bar_index * step) as f32 / waveform.len().max(1) as f32 * duration_seconds
+            bar_index as f32 / column_count.max(1) as f32 * duration_seconds
         } else {
             0.0
         };
         let bar_end_seconds = if duration_seconds > 0.0 {
-            ((bar_index + 1) * step).min(waveform.len()) as f32 / waveform.len().max(1) as f32 * duration_seconds
+            (bar_index + 1) as f32 / column_count.max(1) as f32 * duration_seconds
         } else {
             0.0
         };
@@ -6078,7 +6165,7 @@ fn draw_waveform_seek(
         );
     }
 
-    if response.hovered() || response.dragged() {
+    if response.dragged() {
         painter.line_segment(
             [
                 egui::pos2(progress_x.round() + 0.5, rect.top() + 4.0),
