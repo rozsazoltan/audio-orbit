@@ -2346,18 +2346,23 @@ impl AudioOrbitApp {
     }
 
     fn process_keyboard_shortcuts(&mut self, context: &egui::Context) {
-        if self.show_folder_import_modal
+        let has_blocking_modal = self.show_folder_import_modal
             || self.active_panel_modal.is_some()
             || self.show_radio_add_modal
-            || self.details_modal.is_some()
-            || context.wants_keyboard_input()
-        {
+            || self.details_modal.is_some();
+        let undo_order = context.input(|input| {
+            input.key_pressed(egui::Key::Z) && (input.modifiers.ctrl || input.modifiers.command)
+        });
+        if !has_blocking_modal && undo_order {
+            self.undo_last_order_change();
+            return;
+        }
+        if has_blocking_modal || context.wants_keyboard_input() {
             return;
         }
 
-        let (undo_order, space, enter, stop, next, previous, seek_forward, seek_backward, search, player_only, library, profiles) = context.input(|input| {
+        let (space, enter, stop, next, previous, seek_forward, seek_backward, search, player_only, library, profiles) = context.input(|input| {
             (
-                input.key_pressed(egui::Key::Z) && input.modifiers.ctrl,
                 input.key_pressed(egui::Key::Space),
                 input.key_pressed(egui::Key::Enter),
                 input.key_pressed(egui::Key::S),
@@ -2371,11 +2376,6 @@ impl AudioOrbitApp {
                 input.key_pressed(egui::Key::P) && input.modifiers.ctrl,
             )
         });
-
-        if undo_order {
-            self.undo_last_order_change();
-            return;
-        }
 
         if space {
             let is_active = self
@@ -3986,9 +3986,6 @@ impl AudioOrbitApp {
         let mut favorite_toggle_index: Option<usize> = None;
         let mut reorder_radio_station: Option<(usize, usize)> = None;
         let mut next_radio_drop_target_index: Option<usize> = None;
-        let active_radio_drop_target = self
-            .radio_drop_target_index
-            .filter(|_| self.current_radio_drop_target_is_valid());
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -3996,7 +3993,12 @@ impl AudioOrbitApp {
             .show(ui, |ui| {
                 ui.set_width(row_width);
                 let visible_station_len = visible_stations.len();
-                for (visible_row_index, (index, station)) in visible_stations.into_iter().enumerate() {
+                let station_count = self.state.radio_stations.len();
+                let pointer_position = ui.input(|input| input.pointer.hover_pos().or(input.pointer.interact_pos()));
+                for (visible_row_index, (index, station)) in visible_stations.iter().cloned().enumerate() {
+                    let next_visible_station_index = visible_stations
+                        .get(visible_row_index + 1)
+                        .map(|(next_index, _)| *next_index);
                     let active = self.active_radio_index == Some(index);
                     let selected = active || (self.radio_selection_was_user_set && self.state.selected_radio_index == Some(index));
                     let display_stream_title = station
@@ -4124,27 +4126,32 @@ impl AudioOrbitApp {
                         self.dragging_radio_index = Some(index);
                         self.radio_drop_target_index = None;
                     }
-                    if self.dragging_radio_index == Some(index) && self.current_radio_drop_target_is_valid() {
-                        paint_dragged_row_fade(ui, row_response.response.rect);
-                    }
+                    let pointer_over_row = pointer_position
+                        .map(|position| row_response.response.rect.expand(2.0).contains(position))
+                        .unwrap_or(false);
                     if let Some(from) = self.dragging_radio_index {
-                        if row_response.response.hovered() || context_response.hovered() {
-                            let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|position| position.y)).unwrap_or(row_response.response.rect.center().y);
+                        if pointer_over_row {
+                            let pointer_y = pointer_position
+                                .map(|position| position.y)
+                                .unwrap_or(row_response.response.rect.center().y);
                             let drop_after = pointer_y >= row_response.response.rect.center().y;
-                            let to = if drop_after { index + 1 } else { index };
-                            if Self::valid_drop_target(from, to) {
-                                next_radio_drop_target_index = Some(to);
+                            let to = if drop_after {
+                                next_visible_station_index.unwrap_or(station_count)
+                            } else {
+                                index
+                            };
+                            next_radio_drop_target_index = Some(to);
+                            if ui.input(|input| input.pointer.any_released()) && Self::valid_drop_target(from, to) {
+                                reorder_radio_station = Some((from, to));
+                                self.dragging_radio_index = None;
                             }
                         }
                     }
-                    if (row_response.response.hovered() || context_response.hovered()) && ui.input(|input| input.pointer.any_released()) {
-                        if let Some(from) = self.dragging_radio_index.take() {
-                            let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|position| position.y)).unwrap_or(row_response.response.rect.center().y);
-                            let to = if pointer_y >= row_response.response.rect.center().y { index + 1 } else { index };
-                            if Self::valid_drop_target(from, to) {
-                                reorder_radio_station = Some((from, to));
-                            }
-                        }
+                    let radio_drop_target_for_paint = next_radio_drop_target_index
+                        .or(self.radio_drop_target_index)
+                        .filter(|to| self.dragging_radio_index.map(|from| Self::valid_drop_target(from, *to)).unwrap_or(false));
+                    if self.dragging_radio_index == Some(index) && radio_drop_target_for_paint.is_some() {
+                        paint_dragged_row_fade(ui, row_response.response.rect);
                     }
                     if row_response.response.secondary_clicked() || context_response.secondary_clicked() {
                         self.state.selected_radio_index = Some(index);
@@ -4178,7 +4185,8 @@ impl AudioOrbitApp {
                         self.scroll_to_active_radio_requested = false;
                     }
                     if visible_row_index + 1 < visible_station_len {
-                        paint_list_separator(ui, row_width, active_radio_drop_target == Some(index + 1));
+                        let separator_drop_target = next_visible_station_index.unwrap_or(index + 1);
+                        paint_list_separator(ui, row_width, radio_drop_target_for_paint == Some(separator_drop_target));
                     }
                 }
             });
@@ -4414,9 +4422,6 @@ impl AudioOrbitApp {
         let scroll_height = ui.available_height();
         let mut reorder_track: Option<(usize, usize)> = None;
         let mut next_track_drop_target_index: Option<usize> = None;
-        let active_track_drop_target = self
-            .track_drop_target_index
-            .filter(|_| self.current_track_drop_target_is_valid());
         let scroll_output = egui::ScrollArea::vertical()
             .id_salt("track_list_scroll")
             .vertical_scroll_offset(self.state.ui.playlist_scroll_offset_y.max(0.0))
@@ -4429,7 +4434,12 @@ impl AudioOrbitApp {
                 let mut viewport_group: Option<String> = None;
                 let mut next_group_header_top: Option<f32> = None;
                 let visible_track_len = visible_tracks.len();
-                for (visible_row_index, (index, track)) in visible_tracks.into_iter().enumerate() {
+                let track_count = self.current_playlist().map(|playlist| playlist.tracks.len()).unwrap_or(0);
+                let pointer_position = ui.input(|input| input.pointer.hover_pos().or(input.pointer.interact_pos()));
+                for (visible_row_index, (index, track)) in visible_tracks.iter().cloned().enumerate() {
+                    let next_visible_track_index = visible_tracks
+                        .get(visible_row_index + 1)
+                        .map(|(next_index, _)| *next_index);
                     if show_group_headers && track.group != last_group {
                         ui.add_space(6.0);
                         let group = track.group.clone();
@@ -4663,27 +4673,32 @@ impl AudioOrbitApp {
                         self.dragging_track_index = Some(index);
                         self.track_drop_target_index = None;
                     }
-                    if self.dragging_track_index == Some(index) && self.current_track_drop_target_is_valid() {
-                        paint_dragged_row_fade(ui, row_response.response.rect);
-                    }
+                    let pointer_over_row = pointer_position
+                        .map(|position| row_response.response.rect.expand(2.0).contains(position))
+                        .unwrap_or(false);
                     if let Some(from) = self.dragging_track_index {
-                        if row_response.response.hovered() || context_response.hovered() {
-                            let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|position| position.y)).unwrap_or(row_response.response.rect.center().y);
+                        if pointer_over_row {
+                            let pointer_y = pointer_position
+                                .map(|position| position.y)
+                                .unwrap_or(row_response.response.rect.center().y);
                             let drop_after = pointer_y >= row_response.response.rect.center().y;
-                            let to = if drop_after { index + 1 } else { index };
-                            if Self::valid_drop_target(from, to) {
-                                next_track_drop_target_index = Some(to);
+                            let to = if drop_after {
+                                next_visible_track_index.unwrap_or(track_count)
+                            } else {
+                                index
+                            };
+                            next_track_drop_target_index = Some(to);
+                            if ui.input(|input| input.pointer.any_released()) && Self::valid_drop_target(from, to) {
+                                reorder_track = Some((from, to));
+                                self.dragging_track_index = None;
                             }
                         }
                     }
-                    if (row_response.response.hovered() || context_response.hovered()) && ui.input(|input| input.pointer.any_released()) {
-                        if let Some(from) = self.dragging_track_index.take() {
-                            let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|position| position.y)).unwrap_or(row_response.response.rect.center().y);
-                            let to = if pointer_y >= row_response.response.rect.center().y { index + 1 } else { index };
-                            if Self::valid_drop_target(from, to) {
-                                reorder_track = Some((from, to));
-                            }
-                        }
+                    let track_drop_target_for_paint = next_track_drop_target_index
+                        .or(self.track_drop_target_index)
+                        .filter(|to| self.dragging_track_index.map(|from| Self::valid_drop_target(from, *to)).unwrap_or(false));
+                    if self.dragging_track_index == Some(index) && track_drop_target_for_paint.is_some() {
+                        paint_dragged_row_fade(ui, row_response.response.rect);
                     }
                     if row_response.response.secondary_clicked() || context_response.secondary_clicked() {
                         self.selected_track_index = Some(index);
@@ -4699,7 +4714,8 @@ impl AudioOrbitApp {
                         self.scroll_to_active_track_requested = false;
                     }
                     if visible_row_index + 1 < visible_track_len {
-                        paint_list_separator(ui, row_width, active_track_drop_target == Some(index + 1));
+                        let separator_drop_target = next_visible_track_index.unwrap_or(index + 1);
+                        paint_list_separator(ui, row_width, track_drop_target_for_paint == Some(separator_drop_target));
                     }
                 }
 
@@ -5678,50 +5694,9 @@ impl AudioOrbitApp {
     }
 
     fn render_drag_feedback(&self, context: &egui::Context) {
-        let Some(pointer_pos) = context.input(|input| input.pointer.hover_pos()) else {
-            return;
-        };
-
-        let drag_label = if let Some(index) = self.dragging_track_index {
-            self.current_playlist()
-                .and_then(|playlist| playlist.tracks.get(index))
-                .map(|track| format!("Moving: {}", display_file_name(&track.path)))
-        } else if let Some(index) = self.dragging_radio_index {
-            self.state
-                .radio_stations
-                .get(index)
-                .map(|station| format!("Moving: {}", station.name))
-        } else {
-            None
-        };
-
-        let Some(drag_label) = drag_label else {
-            return;
-        };
-
-        context.set_cursor_icon(egui::CursorIcon::Grabbing);
-        egui::Area::new(egui::Id::new("drag_feedback_overlay"))
-            .order(egui::Order::Tooltip)
-            .fixed_pos(pointer_pos + egui::vec2(16.0, 18.0))
-            .show(context, |ui| {
-                egui::Frame::new()
-                    .fill(egui::Color32::from_black_alpha(235))
-                    .stroke(egui::Stroke::new(1.0, ui.visuals().selection.bg_fill))
-                    .corner_radius(egui::CornerRadius::same(4))
-                    .inner_margin(egui::Margin::symmetric(10, 6))
-                    .show(ui, |ui| {
-                        ui.set_max_width(360.0);
-                        ui.label(
-                            egui::RichText::new(ellipsize_to_width(&drag_label, 340.0, 13.0))
-                                .color(ui.visuals().selection.stroke.color),
-                        );
-                        ui.label(
-                            egui::RichText::new("Release over a row to drop here")
-                                .size(10.5)
-                                .color(ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.70)),
-                        );
-                    });
-            });
+        if self.dragging_track_index.is_some() || self.dragging_radio_index.is_some() {
+            context.set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
     }
 
     fn render_error_toast(&mut self, context: &egui::Context) {
