@@ -96,9 +96,9 @@ Saved files use the stop-time based format `audio-orbit-records-yyyy-mm-dd-hh-mm
 
 ### Updates
 
-Audio Orbit can check GitHub releases for newer Windows executable builds. Stable releases are checked by default, and prerelease builds can be included from **Settings > Updates**.
+Audio Orbit can check GitHub releases for newer Windows executable builds. Stable releases are checked by default. Prerelease watching can be enabled from **Settings > Updates**, and returning from prerelease watching to stable releases is handled through the **Switch back to stable** action.
 
-On release builds, Audio Orbit performs a background update check at most once per hour. Manual checks are available from the Updates panel, which can also open the GitHub Releases page or download and install an available executable update.
+On release builds, Audio Orbit performs a background update check at most once per hour. Manual checks are available from the Updates panel, which can also open the GitHub Releases page, download and install an available executable update, or reinstall the latest stable build when switching back from prerelease watching.
 
 
 ## Get started

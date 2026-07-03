@@ -39,36 +39,49 @@ struct GitHubAsset {
 }
 
 pub fn check_for_update(include_prereleases: bool) -> Result<UpdateCheck> {
-    let client = Client::builder().user_agent(USER_AGENT).build()?;
-    let latest_release = if include_prereleases {
-        let releases: Vec<GitHubRelease> = get_github_json(&client, RELEASES_API, "GitHub releases")?;
-        let mut candidates = releases
-            .into_iter()
-            .filter(|release| !release.draft)
-            .filter_map(|release| {
-                let parsed = Version::parse(release.tag_name.trim_start_matches('v')).ok()?;
-                Some((parsed, release))
-            })
-            .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| right.0.cmp(&left.0));
-        candidates
-            .into_iter()
-            .next()
-            .map(|(_, release)| release)
-            .context("no suitable GitHub release was found")?
+    if include_prereleases {
+        check_latest_prerelease()
     } else {
-        get_github_json(&client, LATEST_RELEASE_API, "GitHub latest release")?
-    };
+        check_latest_stable()
+    }
+}
 
+pub fn check_latest_stable() -> Result<UpdateCheck> {
+    let client = Client::builder().user_agent(USER_AGENT).build()?;
+    let release: GitHubRelease = get_github_json(&client, LATEST_RELEASE_API, "GitHub latest stable release")?;
+    update_check_from_release(release)
+}
+
+pub fn check_latest_prerelease() -> Result<UpdateCheck> {
+    let client = Client::builder().user_agent(USER_AGENT).build()?;
+    let releases: Vec<GitHubRelease> = get_github_json(&client, RELEASES_API, "GitHub releases")?;
+    let mut candidates = releases
+        .into_iter()
+        .filter(|release| !release.draft && release.prerelease)
+        .filter_map(|release| {
+            let parsed = Version::parse(release.tag_name.trim_start_matches('v')).ok()?;
+            Some((parsed, release))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| right.0.cmp(&left.0));
+    let release = candidates
+        .into_iter()
+        .next()
+        .map(|(_, release)| release)
+        .context("no prerelease builds were found in GitHub releases")?;
+    update_check_from_release(release)
+}
+
+fn update_check_from_release(release: GitHubRelease) -> Result<UpdateCheck> {
     let current_version = env!("CARGO_PKG_VERSION").to_owned();
     let current_semver = Version::parse(&current_version).context("invalid current application version")?;
-    let latest_semver = Version::parse(latest_release.tag_name.trim_start_matches('v'))
+    let latest_semver = Version::parse(release.tag_name.trim_start_matches('v'))
         .context("invalid latest GitHub release version")?;
-    let asset = latest_release
+    let asset = release
         .assets
         .iter()
         .find(|asset| asset.name.ends_with("windows-x64.exe"))
-        .or_else(|| latest_release.assets.iter().find(|asset| asset.name.ends_with(".exe")));
+        .or_else(|| release.assets.iter().find(|asset| asset.name.ends_with(".exe")));
 
     Ok(UpdateCheck {
         current_version,
@@ -76,7 +89,7 @@ pub fn check_for_update(include_prereleases: bool) -> Result<UpdateCheck> {
         asset_name: asset.map(|asset| asset.name.clone()),
         asset_download_url: asset.map(|asset| asset.browser_download_url.clone()),
         is_update_available: latest_semver > current_semver,
-        prerelease: latest_release.prerelease,
+        prerelease: release.prerelease,
     })
 }
 
