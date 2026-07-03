@@ -6165,7 +6165,7 @@ fn reveal_in_file_manager(path: &Path) -> anyhow::Result<()> {
     {
         if looks_like_file {
             Command::new("explorer.exe")
-                .arg(format!("/select,"{}"", target.display()))
+                .arg(format!(r#"/select,"{}""#, target.display()))
                 .spawn()?;
         } else {
             Command::new("explorer.exe")
