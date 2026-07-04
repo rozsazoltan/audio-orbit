@@ -1,6 +1,6 @@
 name: Release
 
-run-name: Release v${{ inputs.version }}
+run-name: Release Audio Orbit v${{ inputs.version }}
 
 on:
   workflow_dispatch:
@@ -49,11 +49,13 @@ jobs:
           }
 
           $Tag = "v$Version"
+          $ReleaseTitle = "Audio Orbit $Tag"
           $ReleaseBranch = "chore/release-$Tag"
           $IsPrerelease = "${{ inputs.prerelease }}".ToLowerInvariant() -eq "true"
 
           "VERSION=$Version" >> $env:GITHUB_ENV
           "TAG=$Tag" >> $env:GITHUB_ENV
+          "RELEASE_TITLE=$ReleaseTitle" >> $env:GITHUB_ENV
           "RELEASE_BRANCH=$ReleaseBranch" >> $env:GITHUB_ENV
           "IS_PRERELEASE=$($IsPrerelease.ToString().ToLowerInvariant())" >> $env:GITHUB_ENV
 
@@ -274,7 +276,7 @@ jobs:
               "release", "create", $env:TAG, $env:ASSET,
               "--repo", "${{ github.repository }}",
               "--target", $env:MERGED_SHA,
-              "--title", $env:TAG,
+              "--title", $env:RELEASE_TITLE,
               "--generate-notes"
           )
 
