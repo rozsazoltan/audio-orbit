@@ -1,4 +1,4 @@
-use crate::dsp::{render_orbit_to_stereo_with_cached_waveform, DspSettings, RenderInfo};
+use crate::dsp::{render_orbit_to_stereo_with_cached_analysis, DspSettings, RenderInfo};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait};
 use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, OutputStreamHandle, Sink, Source};
@@ -1103,7 +1103,23 @@ impl AudioPlayer {
         start_seconds: f32,
         cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
     ) -> Result<PreparedPlayback> {
-        let (processed_samples, render_info, sample_rate) = render_file_data(&path, settings, start_seconds, cached_waveform)?;
+        Self::prepare_file_with_cached_analysis(path, settings, start_seconds, cached_waveform, None)
+    }
+
+    pub fn prepare_file_with_cached_analysis(
+        path: PathBuf,
+        settings: DspSettings,
+        start_seconds: f32,
+        cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
+        cached_silence_ranges: Option<Vec<(f32, f32)>>,
+    ) -> Result<PreparedPlayback> {
+        let (processed_samples, render_info, sample_rate) = render_file_data(
+            &path,
+            settings,
+            start_seconds,
+            cached_waveform,
+            cached_silence_ranges,
+        )?;
         Ok(PreparedPlayback {
             path,
             settings,
@@ -1426,6 +1442,7 @@ fn render_file_data(
     settings: DspSettings,
     start_seconds: f32,
     cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
+    cached_silence_ranges: Option<Vec<(f32, f32)>>,
 ) -> Result<(Vec<f32>, RenderInfo, u32)> {
     let file = File::open(path)
         .with_context(|| format!("failed to open audio file: {}", path.display()))?;
@@ -1443,13 +1460,14 @@ fn render_file_data(
         anyhow::bail!("the selected audio file did not contain any decoded samples");
     }
 
-    let (processed_samples, render_info) = render_orbit_to_stereo_with_cached_waveform(
+    let (processed_samples, render_info) = render_orbit_to_stereo_with_cached_analysis(
         &input_samples,
         input_channels,
         sample_rate,
         settings,
         start_seconds,
         cached_waveform,
+        cached_silence_ranges,
     );
 
     if processed_samples.is_empty() {

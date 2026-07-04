@@ -103,6 +103,80 @@ impl AudioOrbitApp {
             .and_then(|track| track.metadata.duration_seconds)
             .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
     }
+    fn silence_settings_fingerprint(settings: DspSettings) -> SilenceSettingsFingerprint {
+        let trigger_millis = if settings.silence_trigger_millis == 0 {
+            settings.silence_threshold_seconds.max(1) as u16 * 1000
+        } else {
+            settings.silence_trigger_millis
+        };
+
+        SilenceSettingsFingerprint {
+            skip_silence_enabled: settings.skip_silence_enabled,
+            trigger_millis,
+            threshold_db: settings.silence_threshold_db,
+            trim_end_regardless_of_duration: settings.silence_trim_end_regardless_of_duration,
+        }
+    }
+    fn audio_file_cache_identity(path: &Path) -> (Option<u64>, Option<u128>) {
+        let Ok(metadata) = fs::metadata(path) else {
+            return (None, None);
+        };
+
+        let modified_nanos = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos());
+
+        (Some(metadata.len()), modified_nanos)
+    }
+    pub(crate) fn cached_silence_ranges_for_track(
+        &self,
+        path: &Path,
+        settings: DspSettings,
+    ) -> Option<Vec<(f32, f32)>> {
+        if !settings.skip_silence_enabled {
+            return None;
+        }
+
+        let entry = self.silence_analysis_cache.get(path)?;
+        let (file_len, modified_nanos) = Self::audio_file_cache_identity(path);
+        let settings = Self::silence_settings_fingerprint(settings);
+        if entry.file_len == file_len && entry.modified_nanos == modified_nanos && entry.settings == settings {
+            Some(entry.ranges.clone())
+        } else {
+            None
+        }
+    }
+    pub(crate) fn remember_silence_ranges_for_track(
+        &mut self,
+        path: &Path,
+        settings: DspSettings,
+        ranges: Vec<(f32, f32)>,
+    ) {
+        if !settings.skip_silence_enabled {
+            return;
+        }
+
+        let (file_len, modified_nanos) = Self::audio_file_cache_identity(path);
+        self.silence_analysis_cache.insert(
+            path.to_path_buf(),
+            SilenceAnalysisCacheEntry {
+                file_len,
+                modified_nanos,
+                settings: Self::silence_settings_fingerprint(settings),
+                ranges,
+            },
+        );
+
+        const MAX_SILENCE_ANALYSIS_CACHE_ENTRIES: usize = 256;
+        while self.silence_analysis_cache.len() > MAX_SILENCE_ANALYSIS_CACHE_ENTRIES {
+            let Some(oldest_key) = self.silence_analysis_cache.keys().next().cloned() else {
+                break;
+            };
+            self.silence_analysis_cache.remove(&oldest_key);
+        }
+    }
     pub(crate) fn prepare_track_playback(
         &mut self,
         path: PathBuf,
@@ -119,6 +193,7 @@ impl AudioOrbitApp {
         let settings = self.current_settings();
         let playlist_index = self.state.selected_playlist_index;
         let cached_waveform = self.cached_waveform_for_track(index, &path);
+        let cached_silence_ranges = self.cached_silence_ranges_for_track(&path, settings);
         let known_duration_seconds = self.known_duration_for_track(index, &path);
 
         if !settings.skip_silence_enabled {
@@ -137,7 +212,10 @@ impl AudioOrbitApp {
                 );
 
             match result {
-                Ok(info) => {
+                Ok(mut info) => {
+                    if let Some(ranges) = cached_silence_ranges.clone() {
+                        info.silence_ranges = ranges;
+                    }
                     let mode_label = if settings.orbit_enabled {
                         settings.mode.label()
                     } else {
@@ -201,7 +279,10 @@ impl AudioOrbitApp {
         let mut quick_started = false;
         let mut requested_at = Instant::now();
         match fast_result {
-            Ok(info) => {
+            Ok(mut info) => {
+                if let Some(ranges) = cached_silence_ranges.clone() {
+                    info.silence_ranges = ranges;
+                }
                 quick_started = true;
                 requested_at = Instant::now();
                 let mode_label = if settings.orbit_enabled {
@@ -270,7 +351,13 @@ impl AudioOrbitApp {
         self.error_message = if quick_started { None } else { self.error_message.take() };
 
         thread::spawn(move || {
-            let result = AudioPlayer::prepare_file_with_cached_waveform(path_for_thread, settings, start_seconds, cached_waveform)
+            let result = AudioPlayer::prepare_file_with_cached_analysis(
+                path_for_thread,
+                settings,
+                start_seconds,
+                cached_waveform,
+                cached_silence_ranges,
+            )
                 .map(|prepared| PreparedTrackPlayback {
                     playlist_index,
                     index,
@@ -317,6 +404,12 @@ impl AudioOrbitApp {
             prepared: prepared_audio,
             requested_at,
         } = prepared;
+
+        self.remember_silence_ranges_for_track(
+            &prepared_audio.path,
+            prepared_audio.settings,
+            prepared_audio.render_info.silence_ranges.clone(),
+        );
 
         let Some(player) = &mut self.player else {
             self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
@@ -579,6 +672,7 @@ impl AudioOrbitApp {
         prepare_after_streaming: bool,
     ) {
         let cached_waveform = self.current_waveform_for_seek();
+        let cached_silence_ranges = self.cached_silence_ranges_for_track(&path, settings);
         let Some(player) = &mut self.player else {
             return;
         };
@@ -592,7 +686,10 @@ impl AudioOrbitApp {
             known_duration_seconds,
             0.0,
         ) {
-            Ok(info) => {
+            Ok(mut info) => {
+                if let Some(ranges) = cached_silence_ranges.clone() {
+                    info.silence_ranges = ranges;
+                }
                 self.status_message = format!("Seeked to {}.", format_duration(seconds));
                 self.status_updated_at = Instant::now();
                 self.active_tab = MainContentTab::Music;
@@ -623,6 +720,7 @@ impl AudioOrbitApp {
                         start_seconds: seconds,
                         settings,
                         cached_waveform,
+                        cached_silence_ranges,
                     });
                 } else {
                     self.pending_seek_prepare = None;
@@ -690,11 +788,12 @@ impl AudioOrbitApp {
         let (sender, receiver) = mpsc::channel();
         self.pending_prepared_track_receiver = Some(receiver);
         thread::spawn(move || {
-            let result = AudioPlayer::prepare_file_with_cached_waveform(
+            let result = AudioPlayer::prepare_file_with_cached_analysis(
                 pending.path,
                 pending.settings,
                 pending.start_seconds,
                 pending.cached_waveform,
+                pending.cached_silence_ranges,
             )
             .map(|prepared| PreparedTrackPlayback {
                 playlist_index: pending.playlist_index,
