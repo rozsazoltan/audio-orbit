@@ -542,7 +542,7 @@ fn collect_process_metrics_sample_for_pid(pid: u32) -> Option<ProcessMetricsSamp
 
     unsafe {
         let process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
-        if process == 0 {
+        if process.is_null() {
             return None;
         }
         let sample = collect_process_metrics_sample_for_handle(process);
