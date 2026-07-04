@@ -480,7 +480,6 @@ impl AudioOrbitApp {
             .as_ref()
             .and_then(AudioPlayer::current_settings)
             .unwrap_or_else(|| self.current_settings());
-        let cached_waveform = self.current_waveform_for_seek();
         let known_duration_seconds = self
             .last_playback
             .as_ref()
@@ -492,48 +491,98 @@ impl AudioOrbitApp {
                     .and_then(|path| self.known_duration_for_track(self.active_track_index, path))
             });
 
-        if settings.skip_silence_enabled {
-            self.seek_current_with_debounced_prepare(seconds, settings, cached_waveform, known_duration_seconds);
-            return;
-        }
-
-        let Some(player) = &mut self.player else {
-            return;
-        };
-
-        match player.seek_current_with_cached_waveform(seconds, cached_waveform, known_duration_seconds) {
-            Ok(Some(info)) => {
-                self.status_message = format!("Seeked to {}.", format_duration(seconds));
-                self.store_playback_metadata(&info);
-                self.last_playback = Some(info);
-                self.waveform_drag_position_seconds = None;
-                self.pending_seek_prepare = None;
-                self.persist_playback_session();
-                self.save_state_silently();
-                self.error_message = None;
-            }
-            Ok(None) => {}
-            Err(error) => {
-                self.error_message = Some(error.to_string());
-            }
-        }
+        self.schedule_or_run_fast_seek(
+            seconds,
+            settings,
+            known_duration_seconds,
+            settings.skip_silence_enabled,
+        );
     }
 
-    fn seek_current_with_debounced_prepare(
+    fn schedule_or_run_fast_seek(
         &mut self,
         seconds: f32,
         settings: DspSettings,
-        cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
         known_duration_seconds: Option<f32>,
+        prepare_after_streaming: bool,
     ) {
         let Some(path) = self.active_track_path.clone() else {
             return;
         };
+        let Some(player) = self.player.as_ref() else {
+            return;
+        };
+        if !(player.is_playing() || player.is_paused()) {
+            return;
+        }
+
+        let duration = known_duration_seconds.unwrap_or_else(|| self.displayed_playback_duration_seconds());
+        let position_seconds = if duration.is_finite() && duration > 0.0 {
+            seconds.clamp(0.0, duration)
+        } else {
+            seconds.max(0.0)
+        };
+        let now = Instant::now();
         let playlist_index = self.active_playlist_index.unwrap_or(self.state.selected_playlist_index);
         let index = self.active_track_index;
+
+        // Any new seek makes older prepared results stale. The user-visible path is the
+        // fast streaming seek; heavier processed playback is only allowed to catch up
+        // after the final settled seek target.
+        self.pending_seek_prepare = None;
+        self.pending_prepared_track_receiver = None;
+
+        let can_restart_now = self.pending_fast_seek.is_none()
+            && self
+                .last_fast_seek_started_at
+                .map(|started| now.saturating_duration_since(started) >= FAST_SEEK_COALESCE_INTERVAL)
+                .unwrap_or(true);
+
+        if can_restart_now {
+            self.execute_fast_streaming_seek(
+                path,
+                playlist_index,
+                index,
+                position_seconds,
+                settings,
+                known_duration_seconds,
+                prepare_after_streaming,
+            );
+            return;
+        }
+
+        self.pending_fast_seek = Some(PendingFastSeek {
+            run_after: now + FAST_SEEK_COALESCE_INTERVAL,
+            requested_at: now,
+            playlist_index,
+            index,
+            path,
+            position_seconds,
+            settings,
+            known_duration_seconds,
+            prepare_after_streaming,
+        });
+        self.status_message = format!("Seek to {}...", format_duration(position_seconds));
+        self.status_updated_at = now;
+        self.waveform_drag_position_seconds = None;
+        self.persist_playback_session();
+    }
+
+    fn execute_fast_streaming_seek(
+        &mut self,
+        path: PathBuf,
+        playlist_index: usize,
+        index: Option<usize>,
+        seconds: f32,
+        settings: DspSettings,
+        known_duration_seconds: Option<f32>,
+        prepare_after_streaming: bool,
+    ) {
+        let cached_waveform = self.current_waveform_for_seek();
         let Some(player) = &mut self.player else {
             return;
         };
+        self.last_fast_seek_started_at = Some(Instant::now());
 
         match player.play_file_streaming_with_cached_waveform_and_crossfade(
             &path,
@@ -545,6 +594,7 @@ impl AudioOrbitApp {
         ) {
             Ok(info) => {
                 self.status_message = format!("Seeked to {}.", format_duration(seconds));
+                self.status_updated_at = Instant::now();
                 self.active_tab = MainContentTab::Music;
                 self.active_radio_index = None;
                 self.active_radio_station_name = None;
@@ -560,28 +610,63 @@ impl AudioOrbitApp {
                 self.remember_last_played_track(index, &info.path);
                 self.last_playback = Some(info);
                 self.waveform_drag_position_seconds = None;
+                self.pending_fast_seek = None;
                 self.error_message = None;
 
-                self.pending_seek_prepare = Some(PendingSeekPrepare {
-                    run_after: Instant::now() + SEEK_PREPARE_DEBOUNCE,
-                    requested_at: Instant::now(),
-                    playlist_index,
-                    index,
-                    path,
-                    start_seconds: seconds,
-                    settings,
-                    cached_waveform,
-                });
-                // Drop any pending prepared result from an older seek. The running worker may finish,
-                // but its result will no longer be applied over the latest audible seek position.
-                self.pending_prepared_track_receiver = None;
+                if prepare_after_streaming {
+                    self.pending_seek_prepare = Some(PendingSeekPrepare {
+                        run_after: Instant::now() + SEEK_PREPARE_DEBOUNCE,
+                        requested_at: Instant::now(),
+                        playlist_index,
+                        index,
+                        path,
+                        start_seconds: seconds,
+                        settings,
+                        cached_waveform,
+                    });
+                } else {
+                    self.pending_seek_prepare = None;
+                }
+
                 self.persist_playback_session();
+                if !prepare_after_streaming {
+                    self.save_state_silently();
+                }
             }
             Err(error) => {
                 self.error_message = Some(error.to_string());
                 self.waveform_drag_position_seconds = None;
             }
         }
+    }
+
+    pub(crate) fn process_pending_fast_seek(&mut self) {
+        let Some(pending) = self.pending_fast_seek.as_ref() else {
+            return;
+        };
+        if Instant::now() < pending.run_after {
+            return;
+        }
+
+        let pending = self.pending_fast_seek.take().expect("pending fast seek was checked above");
+        if self
+            .active_track_path
+            .as_ref()
+            .map(|path| !same_path(path, &pending.path))
+            .unwrap_or(true)
+        {
+            return;
+        }
+
+        self.execute_fast_streaming_seek(
+            pending.path,
+            pending.playlist_index,
+            pending.index,
+            pending.position_seconds,
+            pending.settings,
+            pending.known_duration_seconds,
+            pending.prepare_after_streaming,
+        );
     }
 
     pub(crate) fn process_pending_seek_prepare(&mut self) {
@@ -747,6 +832,10 @@ impl AudioOrbitApp {
         if let Some(pending) = &self.pending_track_switch {
             let elapsed = pending.started_at.elapsed().as_secs_f32();
             return (pending.previous_position + elapsed).min(pending.previous_duration);
+        }
+
+        if let Some(pending) = &self.pending_fast_seek {
+            return pending.position_seconds;
         }
 
         let Some(player) = self.player.as_ref() else {
