@@ -51,6 +51,10 @@ impl AudioOrbitApp {
                 if ui.button(ui_icons::label(Icon::Info, "About")).clicked() {
                     self.open_panel_modal(AppPanelModal::About);
                 }
+                #[cfg(debug_assertions)]
+                if ui.button(ui_icons::label(Icon::Info, "Dev metrics")).clicked() {
+                    self.show_dev_metrics_window = true;
+                }
             });
         });
         ui.add_space(8.0);

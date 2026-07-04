@@ -88,6 +88,12 @@ impl AudioOrbitApp {
                     last_update_check: None,
                     update_check_started_at: None,
                     update_install_started_at: None,
+                    #[cfg(debug_assertions)]
+                    dev_metrics: DevMetricsPanelState::default(),
+                    #[cfg(debug_assertions)]
+                    show_dev_metrics_window: false,
+                    #[cfg(debug_assertions)]
+                    dev_metrics_window: None,
                 }
             }
             Err(error) => Self {
@@ -165,6 +171,12 @@ impl AudioOrbitApp {
                 last_update_check: None,
                 update_check_started_at: None,
                 update_install_started_at: None,
+                #[cfg(debug_assertions)]
+                dev_metrics: DevMetricsPanelState::default(),
+                #[cfg(debug_assertions)]
+                show_dev_metrics_window: false,
+                #[cfg(debug_assertions)]
+                dev_metrics_window: None,
             },
         };
 

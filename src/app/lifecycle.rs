@@ -7,19 +7,95 @@ impl Drop for AudioOrbitApp {
         if let Some(player) = &mut self.player {
             player.stop();
         }
+        #[cfg(debug_assertions)]
+        if let Some(handle) = &mut self.dev_metrics_window {
+            handle.close();
+        }
         let _ = save_state(&self.state);
+    }
+}
+
+
+impl AudioOrbitApp {
+    fn next_repaint_interval(&self, context: &egui::Context) -> Duration {
+        let has_live_input = context.input(|input| {
+            input.pointer.delta().length_sq() > 0.01
+                || input.pointer.any_released()
+                || !input.events.is_empty()
+                || input.raw_scroll_delta.length_sq() > 0.0
+                || input.smooth_scroll_delta.length_sq() > 0.0
+        });
+        if has_live_input || self.waveform_drag_position_seconds.is_some() {
+            return ACTIVE_INPUT_REPAINT_INTERVAL;
+        }
+
+        #[cfg(debug_assertions)]
+        if self.show_dev_metrics_window {
+            return Duration::from_millis(500);
+        }
+
+        if self.waveform_loading_animation_is_active() {
+            return WAVEFORM_LOADING_REPAINT_INTERVAL;
+        }
+
+        if self.active_radio_index.is_some() {
+            return RADIO_REPAINT_INTERVAL;
+        }
+
+        if self.player.as_ref().map(AudioPlayer::is_playing).unwrap_or(false)
+            || self.pending_track_switch.is_some()
+        {
+            return PLAYBACK_REPAINT_INTERVAL;
+        }
+
+        if self.has_background_ui_work() {
+            return BACKGROUND_WORK_REPAINT_INTERVAL;
+        }
+
+        if self.profile_apply_status_text().is_some()
+            || !self.status_message.is_empty()
+            || self.error_message.is_some()
+        {
+            return STATUS_REPAINT_INTERVAL;
+        }
+
+        IDLE_REPAINT_INTERVAL
+    }
+
+    fn waveform_loading_animation_is_active(&self) -> bool {
+        self.active_radio_index.is_none()
+            && (self.active_track_path.is_some() || self.pending_track_switch.is_some())
+            && self
+                .last_playback
+                .as_ref()
+                .map(|playback| playback.waveform.is_empty())
+                .unwrap_or(false)
+    }
+
+    fn has_background_ui_work(&self) -> bool {
+        self.pending_prepared_track_receiver.is_some()
+            || self.pending_folder_scan_receiver.is_some()
+            || self.update_check_receiver.is_some()
+            || self.update_install_receiver.is_some()
+            || self.radio_title_receiver.is_some()
+            || self.pending_profile_apply_at.is_some()
+            || self.profile_apply_applied_until.map(|until| until > Instant::now()).unwrap_or(false)
+            || self.detected_output_change.is_some()
+            || self.focus_track_search
+            || self.focus_radio_search
+            || self.scroll_to_active_track_requested
+            || self.scroll_to_active_radio_requested
+            || self.scroll_to_folder_group_requested.is_some()
     }
 }
 
 impl eframe::App for AudioOrbitApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         context.set_visuals(egui::Visuals::dark());
-        let repaint_interval = if self.active_radio_index.is_some() {
-            Duration::from_millis(16)
-        } else {
-            Duration::from_millis(33)
-        };
+        let repaint_interval = self.next_repaint_interval(context);
         context.request_repaint_after(repaint_interval);
+        #[cfg(debug_assertions)]
+        self.update_dev_metrics(context, repaint_interval);
         self.remember_window_geometry(context);
 
         self.process_media_key_events();
@@ -111,5 +187,8 @@ impl eframe::App for AudioOrbitApp {
 
         self.render_drag_feedback(context);
         self.render_error_toast(context);
+
+        #[cfg(debug_assertions)]
+        self.render_dev_metrics_window(context);
     }
 }

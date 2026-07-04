@@ -21,6 +21,60 @@ const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 180;
 // decoded audio itself.
 const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 64;
 const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
+// The orbit position changes very slowly compared to the audio sample rate.
+// Updating gain coefficients once per small block avoids expensive sin/cos work
+// for every single decoded frame while keeping the movement perceptually smooth.
+const LIVE_ORBIT_GAIN_UPDATE_FRAMES: u64 = 128;
+
+#[derive(Clone, Copy, Debug)]
+struct LiveOrbitGains {
+    left: f32,
+    right: f32,
+    output_level: f32,
+}
+
+impl Default for LiveOrbitGains {
+    fn default() -> Self {
+        Self {
+            left: 1.0,
+            right: 1.0,
+            output_level: 1.0,
+        }
+    }
+}
+
+fn live_orbit_gains(settings: DspSettings, frame_index: u64, sample_rate: u32) -> LiveOrbitGains {
+    let output_level = settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
+    if !settings.orbit_enabled {
+        return LiveOrbitGains {
+            output_level,
+            ..Default::default()
+        };
+    }
+
+    let sample_rate = sample_rate.max(1) as f32;
+    let width = settings.stereo_width_percent.min(100) as f32 / 100.0;
+    let speed = settings.orbit_speed_percent.clamp(10, 200) as f32 / 100.0;
+    let phase = 2.0 * PI * 0.20 * speed * (frame_index as f32 / sample_rate);
+    let pan = phase.sin() * width;
+    let angle = (pan.clamp(-1.0, 1.0) + 1.0) * PI / 4.0;
+    let mut left = angle.cos();
+    let mut right = angle.sin();
+
+    if matches!(settings.mode, crate::dsp::OrbitMode::VirtualEightDirectionOrbit) {
+        let depth = phase.cos();
+        let rear = (-depth).max(0.0) * (settings.depth_cue_percent.min(100) as f32 / 100.0);
+        let shade = 1.0 - rear * 0.22;
+        left *= shade;
+        right *= shade;
+    }
+
+    LiveOrbitGains {
+        left,
+        right,
+        output_level,
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct PlaybackInfo {
@@ -285,6 +339,8 @@ struct LiveFileSource<S> {
     frame_index: u64,
     output_frame: [f32; 2],
     output_channel: usize,
+    cached_gains: LiveOrbitGains,
+    cached_gains_until_frame: u64,
 }
 
 impl<S: Source<Item = f32>> LiveFileSource<S> {
@@ -304,7 +360,19 @@ impl<S: Source<Item = f32>> LiveFileSource<S> {
             frame_index: (start_seconds * sample_rate as f32).round().max(0.0) as u64,
             output_frame: [0.0, 0.0],
             output_channel: 2,
+            cached_gains: LiveOrbitGains::default(),
+            cached_gains_until_frame: 0,
         }
+    }
+
+    fn current_gains(&mut self) -> LiveOrbitGains {
+        if self.frame_index >= self.cached_gains_until_frame {
+            self.cached_gains = live_orbit_gains(self.settings, self.frame_index, self.sample_rate);
+            self.cached_gains_until_frame = self
+                .frame_index
+                .saturating_add(LIVE_ORBIT_GAIN_UPDATE_FRAMES);
+        }
+        self.cached_gains
     }
 
     fn read_input_frame(&mut self) -> Option<([f32; 2], f32)> {
@@ -341,33 +409,17 @@ impl<S: Source<Item = f32>> LiveFileSource<S> {
     }
 
     fn process_frame(&mut self, stereo: [f32; 2], mono: f32) -> [f32; 2] {
-        let output_level = self.settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
+        let gains = self.current_gains();
         if !self.settings.orbit_enabled {
             return [
-                (stereo[0] * output_level).clamp(-1.0, 1.0),
-                (stereo[1] * output_level).clamp(-1.0, 1.0),
+                (stereo[0] * gains.output_level).clamp(-1.0, 1.0),
+                (stereo[1] * gains.output_level).clamp(-1.0, 1.0),
             ];
         }
 
-        let width = self.settings.stereo_width_percent.min(100) as f32 / 100.0;
-        let speed = self.settings.orbit_speed_percent.clamp(10, 200) as f32 / 100.0;
-        let time = self.frame_index as f32 / self.sample_rate as f32;
-        let pan = (2.0 * PI * 0.20 * speed * time).sin() * width;
-        let angle = (pan.clamp(-1.0, 1.0) + 1.0) * PI / 4.0;
-        let mut left_gain = angle.cos();
-        let mut right_gain = angle.sin();
-
-        if matches!(self.settings.mode, crate::dsp::OrbitMode::VirtualEightDirectionOrbit) {
-            let depth = (2.0 * PI * 0.20 * speed * time).cos();
-            let rear = (-depth).max(0.0) * (self.settings.depth_cue_percent.min(100) as f32 / 100.0);
-            let shade = 1.0 - rear * 0.22;
-            left_gain *= shade;
-            right_gain *= shade;
-        }
-
         [
-            soft_limit_radio(mono * left_gain * output_level),
-            soft_limit_radio(mono * right_gain * output_level),
+            soft_limit_radio(mono * gains.left * gains.output_level),
+            soft_limit_radio(mono * gains.right * gains.output_level),
         ]
     }
 }
@@ -416,6 +468,8 @@ struct LiveRadioSource<S> {
     frame_index: u64,
     output_frame: [f32; 2],
     output_channel: usize,
+    cached_gains: LiveOrbitGains,
+    cached_gains_until_frame: u64,
     visualizer: RadioVisualizerHandle,
     visualizer_analyzer: LiveRadioWaveformAnalyzer,
 }
@@ -436,9 +490,21 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
             frame_index: 0,
             output_frame: [0.0, 0.0],
             output_channel: 2,
+            cached_gains: LiveOrbitGains::default(),
+            cached_gains_until_frame: 0,
             visualizer,
             visualizer_analyzer: LiveRadioWaveformAnalyzer::new(sample_rate, RADIO_VISUALIZER_BUCKETS_PER_SECOND),
         }
+    }
+
+    fn current_gains(&mut self) -> LiveOrbitGains {
+        if self.frame_index >= self.cached_gains_until_frame {
+            self.cached_gains = live_orbit_gains(self.settings, self.frame_index, self.sample_rate);
+            self.cached_gains_until_frame = self
+                .frame_index
+                .saturating_add(LIVE_ORBIT_GAIN_UPDATE_FRAMES);
+        }
+        self.cached_gains
     }
 
     fn read_input_frame(&mut self) -> Option<([f32; 2], f32)> {
@@ -501,33 +567,17 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
 
     fn process_frame(&mut self, stereo: [f32; 2], mono: f32) -> [f32; 2] {
         self.record_visualizer_sample(mono);
-        let output_level = self.settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
+        let gains = self.current_gains();
         if !self.settings.orbit_enabled {
             return [
-                soft_limit_radio(stereo[0] * output_level),
-                soft_limit_radio(stereo[1] * output_level),
+                soft_limit_radio(stereo[0] * gains.output_level),
+                soft_limit_radio(stereo[1] * gains.output_level),
             ];
         }
 
-        let width = self.settings.stereo_width_percent.min(100) as f32 / 100.0;
-        let speed = self.settings.orbit_speed_percent.clamp(10, 200) as f32 / 100.0;
-        let time = self.frame_index as f32 / self.sample_rate as f32;
-        let pan = (2.0 * PI * 0.20 * speed * time).sin() * width;
-        let angle = (pan.clamp(-1.0, 1.0) + 1.0) * PI / 4.0;
-        let mut left_gain = angle.cos();
-        let mut right_gain = angle.sin();
-
-        if matches!(self.settings.mode, crate::dsp::OrbitMode::VirtualEightDirectionOrbit) {
-            let depth = (2.0 * PI * 0.20 * speed * time).cos();
-            let rear = (-depth).max(0.0) * (self.settings.depth_cue_percent.min(100) as f32 / 100.0);
-            let shade = 1.0 - rear * 0.22;
-            left_gain *= shade;
-            right_gain *= shade;
-        }
-
         [
-            soft_limit_radio(mono * left_gain * output_level),
-            soft_limit_radio(mono * right_gain * output_level),
+            soft_limit_radio(mono * gains.left * gains.output_level),
+            soft_limit_radio(mono * gains.right * gains.output_level),
         ]
     }
 }
