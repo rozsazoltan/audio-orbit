@@ -93,7 +93,7 @@ impl AudioOrbitApp {
                     #[cfg(debug_assertions)]
                     show_dev_metrics_window: false,
                     #[cfg(debug_assertions)]
-                    dev_metrics_window_open_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    dev_metrics_window: None,
                 }
             }
             Err(error) => Self {
@@ -176,7 +176,7 @@ impl AudioOrbitApp {
                 #[cfg(debug_assertions)]
                 show_dev_metrics_window: false,
                 #[cfg(debug_assertions)]
-                dev_metrics_window_open_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                dev_metrics_window: None,
             },
         };
 

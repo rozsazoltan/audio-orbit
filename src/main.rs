@@ -12,7 +12,7 @@ mod updater;
 mod app;
 
 #[cfg(debug_assertions)]
-use crate::app::dev_metrics::DevMetricsPanelState;
+use crate::app::dev_metrics::{DevMetricsNativeWindowHandle, DevMetricsPanelState};
 
 use crate::{
     audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo, PreparedPlayback, RadioVisualizerFrame},
@@ -82,6 +82,11 @@ fn saved_window_geometry_for_mode(state: &SavedState, player_only_mode: bool) ->
 }
 
 fn main() -> eframe::Result<()> {
+    #[cfg(debug_assertions)]
+    if let Some(config) = app::dev_metrics::dev_metrics_process_config_from_args() {
+        return app::dev_metrics::run_dev_metrics_process(config);
+    }
+
     let _single_instance_guard = match single_instance::acquire() {
         Ok(Some(guard)) => guard,
         Ok(None) => return Ok(()),
@@ -343,7 +348,7 @@ struct AudioOrbitApp {
     #[cfg(debug_assertions)]
     show_dev_metrics_window: bool,
     #[cfg(debug_assertions)]
-    dev_metrics_window_open_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    dev_metrics_window: Option<DevMetricsNativeWindowHandle>,
 }
 
 

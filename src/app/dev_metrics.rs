@@ -1,7 +1,12 @@
 use crate::*;
 
 #[cfg(debug_assertions)]
-use std::sync::{atomic::Ordering, Arc};
+use std::{
+    process::Child,
+};
+
+#[cfg(debug_assertions)]
+const DEV_METRICS_PROCESS_ARG: &str = "--audio-orbit-dev-metrics";
 
 #[cfg(debug_assertions)]
 #[derive(Clone, Debug)]
@@ -15,7 +20,7 @@ pub(crate) struct DevMetricsPanelState {
 }
 
 #[cfg(debug_assertions)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DevMetricsSnapshot {
     pub(crate) cpu_percent: Option<f32>,
     pub(crate) working_set_bytes: Option<u64>,
@@ -25,18 +30,225 @@ pub(crate) struct DevMetricsSnapshot {
     pub(crate) estimated_fps: f32,
     pub(crate) repaint_interval_ms: u64,
     pub(crate) uptime_seconds: f32,
-    pub(crate) background_jobs: Vec<&'static str>,
-    pub(crate) player_state: &'static str,
-    pub(crate) gpu_usage_label: &'static str,
+    pub(crate) background_jobs: Vec<String>,
+    pub(crate) player_state: String,
+    pub(crate) gpu_usage_label: String,
 }
 
 #[cfg(debug_assertions)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DevMetricsCounters {
     pub(crate) playlists: usize,
     pub(crate) tracks: usize,
     pub(crate) radio_stations: usize,
     pub(crate) undo_stack: usize,
+}
+
+#[cfg(debug_assertions)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DevMetricsNativeWindowData {
+    snapshot: DevMetricsSnapshot,
+    counters: DevMetricsCounters,
+}
+
+#[cfg(debug_assertions)]
+pub(crate) struct DevMetricsNativeWindowHandle {
+    child: Child,
+    snapshot_path: PathBuf,
+}
+
+#[cfg(debug_assertions)]
+#[derive(Clone, Debug)]
+pub(crate) struct DevMetricsProcessConfig {
+    target_pid: u32,
+    snapshot_path: PathBuf,
+}
+
+#[cfg(debug_assertions)]
+impl DevMetricsNativeWindowHandle {
+    fn spawn() -> Result<Self, String> {
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("failed to resolve Audio Orbit executable: {error}"))?;
+        let snapshot_path = std::env::temp_dir().join(format!(
+            "audio-orbit-dev-metrics-{}.json",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&snapshot_path);
+
+        let child = Command::new(executable)
+            .arg(DEV_METRICS_PROCESS_ARG)
+            .arg(std::process::id().to_string())
+            .arg(&snapshot_path)
+            .spawn()
+            .map_err(|error| format!("failed to open Dev metrics window: {error}"))?;
+
+        Ok(Self { child, snapshot_path })
+    }
+
+    fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    fn update(&self, snapshot: DevMetricsSnapshot, counters: DevMetricsCounters) {
+        let data = DevMetricsNativeWindowData { snapshot, counters };
+        if let Ok(json) = serde_json::to_vec(&data) {
+            let _ = fs::write(&self.snapshot_path, json);
+        }
+    }
+
+    pub(crate) fn close(&mut self) {
+        if self.is_running() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        let _ = fs::remove_file(&self.snapshot_path);
+    }
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn dev_metrics_process_config_from_args() -> Option<DevMetricsProcessConfig> {
+    let mut args = std::env::args_os();
+    let _program = args.next()?;
+    let mode = args.next()?;
+    if mode != DEV_METRICS_PROCESS_ARG {
+        return None;
+    }
+
+    let target_pid = args.next()?.to_string_lossy().parse::<u32>().ok()?;
+    let snapshot_path = PathBuf::from(args.next()?);
+    Some(DevMetricsProcessConfig {
+        target_pid,
+        snapshot_path,
+    })
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn run_dev_metrics_process(config: DevMetricsProcessConfig) -> eframe::Result<()> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Audio Orbit - Dev metrics")
+        .with_inner_size([520.0, 640.0])
+        .with_min_inner_size([360.0, 260.0])
+        .with_resizable(true);
+
+    if let Some(icon) = icon::load_window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+
+    let options = eframe::NativeOptions {
+        viewport,
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "Audio Orbit - Dev metrics",
+        options,
+        Box::new(move |creation_context| {
+            ui_icons::install(&creation_context.egui_ctx);
+            configure_app_style(&creation_context.egui_ctx);
+            Ok(Box::new(DevMetricsStandaloneApp::new(config)))
+        }),
+    )
+}
+
+#[cfg(debug_assertions)]
+struct DevMetricsStandaloneApp {
+    config: DevMetricsProcessConfig,
+    snapshot: DevMetricsSnapshot,
+    counters: DevMetricsCounters,
+    last_snapshot_read_at: Instant,
+    last_sample: Option<ProcessMetricsSample>,
+    last_sample_at: Option<Instant>,
+    logical_processors: usize,
+}
+
+#[cfg(debug_assertions)]
+impl DevMetricsStandaloneApp {
+    fn new(config: DevMetricsProcessConfig) -> Self {
+        Self {
+            config,
+            snapshot: DevMetricsSnapshot::default(),
+            counters: DevMetricsCounters::default(),
+            last_snapshot_read_at: Instant::now() - Duration::from_secs(1),
+            last_sample: None,
+            last_sample_at: None,
+            logical_processors: std::thread::available_parallelism()
+                .map(|value| value.get())
+                .unwrap_or(1)
+                .max(1),
+        }
+    }
+
+    fn refresh(&mut self, _context: &egui::Context) {
+        let now = Instant::now();
+
+        if now.saturating_duration_since(self.last_snapshot_read_at) >= Duration::from_millis(250) {
+            self.last_snapshot_read_at = now;
+            if let Ok(bytes) = fs::read(&self.config.snapshot_path) {
+                if let Ok(data) = serde_json::from_slice::<DevMetricsNativeWindowData>(&bytes) {
+                    let cpu_percent = self.snapshot.cpu_percent;
+                    let working_set_bytes = self.snapshot.working_set_bytes;
+                    let peak_working_set_bytes = self.snapshot.peak_working_set_bytes;
+                    let pagefile_bytes = self.snapshot.pagefile_bytes;
+                    self.snapshot = data.snapshot;
+                    self.snapshot.cpu_percent = cpu_percent;
+                    self.snapshot.working_set_bytes = working_set_bytes;
+                    self.snapshot.peak_working_set_bytes = peak_working_set_bytes;
+                    self.snapshot.pagefile_bytes = pagefile_bytes;
+                    self.counters = data.counters;
+                }
+            }
+        }
+
+        if let Some(sample) = collect_process_metrics_sample_for_pid(self.config.target_pid) {
+            if let (Some(previous), Some(previous_at)) = (self.last_sample, self.last_sample_at) {
+                let elapsed = now.saturating_duration_since(previous_at).as_secs_f64();
+                if elapsed > 0.0 {
+                    let process_seconds = sample
+                        .process_time_100ns
+                        .saturating_sub(previous.process_time_100ns) as f64
+                        / 10_000_000.0;
+                    let normalized = process_seconds / elapsed / self.logical_processors as f64 * 100.0;
+                    self.snapshot.cpu_percent = Some(normalized.clamp(0.0, 100.0) as f32);
+                }
+            }
+            self.snapshot.working_set_bytes = Some(sample.working_set_bytes);
+            self.snapshot.peak_working_set_bytes = Some(sample.peak_working_set_bytes);
+            self.snapshot.pagefile_bytes = Some(sample.pagefile_bytes);
+            self.last_sample = Some(sample);
+            self.last_sample_at = Some(now);
+        } else {
+            self.snapshot.cpu_percent = None;
+            self.snapshot.working_set_bytes = None;
+            self.snapshot.peak_working_set_bytes = None;
+            self.snapshot.pagefile_bytes = None;
+        }
+
+    }
+}
+
+#[cfg(debug_assertions)]
+impl eframe::App for DevMetricsStandaloneApp {
+    fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        context.set_visuals(egui::Visuals::dark());
+        context.request_repaint_after(Duration::from_millis(500));
+
+        if context.input(|input| input.viewport().close_requested()) {
+            context.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
+        self.refresh(context);
+        egui::CentralPanel::default().show(context, |ui| {
+            ui.set_width(ui.available_width());
+            egui::ScrollArea::vertical()
+                .id_salt("dev_metrics_process_window_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    render_dev_metrics_panel_content(ui, &self.snapshot, &self.counters);
+                });
+        });
+    }
 }
 
 #[cfg(debug_assertions)]
@@ -61,8 +273,8 @@ impl Default for DevMetricsSnapshot {
             repaint_interval_ms: 0,
             uptime_seconds: 0.0,
             background_jobs: Vec::new(),
-            player_state: "idle",
-            gpu_usage_label: "not sampled",
+            player_state: "idle".to_owned(),
+            gpu_usage_label: "not sampled".to_owned(),
         }
     }
 }
@@ -107,7 +319,7 @@ impl AudioOrbitApp {
         };
         self.dev_metrics.snapshot.repaint_interval_ms = repaint_interval.as_millis() as u64;
         self.dev_metrics.snapshot.background_jobs = self.active_dev_background_jobs();
-        self.dev_metrics.snapshot.player_state = self.dev_player_state_label();
+        self.dev_metrics.snapshot.player_state = self.dev_player_state_label().to_owned();
         self.dev_metrics.snapshot.uptime_seconds = context.input(|input| input.time as f32);
 
         if now.saturating_duration_since(self.dev_metrics.last_refresh_at) < Duration::from_millis(750) {
@@ -142,28 +354,28 @@ impl AudioOrbitApp {
         self.dev_metrics.last_sample_at = Some(now);
     }
 
-    fn active_dev_background_jobs(&self) -> Vec<&'static str> {
+    fn active_dev_background_jobs(&self) -> Vec<String> {
         let mut jobs = Vec::new();
         if self.pending_prepared_track_receiver.is_some() {
-            jobs.push("audio prepare");
+            jobs.push("audio prepare".to_owned());
         }
         if self.pending_folder_scan_receiver.is_some() {
-            jobs.push("folder scan");
+            jobs.push("folder scan".to_owned());
         }
         if self.pending_track_switch.is_some() {
-            jobs.push("crossfade switch");
+            jobs.push("crossfade switch".to_owned());
         }
         if self.update_check_receiver.is_some() {
-            jobs.push("update check");
+            jobs.push("update check".to_owned());
         }
         if self.update_install_receiver.is_some() {
-            jobs.push("update install");
+            jobs.push("update install".to_owned());
         }
         if self.radio_title_receiver.is_some() {
-            jobs.push("radio metadata");
+            jobs.push("radio metadata".to_owned());
         }
         if self.pending_profile_apply_at.is_some() {
-            jobs.push("profile countdown");
+            jobs.push("profile countdown".to_owned());
         }
         jobs
     }
@@ -181,58 +393,37 @@ impl AudioOrbitApp {
     }
 
 
-    pub(crate) fn render_dev_metrics_window(&mut self, context: &egui::Context) {
-        let viewport_id = egui::ViewportId::from_hash_of("audio_orbit_dev_metrics_window");
-
+    pub(crate) fn render_dev_metrics_window(&mut self, _context: &egui::Context) {
         if !self.show_dev_metrics_window {
             return;
         }
 
-        let close_requested_from_child = !self.dev_metrics_window_open_flag.load(Ordering::Relaxed);
-        let builder = egui::ViewportBuilder::default()
-            .with_title("Audio Orbit - Dev metrics")
-            .with_inner_size([520.0, 640.0])
-            .with_min_inner_size([360.0, 260.0]);
-
-        if close_requested_from_child {
-            // Keep the viewport registered for this frame while sending the close command.
-            // Some native backends ignore a close command if the child viewport is no
-            // longer scheduled, which leaves an empty native window behind.
-            context.show_viewport_deferred(viewport_id, builder, move |context, _class| {
-                context.send_viewport_cmd(egui::ViewportCommand::Close);
-            });
-            context.send_viewport_cmd_to(viewport_id, egui::ViewportCommand::Close);
-            self.show_dev_metrics_window = false;
-            return;
-        }
-
-        self.dev_metrics_window_open_flag.store(true, Ordering::Relaxed);
-        let open_flag = Arc::clone(&self.dev_metrics_window_open_flag);
-        let snapshot = self.dev_metrics.snapshot.clone();
-        let counters = self.dev_metrics_counters();
-
-        context.show_viewport_deferred(viewport_id, builder, move |context, _class| {
-            context.set_visuals(egui::Visuals::dark());
-
-            if context.input(|input| input.viewport().close_requested()) {
-                open_flag.store(false, Ordering::Relaxed);
-                context.send_viewport_cmd(egui::ViewportCommand::Close);
+        if let Some(handle) = &mut self.dev_metrics_window {
+            if !handle.is_running() {
+                handle.close();
+                self.dev_metrics_window = None;
+                self.show_dev_metrics_window = false;
                 return;
             }
+        }
 
-            let snapshot = snapshot.clone();
-            let counters = counters.clone();
-            egui::CentralPanel::default().show(context, |ui| {
-                ui.set_width(ui.available_width());
-                egui::ScrollArea::vertical()
-                    .id_salt("dev_metrics_native_window_scroll")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        render_dev_metrics_panel_content(ui, &snapshot, &counters);
-                    });
-            });
-        });
+        if self.dev_metrics_window.is_none() {
+            match DevMetricsNativeWindowHandle::spawn() {
+                Ok(handle) => self.dev_metrics_window = Some(handle),
+                Err(error) => {
+                    self.show_dev_metrics_window = false;
+                    self.error_message = Some(error);
+                    self.error_updated_at = Instant::now();
+                    return;
+                }
+            }
+        }
+
+        let snapshot = self.dev_metrics.snapshot.clone();
+        let counters = self.dev_metrics_counters();
+        if let Some(handle) = &self.dev_metrics_window {
+            handle.update(snapshot, counters);
+        }
     }
 
     fn dev_metrics_counters(&self) -> DevMetricsCounters {
@@ -268,7 +459,7 @@ fn render_dev_metrics_panel_content(ui: &mut egui::Ui, snapshot: &DevMetricsSnap
         metric_row(ui, "RAM", snapshot.working_set_bytes.map(format_bytes).unwrap_or_else(|| "Unavailable".to_owned()));
         metric_row(ui, "Peak RAM", snapshot.peak_working_set_bytes.map(format_bytes).unwrap_or_else(|| "Unavailable".to_owned()));
         metric_row(ui, "Commit", snapshot.pagefile_bytes.map(format_bytes).unwrap_or_else(|| "Unavailable".to_owned()));
-        metric_row(ui, "GPU", snapshot.gpu_usage_label.to_owned());
+        metric_row(ui, "GPU", snapshot.gpu_usage_label.clone());
         ui.small("GPU usage is not polled directly here to avoid adding a high-overhead Windows performance-counter loop to normal profiling runs. Use Task Manager or GPUView for exact per-adapter GPU counters.");
     });
     ui.add_space(8.0);
@@ -279,7 +470,7 @@ fn render_dev_metrics_panel_content(ui: &mut egui::Ui, snapshot: &DevMetricsSnap
         metric_row(ui, "Estimated FPS", format!("{:.1}", snapshot.estimated_fps));
         metric_row(ui, "Next repaint", format!("{} ms", snapshot.repaint_interval_ms));
         metric_row(ui, "App uptime", format_duration(snapshot.uptime_seconds));
-        metric_row(ui, "Player state", snapshot.player_state.to_owned());
+        metric_row(ui, "Player state", snapshot.player_state.clone());
         let jobs = if snapshot.background_jobs.is_empty() {
             "none".to_owned()
         } else {
@@ -334,37 +525,62 @@ fn duration_ms(duration: Duration) -> f32 {
 
 #[cfg(all(debug_assertions, windows))]
 fn collect_process_metrics_sample() -> Option<ProcessMetricsSample> {
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    unsafe { collect_process_metrics_sample_for_handle(GetCurrentProcess()) }
+}
+
+#[cfg(all(debug_assertions, windows))]
+fn collect_process_metrics_sample_for_pid(pid: u32) -> Option<ProcessMetricsSample> {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::OpenProcess,
+    };
+
+    const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+    const PROCESS_VM_READ: u32 = 0x0010;
+
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
+        if process == 0 {
+            return None;
+        }
+        let sample = collect_process_metrics_sample_for_handle(process);
+        CloseHandle(process);
+        sample
+    }
+}
+
+#[cfg(all(debug_assertions, windows))]
+unsafe fn collect_process_metrics_sample_for_handle(process: windows_sys::Win32::Foundation::HANDLE) -> Option<ProcessMetricsSample> {
     use windows_sys::Win32::{
         Foundation::FILETIME,
         System::{
             ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
-            Threading::{GetCurrentProcess, GetProcessTimes},
+            Threading::GetProcessTimes,
         },
     };
 
-    unsafe {
-        let process = GetCurrentProcess();
-        let mut creation: FILETIME = std::mem::zeroed();
-        let mut exit: FILETIME = std::mem::zeroed();
-        let mut kernel: FILETIME = std::mem::zeroed();
-        let mut user: FILETIME = std::mem::zeroed();
-        if GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) == 0 {
-            return None;
-        }
-
-        let mut memory: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
-        memory.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-        if GetProcessMemoryInfo(process, &mut memory, memory.cb) == 0 {
-            return None;
-        }
-
-        Some(ProcessMetricsSample {
-            process_time_100ns: filetime_to_u64(kernel).saturating_add(filetime_to_u64(user)),
-            working_set_bytes: memory.WorkingSetSize as u64,
-            peak_working_set_bytes: memory.PeakWorkingSetSize as u64,
-            pagefile_bytes: memory.PagefileUsage as u64,
-        })
+    let mut creation: FILETIME = std::mem::zeroed();
+    let mut exit: FILETIME = std::mem::zeroed();
+    let mut kernel: FILETIME = std::mem::zeroed();
+    let mut user: FILETIME = std::mem::zeroed();
+    if GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) == 0 {
+        return None;
     }
+
+    let mut memory: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+    memory.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    if GetProcessMemoryInfo(process, &mut memory, memory.cb) == 0 {
+        return None;
+    }
+
+    Some(ProcessMetricsSample {
+        process_time_100ns: filetime_to_u64(kernel).saturating_add(filetime_to_u64(user)),
+        working_set_bytes: memory.WorkingSetSize as u64,
+        peak_working_set_bytes: memory.PeakWorkingSetSize as u64,
+        pagefile_bytes: memory.PagefileUsage as u64,
+    })
 }
 
 #[cfg(all(debug_assertions, windows))]
@@ -374,5 +590,10 @@ fn filetime_to_u64(value: windows_sys::Win32::Foundation::FILETIME) -> u64 {
 
 #[cfg(all(debug_assertions, not(windows)))]
 fn collect_process_metrics_sample() -> Option<ProcessMetricsSample> {
+    None
+}
+
+#[cfg(all(debug_assertions, not(windows)))]
+fn collect_process_metrics_sample_for_pid(_pid: u32) -> Option<ProcessMetricsSample> {
     None
 }

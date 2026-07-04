@@ -7,6 +7,10 @@ impl Drop for AudioOrbitApp {
         if let Some(player) = &mut self.player {
             player.stop();
         }
+        #[cfg(debug_assertions)]
+        if let Some(handle) = &mut self.dev_metrics_window {
+            handle.close();
+        }
         let _ = save_state(&self.state);
     }
 }
