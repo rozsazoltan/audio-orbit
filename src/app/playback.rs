@@ -480,15 +480,6 @@ impl AudioOrbitApp {
             .as_ref()
             .and_then(AudioPlayer::current_settings)
             .unwrap_or_else(|| self.current_settings());
-        if settings.skip_silence_enabled {
-            let Some(path) = self.active_track_path.clone() else {
-                return;
-            };
-            self.waveform_drag_position_seconds = None;
-            self.prepare_track_playback(path, self.active_track_index, seconds, 0.0, false);
-            return;
-        }
-
         let cached_waveform = self.current_waveform_for_seek();
         let known_duration_seconds = self
             .last_playback
@@ -500,6 +491,12 @@ impl AudioOrbitApp {
                     .as_ref()
                     .and_then(|path| self.known_duration_for_track(self.active_track_index, path))
             });
+
+        if settings.skip_silence_enabled {
+            self.seek_current_with_debounced_prepare(seconds, settings, cached_waveform, known_duration_seconds);
+            return;
+        }
+
         let Some(player) = &mut self.player else {
             return;
         };
@@ -510,6 +507,7 @@ impl AudioOrbitApp {
                 self.store_playback_metadata(&info);
                 self.last_playback = Some(info);
                 self.waveform_drag_position_seconds = None;
+                self.pending_seek_prepare = None;
                 self.persist_playback_session();
                 self.save_state_silently();
                 self.error_message = None;
@@ -519,6 +517,112 @@ impl AudioOrbitApp {
                 self.error_message = Some(error.to_string());
             }
         }
+    }
+
+    fn seek_current_with_debounced_prepare(
+        &mut self,
+        seconds: f32,
+        settings: DspSettings,
+        cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
+        known_duration_seconds: Option<f32>,
+    ) {
+        let Some(path) = self.active_track_path.clone() else {
+            return;
+        };
+        let playlist_index = self.active_playlist_index.unwrap_or(self.state.selected_playlist_index);
+        let index = self.active_track_index;
+        let Some(player) = &mut self.player else {
+            return;
+        };
+
+        match player.play_file_streaming_with_cached_waveform_and_crossfade(
+            &path,
+            settings,
+            seconds,
+            cached_waveform.clone(),
+            known_duration_seconds,
+            0.0,
+        ) {
+            Ok(info) => {
+                self.status_message = format!("Seeked to {}.", format_duration(seconds));
+                self.active_tab = MainContentTab::Music;
+                self.active_radio_index = None;
+                self.active_radio_station_name = None;
+                self.active_radio_title = None;
+                self.radio_started_at = None;
+                self.last_radio_title_lookup_at = None;
+                self.radio_title_receiver = None;
+                self.active_playlist_index = Some(playlist_index);
+                self.selected_track_index = index;
+                self.active_track_index = index;
+                self.active_track_path = Some(info.path.clone());
+                self.store_playback_metadata(&info);
+                self.remember_last_played_track(index, &info.path);
+                self.last_playback = Some(info);
+                self.waveform_drag_position_seconds = None;
+                self.error_message = None;
+
+                self.pending_seek_prepare = Some(PendingSeekPrepare {
+                    run_after: Instant::now() + SEEK_PREPARE_DEBOUNCE,
+                    requested_at: Instant::now(),
+                    playlist_index,
+                    index,
+                    path,
+                    start_seconds: seconds,
+                    settings,
+                    cached_waveform,
+                });
+                // Drop any pending prepared result from an older seek. The running worker may finish,
+                // but its result will no longer be applied over the latest audible seek position.
+                self.pending_prepared_track_receiver = None;
+                self.persist_playback_session();
+            }
+            Err(error) => {
+                self.error_message = Some(error.to_string());
+                self.waveform_drag_position_seconds = None;
+            }
+        }
+    }
+
+    pub(crate) fn process_pending_seek_prepare(&mut self) {
+        let Some(pending) = self.pending_seek_prepare.as_ref() else {
+            return;
+        };
+        if Instant::now() < pending.run_after {
+            return;
+        }
+
+        let pending = self.pending_seek_prepare.take().expect("pending seek prepare was checked above");
+        if self
+            .active_track_path
+            .as_ref()
+            .map(|path| !same_path(path, &pending.path))
+            .unwrap_or(true)
+        {
+            return;
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        self.pending_prepared_track_receiver = Some(receiver);
+        thread::spawn(move || {
+            let result = AudioPlayer::prepare_file_with_cached_waveform(
+                pending.path,
+                pending.settings,
+                pending.start_seconds,
+                pending.cached_waveform,
+            )
+            .map(|prepared| PreparedTrackPlayback {
+                playlist_index: pending.playlist_index,
+                index: pending.index,
+                crossfade_seconds: 0.0,
+                live_position_compensation: true,
+                background_upgrade: true,
+                prepared,
+                requested_at: pending.requested_at,
+            })
+            .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
     }
     pub(crate) fn schedule_current_profile_apply(&mut self) {
         self.pending_profile_apply_at = Some(Instant::now() + Duration::from_secs(3));

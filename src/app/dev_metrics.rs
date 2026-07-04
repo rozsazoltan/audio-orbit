@@ -359,6 +359,9 @@ impl AudioOrbitApp {
         if self.pending_prepared_track_receiver.is_some() {
             jobs.push("audio prepare".to_owned());
         }
+        if self.pending_seek_prepare.is_some() {
+            jobs.push("seek prepare debounce".to_owned());
+        }
         if self.pending_folder_scan_receiver.is_some() {
             jobs.push("folder scan".to_owned());
         }
