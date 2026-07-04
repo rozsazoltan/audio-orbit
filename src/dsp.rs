@@ -137,6 +137,26 @@ pub fn render_orbit_to_stereo_with_cached_waveform(
     start_seconds: f32,
     cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
 ) -> (Vec<f32>, RenderInfo) {
+    render_orbit_to_stereo_with_cached_analysis(
+        input_samples,
+        input_channels,
+        sample_rate,
+        settings,
+        start_seconds,
+        cached_waveform,
+        None,
+    )
+}
+
+pub fn render_orbit_to_stereo_with_cached_analysis(
+    input_samples: &[f32],
+    input_channels: u16,
+    sample_rate: u32,
+    settings: DspSettings,
+    start_seconds: f32,
+    cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
+    cached_silence_ranges: Option<Vec<(f32, f32)>>,
+) -> (Vec<f32>, RenderInfo) {
     let channels = input_channels.max(1) as usize;
     let frame_count = input_samples.len() / channels;
     let mono = downmix_to_mono(input_samples, channels, frame_count);
@@ -147,18 +167,22 @@ pub fn render_orbit_to_stereo_with_cached_waveform(
 
     let output_level = settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
     let skip_ranges = if settings.skip_silence_enabled {
-        let trigger_millis = if settings.silence_trigger_millis == 0 {
-            settings.silence_threshold_seconds.max(1) as u16 * 1000
+        if let Some(cached_ranges) = cached_silence_ranges {
+            silence_seconds_to_frames(&cached_ranges, sample_rate, frame_count)
         } else {
-            settings.silence_trigger_millis
-        };
-        detect_silence_ranges(
-            &mono,
-            sample_rate,
-            trigger_millis,
-            settings.silence_threshold_db,
-            settings.silence_trim_end_regardless_of_duration,
-        )
+            let trigger_millis = if settings.silence_trigger_millis == 0 {
+                settings.silence_threshold_seconds.max(1) as u16 * 1000
+            } else {
+                settings.silence_trigger_millis
+            };
+            detect_silence_ranges(
+                &mono,
+                sample_rate,
+                trigger_millis,
+                settings.silence_threshold_db,
+                settings.silence_trim_end_regardless_of_duration,
+            )
+        }
     } else {
         Vec::new()
     };
@@ -173,10 +197,9 @@ pub fn render_orbit_to_stereo_with_cached_waveform(
 
     let silence_ranges = skip_ranges
         .iter()
-        .filter(|(_, end)| *end > start_frame)
         .map(|(start, end)| {
             (
-                (*start).max(start_frame) as f32 / sample_rate.max(1) as f32,
+                *start as f32 / sample_rate.max(1) as f32,
                 *end as f32 / sample_rate.max(1) as f32,
             )
         })
@@ -364,6 +387,31 @@ fn automatic_silence_floor(samples: &[f32]) -> f32 {
 
 fn db_to_linear_threshold(db: i16) -> f32 {
     10.0_f32.powf(db.clamp(-96, -12) as f32 / 20.0)
+}
+
+fn silence_seconds_to_frames(
+    ranges: &[(f32, f32)],
+    sample_rate: u32,
+    frame_count: usize,
+) -> Vec<(usize, usize)> {
+    if ranges.is_empty() || sample_rate == 0 || frame_count == 0 {
+        return Vec::new();
+    }
+
+    let sample_rate = sample_rate.max(1) as f32;
+    ranges
+        .iter()
+        .filter_map(|(start, end)| {
+            if !start.is_finite() || !end.is_finite() || end <= start {
+                return None;
+            }
+            let start_frame = (start.max(0.0) * sample_rate).round() as usize;
+            let end_frame = (end.max(0.0) * sample_rate).round() as usize;
+            let start_frame = start_frame.min(frame_count);
+            let end_frame = end_frame.min(frame_count);
+            (end_frame > start_frame).then_some((start_frame, end_frame))
+        })
+        .collect()
 }
 
 fn detect_silence_ranges(

@@ -52,6 +52,8 @@ const PLAYBACK_REPAINT_INTERVAL: Duration = Duration::from_millis(250);
 const BACKGROUND_WORK_REPAINT_INTERVAL: Duration = Duration::from_millis(160);
 const STATUS_REPAINT_INTERVAL: Duration = Duration::from_millis(500);
 const IDLE_REPAINT_INTERVAL: Duration = Duration::from_millis(1000);
+const SEEK_PREPARE_DEBOUNCE: Duration = Duration::from_millis(700);
+const FAST_SEEK_COALESCE_INTERVAL: Duration = Duration::from_millis(140);
 
 fn min_window_size_for_mode(player_only_mode: bool) -> egui::Vec2 {
     if player_only_mode {
@@ -174,6 +176,47 @@ struct PreparedTrackPlayback {
 }
 
 #[derive(Clone, Debug)]
+struct PendingSeekPrepare {
+    run_after: Instant,
+    requested_at: Instant,
+    playlist_index: usize,
+    index: Option<usize>,
+    path: PathBuf,
+    start_seconds: f32,
+    settings: DspSettings,
+    cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
+    cached_silence_ranges: Option<Vec<(f32, f32)>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SilenceSettingsFingerprint {
+    skip_silence_enabled: bool,
+    trigger_millis: u16,
+    threshold_db: i16,
+    trim_end_regardless_of_duration: bool,
+}
+
+#[derive(Clone, Debug)]
+struct SilenceAnalysisCacheEntry {
+    file_len: Option<u64>,
+    modified_nanos: Option<u128>,
+    settings: SilenceSettingsFingerprint,
+    ranges: Vec<(f32, f32)>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingFastSeek {
+    run_after: Instant,
+    playlist_index: usize,
+    index: Option<usize>,
+    path: PathBuf,
+    position_seconds: f32,
+    settings: DspSettings,
+    known_duration_seconds: Option<f32>,
+    prepare_after_streaming: bool,
+}
+
+#[derive(Clone, Debug)]
 enum PendingFolderScanKind {
     Import {
         name: String,
@@ -286,6 +329,10 @@ struct AudioOrbitApp {
     crossfade_started_for_path: Option<PathBuf>,
     pending_track_switch: Option<PendingTrackSwitch>,
     pending_prepared_track_receiver: Option<mpsc::Receiver<Result<PreparedTrackPlayback, String>>>,
+    pending_seek_prepare: Option<PendingSeekPrepare>,
+    pending_fast_seek: Option<PendingFastSeek>,
+    last_fast_seek_started_at: Option<Instant>,
+    silence_analysis_cache: BTreeMap<PathBuf, SilenceAnalysisCacheEntry>,
     pending_folder_scan_receiver: Option<mpsc::Receiver<Result<PendingFolderScanResult, String>>>,
     pending_profile_apply_at: Option<Instant>,
     profile_apply_applied_until: Option<Instant>,

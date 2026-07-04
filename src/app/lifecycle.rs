@@ -74,6 +74,8 @@ impl AudioOrbitApp {
 
     fn has_background_ui_work(&self) -> bool {
         self.pending_prepared_track_receiver.is_some()
+            || self.pending_fast_seek.is_some()
+            || self.pending_seek_prepare.is_some()
             || self.pending_folder_scan_receiver.is_some()
             || self.update_check_receiver.is_some()
             || self.update_install_receiver.is_some()
@@ -107,6 +109,8 @@ impl eframe::App for AudioOrbitApp {
         self.refresh_radio_title_periodically();
         self.process_pending_profile_apply();
         self.process_folder_scan_events();
+        self.process_pending_fast_seek();
+        self.process_pending_seek_prepare();
         self.process_prepared_track_playback();
         self.process_pending_track_switch();
         self.update_playback_status();

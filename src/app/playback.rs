@@ -103,6 +103,101 @@ impl AudioOrbitApp {
             .and_then(|track| track.metadata.duration_seconds)
             .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
     }
+    fn silence_settings_fingerprint(settings: DspSettings) -> SilenceSettingsFingerprint {
+        let trigger_millis = if settings.silence_trigger_millis == 0 {
+            settings.silence_threshold_seconds.max(1) as u16 * 1000
+        } else {
+            settings.silence_trigger_millis
+        };
+
+        SilenceSettingsFingerprint {
+            skip_silence_enabled: settings.skip_silence_enabled,
+            trigger_millis,
+            threshold_db: settings.silence_threshold_db,
+            trim_end_regardless_of_duration: settings.silence_trim_end_regardless_of_duration,
+        }
+    }
+    fn audio_file_cache_identity(path: &Path) -> (Option<u64>, Option<u128>) {
+        let Ok(metadata) = fs::metadata(path) else {
+            return (None, None);
+        };
+
+        let modified_nanos = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos());
+
+        (Some(metadata.len()), modified_nanos)
+    }
+    pub(crate) fn cached_silence_ranges_for_track(
+        &self,
+        path: &Path,
+        settings: DspSettings,
+    ) -> Option<Vec<(f32, f32)>> {
+        if !settings.skip_silence_enabled {
+            return None;
+        }
+
+        let entry = self.silence_analysis_cache.get(path)?;
+        let (file_len, modified_nanos) = Self::audio_file_cache_identity(path);
+        let settings = Self::silence_settings_fingerprint(settings);
+        if entry.file_len == file_len && entry.modified_nanos == modified_nanos && entry.settings == settings {
+            Some(entry.ranges.clone())
+        } else {
+            None
+        }
+    }
+    fn silence_adjusted_seek_position(seconds: f32, silence_ranges: Option<&[(f32, f32)]>) -> f32 {
+        let mut position = if seconds.is_finite() { seconds.max(0.0) } else { 0.0 };
+        let Some(ranges) = silence_ranges else {
+            return position;
+        };
+
+        for _ in 0..8 {
+            let previous = position;
+            for (start, end) in ranges {
+                if *end > *start && position >= *start && position < *end {
+                    position = *end;
+                }
+            }
+            if (position - previous).abs() < 0.001 {
+                break;
+            }
+        }
+
+        position
+    }
+
+    pub(crate) fn remember_silence_ranges_for_track(
+        &mut self,
+        path: &Path,
+        settings: DspSettings,
+        ranges: Vec<(f32, f32)>,
+    ) {
+        if !settings.skip_silence_enabled {
+            return;
+        }
+
+        let (file_len, modified_nanos) = Self::audio_file_cache_identity(path);
+        self.silence_analysis_cache.insert(
+            path.to_path_buf(),
+            SilenceAnalysisCacheEntry {
+                file_len,
+                modified_nanos,
+                settings: Self::silence_settings_fingerprint(settings),
+                ranges,
+            },
+        );
+
+        const MAX_SILENCE_ANALYSIS_CACHE_ENTRIES: usize = 256;
+        while self.silence_analysis_cache.len() > MAX_SILENCE_ANALYSIS_CACHE_ENTRIES {
+            let Some(oldest_key) = self.silence_analysis_cache.keys().next().cloned() else {
+                break;
+            };
+            self.silence_analysis_cache.remove(&oldest_key);
+        }
+    }
     pub(crate) fn prepare_track_playback(
         &mut self,
         path: PathBuf,
@@ -119,6 +214,8 @@ impl AudioOrbitApp {
         let settings = self.current_settings();
         let playlist_index = self.state.selected_playlist_index;
         let cached_waveform = self.cached_waveform_for_track(index, &path);
+        let cached_silence_ranges = self.cached_silence_ranges_for_track(&path, settings);
+        let start_seconds = Self::silence_adjusted_seek_position(start_seconds, cached_silence_ranges.as_deref());
         let known_duration_seconds = self.known_duration_for_track(index, &path);
 
         if !settings.skip_silence_enabled {
@@ -132,12 +229,16 @@ impl AudioOrbitApp {
                     settings,
                     start_seconds,
                     cached_waveform,
+                    None,
                     known_duration_seconds,
                     crossfade_seconds,
                 );
 
             match result {
-                Ok(info) => {
+                Ok(mut info) => {
+                    if let Some(ranges) = cached_silence_ranges.clone() {
+                        info.silence_ranges = ranges;
+                    }
                     let mode_label = if settings.orbit_enabled {
                         settings.mode.label()
                     } else {
@@ -194,6 +295,7 @@ impl AudioOrbitApp {
                 settings,
                 start_seconds,
                 cached_waveform.clone(),
+                cached_silence_ranges.clone(),
                 known_duration_seconds,
                 crossfade_seconds,
             );
@@ -201,7 +303,10 @@ impl AudioOrbitApp {
         let mut quick_started = false;
         let mut requested_at = Instant::now();
         match fast_result {
-            Ok(info) => {
+            Ok(mut info) => {
+                if let Some(ranges) = cached_silence_ranges.clone() {
+                    info.silence_ranges = ranges;
+                }
                 quick_started = true;
                 requested_at = Instant::now();
                 let mode_label = if settings.orbit_enabled {
@@ -270,7 +375,13 @@ impl AudioOrbitApp {
         self.error_message = if quick_started { None } else { self.error_message.take() };
 
         thread::spawn(move || {
-            let result = AudioPlayer::prepare_file_with_cached_waveform(path_for_thread, settings, start_seconds, cached_waveform)
+            let result = AudioPlayer::prepare_file_with_cached_analysis(
+                path_for_thread,
+                settings,
+                start_seconds,
+                cached_waveform,
+                cached_silence_ranges,
+            )
                 .map(|prepared| PreparedTrackPlayback {
                     playlist_index,
                     index,
@@ -317,6 +428,14 @@ impl AudioOrbitApp {
             prepared: prepared_audio,
             requested_at,
         } = prepared;
+
+        let (prepared_path, prepared_settings, prepared_silence_ranges) =
+            prepared_audio.silence_analysis_cache_data();
+        self.remember_silence_ranges_for_track(
+            prepared_path,
+            prepared_settings,
+            prepared_silence_ranges,
+        );
 
         let Some(player) = &mut self.player else {
             self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
@@ -480,16 +599,6 @@ impl AudioOrbitApp {
             .as_ref()
             .and_then(AudioPlayer::current_settings)
             .unwrap_or_else(|| self.current_settings());
-        if settings.skip_silence_enabled {
-            let Some(path) = self.active_track_path.clone() else {
-                return;
-            };
-            self.waveform_drag_position_seconds = None;
-            self.prepare_track_playback(path, self.active_track_index, seconds, 0.0, false);
-            return;
-        }
-
-        let cached_waveform = self.current_waveform_for_seek();
         let known_duration_seconds = self
             .last_playback
             .as_ref()
@@ -500,25 +609,235 @@ impl AudioOrbitApp {
                     .as_ref()
                     .and_then(|path| self.known_duration_for_track(self.active_track_index, path))
             });
+
+        self.schedule_or_run_fast_seek(
+            seconds,
+            settings,
+            known_duration_seconds,
+            settings.skip_silence_enabled,
+        );
+    }
+
+    fn schedule_or_run_fast_seek(
+        &mut self,
+        seconds: f32,
+        settings: DspSettings,
+        known_duration_seconds: Option<f32>,
+        prepare_after_streaming: bool,
+    ) {
+        let Some(path) = self.active_track_path.clone() else {
+            return;
+        };
+        let Some(player) = self.player.as_ref() else {
+            return;
+        };
+        if !(player.is_playing() || player.is_paused()) {
+            return;
+        }
+
+        let duration = known_duration_seconds.unwrap_or_else(|| self.displayed_playback_duration_seconds());
+        let requested_position_seconds = if duration.is_finite() && duration > 0.0 {
+            seconds.clamp(0.0, duration)
+        } else {
+            seconds.max(0.0)
+        };
+        let cached_silence_ranges = self.cached_silence_ranges_for_track(&path, settings);
+        let position_seconds = Self::silence_adjusted_seek_position(
+            requested_position_seconds,
+            cached_silence_ranges.as_deref(),
+        );
+        let now = Instant::now();
+        let playlist_index = self.active_playlist_index.unwrap_or(self.state.selected_playlist_index);
+        let index = self.active_track_index;
+
+        // Any new seek makes older prepared results stale. The user-visible path is the
+        // fast streaming seek; heavier processed playback is only allowed to catch up
+        // after the final settled seek target.
+        self.pending_seek_prepare = None;
+        self.pending_prepared_track_receiver = None;
+
+        let can_restart_now = self.pending_fast_seek.is_none()
+            && self
+                .last_fast_seek_started_at
+                .map(|started| now.saturating_duration_since(started) >= FAST_SEEK_COALESCE_INTERVAL)
+                .unwrap_or(true);
+
+        if can_restart_now {
+            self.execute_fast_streaming_seek(
+                path,
+                playlist_index,
+                index,
+                position_seconds,
+                settings,
+                known_duration_seconds,
+                prepare_after_streaming,
+            );
+            return;
+        }
+
+        self.pending_fast_seek = Some(PendingFastSeek {
+            run_after: now + FAST_SEEK_COALESCE_INTERVAL,
+            playlist_index,
+            index,
+            path,
+            position_seconds,
+            settings,
+            known_duration_seconds,
+            prepare_after_streaming,
+        });
+        self.status_message = format!("Seek to {}...", format_duration(position_seconds));
+        self.status_updated_at = now;
+        self.waveform_drag_position_seconds = None;
+        self.persist_playback_session();
+    }
+
+    fn execute_fast_streaming_seek(
+        &mut self,
+        path: PathBuf,
+        playlist_index: usize,
+        index: Option<usize>,
+        seconds: f32,
+        settings: DspSettings,
+        known_duration_seconds: Option<f32>,
+        prepare_after_streaming: bool,
+    ) {
+        let cached_waveform = self.current_waveform_for_seek();
+        let cached_silence_ranges = self.cached_silence_ranges_for_track(&path, settings);
         let Some(player) = &mut self.player else {
             return;
         };
+        self.last_fast_seek_started_at = Some(Instant::now());
 
-        match player.seek_current_with_cached_waveform(seconds, cached_waveform, known_duration_seconds) {
-            Ok(Some(info)) => {
+        match player.play_file_streaming_with_cached_waveform_and_crossfade(
+            &path,
+            settings,
+            seconds,
+            cached_waveform.clone(),
+            cached_silence_ranges.clone(),
+            known_duration_seconds,
+            0.0,
+        ) {
+            Ok(mut info) => {
+                if let Some(ranges) = cached_silence_ranges.clone() {
+                    info.silence_ranges = ranges;
+                }
                 self.status_message = format!("Seeked to {}.", format_duration(seconds));
+                self.status_updated_at = Instant::now();
+                self.active_tab = MainContentTab::Music;
+                self.active_radio_index = None;
+                self.active_radio_station_name = None;
+                self.active_radio_title = None;
+                self.radio_started_at = None;
+                self.last_radio_title_lookup_at = None;
+                self.radio_title_receiver = None;
+                self.active_playlist_index = Some(playlist_index);
+                self.selected_track_index = index;
+                self.active_track_index = index;
+                self.active_track_path = Some(info.path.clone());
                 self.store_playback_metadata(&info);
+                self.remember_last_played_track(index, &info.path);
                 self.last_playback = Some(info);
                 self.waveform_drag_position_seconds = None;
-                self.persist_playback_session();
-                self.save_state_silently();
+                self.pending_fast_seek = None;
                 self.error_message = None;
+
+                if prepare_after_streaming {
+                    self.pending_seek_prepare = Some(PendingSeekPrepare {
+                        run_after: Instant::now() + SEEK_PREPARE_DEBOUNCE,
+                        requested_at: Instant::now(),
+                        playlist_index,
+                        index,
+                        path,
+                        start_seconds: seconds,
+                        settings,
+                        cached_waveform,
+                        cached_silence_ranges,
+                    });
+                } else {
+                    self.pending_seek_prepare = None;
+                }
+
+                self.persist_playback_session();
+                if !prepare_after_streaming {
+                    self.save_state_silently();
+                }
             }
-            Ok(None) => {}
             Err(error) => {
                 self.error_message = Some(error.to_string());
+                self.waveform_drag_position_seconds = None;
             }
         }
+    }
+
+    pub(crate) fn process_pending_fast_seek(&mut self) {
+        let Some(pending) = self.pending_fast_seek.as_ref() else {
+            return;
+        };
+        if Instant::now() < pending.run_after {
+            return;
+        }
+
+        let pending = self.pending_fast_seek.take().expect("pending fast seek was checked above");
+        if self
+            .active_track_path
+            .as_ref()
+            .map(|path| !same_path(path, &pending.path))
+            .unwrap_or(true)
+        {
+            return;
+        }
+
+        self.execute_fast_streaming_seek(
+            pending.path,
+            pending.playlist_index,
+            pending.index,
+            pending.position_seconds,
+            pending.settings,
+            pending.known_duration_seconds,
+            pending.prepare_after_streaming,
+        );
+    }
+
+    pub(crate) fn process_pending_seek_prepare(&mut self) {
+        let Some(pending) = self.pending_seek_prepare.as_ref() else {
+            return;
+        };
+        if Instant::now() < pending.run_after {
+            return;
+        }
+
+        let pending = self.pending_seek_prepare.take().expect("pending seek prepare was checked above");
+        if self
+            .active_track_path
+            .as_ref()
+            .map(|path| !same_path(path, &pending.path))
+            .unwrap_or(true)
+        {
+            return;
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        self.pending_prepared_track_receiver = Some(receiver);
+        thread::spawn(move || {
+            let result = AudioPlayer::prepare_file_with_cached_analysis(
+                pending.path,
+                pending.settings,
+                pending.start_seconds,
+                pending.cached_waveform,
+                pending.cached_silence_ranges,
+            )
+            .map(|prepared| PreparedTrackPlayback {
+                playlist_index: pending.playlist_index,
+                index: pending.index,
+                crossfade_seconds: 0.0,
+                live_position_compensation: true,
+                background_upgrade: true,
+                prepared,
+                requested_at: pending.requested_at,
+            })
+            .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
     }
     pub(crate) fn schedule_current_profile_apply(&mut self) {
         self.pending_profile_apply_at = Some(Instant::now() + Duration::from_secs(3));
@@ -643,6 +962,10 @@ impl AudioOrbitApp {
         if let Some(pending) = &self.pending_track_switch {
             let elapsed = pending.started_at.elapsed().as_secs_f32();
             return (pending.previous_position + elapsed).min(pending.previous_duration);
+        }
+
+        if let Some(pending) = &self.pending_fast_seek {
+            return pending.position_seconds;
         }
 
         let Some(player) = self.player.as_ref() else {
