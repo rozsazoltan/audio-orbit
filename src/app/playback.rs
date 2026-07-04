@@ -148,6 +148,27 @@ impl AudioOrbitApp {
             None
         }
     }
+    fn silence_adjusted_seek_position(seconds: f32, silence_ranges: Option<&[(f32, f32)]>) -> f32 {
+        let mut position = if seconds.is_finite() { seconds.max(0.0) } else { 0.0 };
+        let Some(ranges) = silence_ranges else {
+            return position;
+        };
+
+        for _ in 0..8 {
+            let previous = position;
+            for (start, end) in ranges {
+                if *end > *start && position >= *start && position < *end {
+                    position = *end;
+                }
+            }
+            if (position - previous).abs() < 0.001 {
+                break;
+            }
+        }
+
+        position
+    }
+
     pub(crate) fn remember_silence_ranges_for_track(
         &mut self,
         path: &Path,
@@ -194,6 +215,7 @@ impl AudioOrbitApp {
         let playlist_index = self.state.selected_playlist_index;
         let cached_waveform = self.cached_waveform_for_track(index, &path);
         let cached_silence_ranges = self.cached_silence_ranges_for_track(&path, settings);
+        let start_seconds = Self::silence_adjusted_seek_position(start_seconds, cached_silence_ranges.as_deref());
         let known_duration_seconds = self.known_duration_for_track(index, &path);
 
         if !settings.skip_silence_enabled {
@@ -207,6 +229,7 @@ impl AudioOrbitApp {
                     settings,
                     start_seconds,
                     cached_waveform,
+                    None,
                     known_duration_seconds,
                     crossfade_seconds,
                 );
@@ -272,6 +295,7 @@ impl AudioOrbitApp {
                 settings,
                 start_seconds,
                 cached_waveform.clone(),
+                cached_silence_ranges.clone(),
                 known_duration_seconds,
                 crossfade_seconds,
             );
@@ -612,11 +636,16 @@ impl AudioOrbitApp {
         }
 
         let duration = known_duration_seconds.unwrap_or_else(|| self.displayed_playback_duration_seconds());
-        let position_seconds = if duration.is_finite() && duration > 0.0 {
+        let requested_position_seconds = if duration.is_finite() && duration > 0.0 {
             seconds.clamp(0.0, duration)
         } else {
             seconds.max(0.0)
         };
+        let cached_silence_ranges = self.cached_silence_ranges_for_track(&path, settings);
+        let position_seconds = Self::silence_adjusted_seek_position(
+            requested_position_seconds,
+            cached_silence_ranges.as_deref(),
+        );
         let now = Instant::now();
         let playlist_index = self.active_playlist_index.unwrap_or(self.state.selected_playlist_index);
         let index = self.active_track_index;
@@ -648,7 +677,6 @@ impl AudioOrbitApp {
 
         self.pending_fast_seek = Some(PendingFastSeek {
             run_after: now + FAST_SEEK_COALESCE_INTERVAL,
-            requested_at: now,
             playlist_index,
             index,
             path,
@@ -685,6 +713,7 @@ impl AudioOrbitApp {
             settings,
             seconds,
             cached_waveform.clone(),
+            cached_silence_ranges.clone(),
             known_duration_seconds,
             0.0,
         ) {

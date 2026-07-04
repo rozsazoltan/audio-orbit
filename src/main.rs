@@ -207,7 +207,6 @@ struct SilenceAnalysisCacheEntry {
 #[derive(Clone, Debug)]
 struct PendingFastSeek {
     run_after: Instant,
-    requested_at: Instant,
     playlist_index: usize,
     index: Option<usize>,
     path: PathBuf,

@@ -341,6 +341,47 @@ fn fill_radio_waveform_gaps(values: &mut [f32]) {
     }
 }
 
+fn silence_adjusted_position(seconds: f32, silence_ranges: Option<&[(f32, f32)]>) -> f32 {
+    let mut position = if seconds.is_finite() { seconds.max(0.0) } else { 0.0 };
+    let Some(ranges) = silence_ranges else {
+        return position;
+    };
+
+    for _ in 0..8 {
+        let previous = position;
+        for (start, end) in ranges {
+            if *end > *start && position >= *start && position < *end {
+                position = *end;
+            }
+        }
+        if (position - previous).abs() < 0.001 {
+            break;
+        }
+    }
+
+    position
+}
+
+fn silence_ranges_to_frame_ranges(ranges: Option<&[(f32, f32)]>, sample_rate: u32) -> Vec<(u64, u64)> {
+    let Some(ranges) = ranges else {
+        return Vec::new();
+    };
+    let sample_rate = sample_rate.max(1) as f32;
+    let mut frame_ranges = ranges
+        .iter()
+        .filter_map(|(start, end)| {
+            if !start.is_finite() || !end.is_finite() || *end <= *start {
+                return None;
+            }
+            let start_frame = (*start * sample_rate).round().max(0.0) as u64;
+            let end_frame = (*end * sample_rate).round().max(0.0) as u64;
+            (end_frame > start_frame).then_some((start_frame, end_frame))
+        })
+        .collect::<Vec<_>>();
+    frame_ranges.sort_by_key(|(start, _)| *start);
+    frame_ranges
+}
+
 struct LiveFileSource<S> {
     inner: S,
     settings: DspSettings,
@@ -351,27 +392,33 @@ struct LiveFileSource<S> {
     output_channel: usize,
     cached_gains: LiveOrbitGains,
     cached_gains_until_frame: u64,
+    skip_ranges: Vec<(u64, u64)>,
+    skip_index: usize,
 }
 
 impl<S: Source<Item = f32>> LiveFileSource<S> {
-    fn new(inner: S, settings: DspSettings, start_seconds: f32) -> Self {
+    fn new(inner: S, settings: DspSettings, start_seconds: f32, silence_ranges: Option<Vec<(f32, f32)>>) -> Self {
         let input_channels = inner.channels().max(1);
         let sample_rate = inner.sample_rate().max(1);
-        let start_seconds = if start_seconds.is_finite() {
-            start_seconds.max(0.0)
-        } else {
-            0.0
-        };
+        let start_seconds = silence_adjusted_position(start_seconds, silence_ranges.as_deref());
+        let frame_index = (start_seconds * sample_rate as f32).round().max(0.0) as u64;
+        let skip_ranges = silence_ranges_to_frame_ranges(silence_ranges.as_deref(), sample_rate);
+        let skip_index = skip_ranges
+            .iter()
+            .position(|(_, end)| *end > frame_index)
+            .unwrap_or(skip_ranges.len());
         Self {
             inner,
             settings,
             input_channels,
             sample_rate,
-            frame_index: (start_seconds * sample_rate as f32).round().max(0.0) as u64,
+            frame_index,
             output_frame: [0.0, 0.0],
             output_channel: 2,
             cached_gains: LiveOrbitGains::default(),
             cached_gains_until_frame: 0,
+            skip_ranges,
+            skip_index,
         }
     }
 
@@ -383,6 +430,42 @@ impl<S: Source<Item = f32>> LiveFileSource<S> {
                 .saturating_add(LIVE_ORBIT_GAIN_UPDATE_FRAMES);
         }
         self.cached_gains
+    }
+
+    fn discard_input_frame(&mut self) -> bool {
+        let channels = self.input_channels.max(1) as usize;
+        let mut read_any = false;
+        for _ in 0..channels {
+            if self.inner.next().is_some() {
+                read_any = true;
+            } else {
+                break;
+            }
+        }
+        read_any
+    }
+
+    fn skip_silent_frames_if_needed(&mut self) -> bool {
+        loop {
+            let Some((start, end)) = self.skip_ranges.get(self.skip_index).copied() else {
+                return true;
+            };
+            if self.frame_index >= end {
+                self.skip_index += 1;
+                continue;
+            }
+            if self.frame_index < start {
+                return true;
+            }
+
+            while self.frame_index < end {
+                if !self.discard_input_frame() {
+                    return false;
+                }
+                self.frame_index = self.frame_index.saturating_add(1);
+            }
+            self.skip_index += 1;
+        }
     }
 
     fn read_input_frame(&mut self) -> Option<([f32; 2], f32)> {
@@ -442,6 +525,10 @@ impl<S: Source<Item = f32>> Iterator for LiveFileSource<S> {
             let sample = self.output_frame[self.output_channel];
             self.output_channel += 1;
             return Some(sample);
+        }
+
+        if !self.skip_silent_frames_if_needed() {
+            return None;
         }
 
         let (stereo, mono) = self.read_input_frame()?;
@@ -945,30 +1032,13 @@ impl AudioPlayer {
     }
 
 
-    pub fn play_file_streaming_with_cached_waveform(
-        &mut self,
-        path: &Path,
-        settings: DspSettings,
-        start_seconds: f32,
-        cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
-        known_duration_seconds: Option<f32>,
-    ) -> Result<PlaybackInfo> {
-        self.play_file_streaming_with_cached_waveform_and_crossfade(
-            path,
-            settings,
-            start_seconds,
-            cached_waveform,
-            known_duration_seconds,
-            0.0,
-        )
-    }
-
     pub fn play_file_streaming_with_cached_waveform_and_crossfade(
         &mut self,
         path: &Path,
         settings: DspSettings,
         start_seconds: f32,
         cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
+        cached_silence_ranges: Option<Vec<(f32, f32)>>,
         known_duration_seconds: Option<f32>,
         crossfade_seconds: f32,
     ) -> Result<PlaybackInfo> {
@@ -981,6 +1051,7 @@ impl AudioPlayer {
         } else {
             0.0
         };
+        let start_seconds = silence_adjusted_position(start_seconds, cached_silence_ranges.as_deref());
         let file = File::open(path)
             .with_context(|| format!("failed to open audio file: {}", path.display()))?;
         let mut decoder = Decoder::new(BufReader::new(file))
@@ -1019,6 +1090,7 @@ impl AudioPlayer {
                 sample_rate,
                 waveform,
                 waveform_brightness,
+                cached_silence_ranges.clone(),
                 crossfade_seconds,
             );
         }
@@ -1035,6 +1107,7 @@ impl AudioPlayer {
             sample_rate,
             waveform,
             waveform_brightness,
+            cached_silence_ranges,
             crossfade_seconds,
         )
     }
@@ -1050,6 +1123,7 @@ impl AudioPlayer {
         sample_rate: u32,
         waveform: Vec<f32>,
         waveform_brightness: Vec<f32>,
+        cached_silence_ranges: Option<Vec<(f32, f32)>>,
         crossfade_seconds: f32,
     ) -> Result<PlaybackInfo>
     where
@@ -1058,7 +1132,7 @@ impl AudioPlayer {
         let remaining_duration = total_duration
             .map(|duration| duration.saturating_sub(Duration::from_secs_f32(start_seconds)))
             .unwrap_or(Duration::ZERO);
-        let source = LiveFileSource::new(source, settings, start_seconds);
+        let source = LiveFileSource::new(source, settings, start_seconds, cached_silence_ranges.clone());
         let fade_seconds = crossfade_seconds.max(0.0);
 
         if fade_seconds > 0.05 {
@@ -1101,19 +1175,6 @@ impl AudioPlayer {
             waveform_brightness,
             silence_ranges: Vec::new(),
         })
-    }
-
-    pub fn prepare_file(path: PathBuf, settings: DspSettings, start_seconds: f32) -> Result<PreparedPlayback> {
-        Self::prepare_file_with_cached_waveform(path, settings, start_seconds, None)
-    }
-
-    pub fn prepare_file_with_cached_waveform(
-        path: PathBuf,
-        settings: DspSettings,
-        start_seconds: f32,
-        cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
-    ) -> Result<PreparedPlayback> {
-        Self::prepare_file_with_cached_analysis(path, settings, start_seconds, cached_waveform, None)
     }
 
     pub fn prepare_file_with_cached_analysis(
@@ -1187,16 +1248,6 @@ impl AudioPlayer {
         Ok(playback_info(&prepared.path, prepared.render_info))
     }
 
-    pub fn play_file_with_orbit_from(
-        &mut self,
-        path: &Path,
-        settings: DspSettings,
-        start_seconds: f32,
-    ) -> Result<PlaybackInfo> {
-        let prepared = Self::prepare_file(path.to_path_buf(), settings, start_seconds)?;
-        self.play_prepared(prepared)
-    }
-
     pub fn crossfade_to_prepared(
         &mut self,
         mut prepared: PreparedPlayback,
@@ -1228,28 +1279,6 @@ impl AudioPlayer {
         )?;
 
         Ok(playback_info(&prepared.path, prepared.render_info))
-    }
-
-    pub fn seek_current_with_cached_waveform(
-        &mut self,
-        seconds: f32,
-        cached_waveform: Option<(Vec<f32>, Vec<f32>)>,
-        known_duration_seconds: Option<f32>,
-    ) -> Result<Option<PlaybackInfo>> {
-        let Some(path) = self.current_path.clone() else {
-            return Ok(None);
-        };
-        let Some(settings) = self.current_settings else {
-            return Ok(None);
-        };
-
-        if !settings.skip_silence_enabled {
-            return self
-                .play_file_streaming_with_cached_waveform(&path, settings, seconds, cached_waveform, known_duration_seconds)
-                .map(Some);
-        }
-
-        self.play_file_with_orbit_from(&path, settings, seconds).map(Some)
     }
 
     pub fn stop(&mut self) {
