@@ -405,10 +405,12 @@ impl AudioOrbitApp {
             requested_at,
         } = prepared;
 
+        let (prepared_path, prepared_settings, prepared_silence_ranges) =
+            prepared_audio.silence_analysis_cache_data();
         self.remember_silence_ranges_for_track(
-            &prepared_audio.path,
-            prepared_audio.settings,
-            prepared_audio.render_info.silence_ranges.clone(),
+            prepared_path,
+            prepared_settings,
+            prepared_silence_ranges,
         );
 
         let Some(player) = &mut self.player else {

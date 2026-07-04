@@ -98,6 +98,16 @@ pub struct PreparedPlayback {
     sample_rate: u32,
 }
 
+impl PreparedPlayback {
+    pub fn silence_analysis_cache_data(&self) -> (&Path, DspSettings, Vec<(f32, f32)>) {
+        (
+            self.path.as_path(),
+            self.settings,
+            self.render_info.silence_ranges.clone(),
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct RadioRecordingInfo {
     pub path: PathBuf,
