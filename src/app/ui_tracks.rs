@@ -1,5 +1,45 @@
 use crate::*;
 
+const TRACK_ROW_HEIGHT: f32 = 32.0;
+const TRACK_SEPARATOR_HEIGHT: f32 = 1.0;
+const TRACK_GROUP_TOP_GAP: f32 = 6.0;
+const TRACK_GROUP_HEADER_HEIGHT: f32 = 24.0;
+const TRACK_GROUP_BLOCK_HEIGHT: f32 = TRACK_GROUP_TOP_GAP + TRACK_GROUP_HEADER_HEIGHT + TRACK_SEPARATOR_HEIGHT;
+const TRACK_LIST_OVERSCAN_ROWS: f32 = 4.0;
+
+#[derive(Clone, Debug)]
+enum VirtualTrackEntry {
+    GroupHeader {
+        group: String,
+        top: f32,
+        bottom: f32,
+    },
+    TrackRow {
+        index: usize,
+        group: String,
+        visible_row_index: usize,
+        next_visible_track_index: Option<usize>,
+        top: f32,
+        bottom: f32,
+        has_separator_after: bool,
+    },
+}
+
+impl VirtualTrackEntry {
+    fn top(&self) -> f32 {
+        match self {
+            Self::GroupHeader { top, .. } | Self::TrackRow { top, .. } => *top,
+        }
+    }
+
+    fn bottom(&self) -> f32 {
+        match self {
+            Self::GroupHeader { bottom, .. } | Self::TrackRow { bottom, .. } => *bottom,
+        }
+    }
+}
+
+
 impl AudioOrbitApp {
     pub(crate) fn render_track_panel(&mut self, ui: &mut egui::Ui) {
         let Some(playlist) = self.current_playlist() else {
@@ -179,22 +219,21 @@ impl AudioOrbitApp {
             return;
         }
 
-        let visible_tracks: Vec<(usize, Track)> = self
-            .current_playlist()
-            .map(|playlist| {
-                visible_indexes
-                    .into_iter()
-                    .filter_map(|index| playlist.tracks.get(index).map(|track| (index, track.clone())))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let group_track_indexes: BTreeMap<String, Vec<usize>> = visible_tracks
-            .iter()
-            .fold(BTreeMap::new(), |mut groups, (index, track)| {
-                groups.entry(track.group.clone()).or_default().push(*index);
-                groups
-            });
+        let playlist_index = self.state.selected_playlist_index;
+        let track_count = self
+            .state
+            .playlists
+            .get(playlist_index)
+            .map(|playlist| playlist.tracks.len())
+            .unwrap_or(0);
+        let mut group_track_indexes: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        if let Some(playlist) = self.state.playlists.get(playlist_index) {
+            for index in visible_indexes.iter().copied() {
+                if let Some(track) = playlist.tracks.get(index) {
+                    group_track_indexes.entry(track.group.clone()).or_default().push(index);
+                }
+            }
+        }
 
         let add_targets: Vec<(usize, String, PlaylistKind)> = self
             .state
@@ -204,7 +243,6 @@ impl AudioOrbitApp {
             .map(|(index, playlist)| (index, playlist.name.clone(), playlist.kind.clone()))
             .collect();
 
-        let mut last_group = String::new();
         let row_width = (ui.available_width() - 22.0).max(320.0);
         let scroll_height = ui.available_height();
         let mut reorder_track: Option<(usize, usize)> = None;
@@ -218,302 +256,480 @@ impl AudioOrbitApp {
                 ui.set_width(row_width);
                 let visible_rect = ui.clip_rect();
                 let sticky_top = visible_rect.top();
+                let pointer_position = ui.input(|input| input.pointer.hover_pos().or(input.pointer.interact_pos()));
+                let fast_scroll_paint = self.dragging_track_index.is_none()
+                    && ui.input(|input| {
+                        input.raw_scroll_delta.length_sq() > 0.0
+                            || input.smooth_scroll_delta.length_sq() > 0.0
+                    });
+                let content_top = ui.cursor().min.y;
+                let mut logical_entries: Vec<VirtualTrackEntry> = Vec::new();
+                let mut last_group: Option<String> = None;
+                let mut displayed_track_indexes: Vec<usize> = Vec::new();
+
+                if let Some(playlist) = self.state.playlists.get(playlist_index) {
+                    let mut visible_row_index = 0usize;
+                    for index in visible_indexes.iter().copied() {
+                        let Some(track) = playlist.tracks.get(index) else {
+                            continue;
+                        };
+                        if show_group_headers && last_group.as_deref() != Some(track.group.as_str()) {
+                            logical_entries.push(VirtualTrackEntry::GroupHeader {
+                                group: track.group.clone(),
+                                top: 0.0,
+                                bottom: 0.0,
+                            });
+                            last_group = Some(track.group.clone());
+                        }
+                        if show_group_headers && self.collapsed_groups.contains(&track.group) {
+                            continue;
+                        }
+                        logical_entries.push(VirtualTrackEntry::TrackRow {
+                            index,
+                            group: track.group.clone(),
+                            visible_row_index,
+                            next_visible_track_index: None,
+                            top: 0.0,
+                            bottom: 0.0,
+                            has_separator_after: false,
+                        });
+                        displayed_track_indexes.push(index);
+                        visible_row_index += 1;
+                    }
+                }
+
+                let mut displayed_track_position = 0usize;
+                let mut y = content_top;
+                for entry in &mut logical_entries {
+                    match entry {
+                        VirtualTrackEntry::GroupHeader { top, bottom, .. } => {
+                            *top = y;
+                            y += TRACK_GROUP_BLOCK_HEIGHT;
+                            *bottom = y;
+                        }
+                        VirtualTrackEntry::TrackRow {
+                            next_visible_track_index,
+                            top,
+                            bottom,
+                            has_separator_after,
+                            ..
+                        } => {
+                            *top = y;
+                            *next_visible_track_index = displayed_track_indexes
+                                .get(displayed_track_position + 1)
+                                .copied();
+                            *has_separator_after = next_visible_track_index.is_some();
+                            y += TRACK_ROW_HEIGHT + if *has_separator_after { TRACK_SEPARATOR_HEIGHT } else { 0.0 };
+                            *bottom = y;
+                            displayed_track_position += 1;
+                        }
+                    }
+                }
+                let content_bottom = y;
+                let overscan = TRACK_ROW_HEIGHT * TRACK_LIST_OVERSCAN_ROWS;
+                // Entry positions are calculated in egui screen coordinates. The
+                // viewport rectangle passed by ScrollArea is not stable enough to mix
+                // with those coordinates across scroll/resize, so use the actual clipped
+                // visible rect for virtualization bounds. Mixing coordinate spaces caused
+                // skipped rows and growing blank gaps while scrolling large playlists.
+                let render_top = visible_rect.top() - overscan;
+                let render_bottom = visible_rect.bottom() + overscan;
+                let first_rendered = logical_entries
+                    .iter()
+                    .position(|entry| entry.bottom() >= render_top)
+                    .unwrap_or(logical_entries.len());
+                let last_rendered_exclusive = logical_entries
+                    .iter()
+                    .rposition(|entry| entry.top() <= render_bottom)
+                    .map(|index| index + 1)
+                    .unwrap_or(first_rendered);
+
+                if self.scroll_to_active_track_requested {
+                    let active_entry = self.active_track_path.as_ref().and_then(|active_path| {
+                        logical_entries.iter().find(|entry| {
+                            let VirtualTrackEntry::TrackRow { index, .. } = entry else {
+                                return false;
+                            };
+                            self.state
+                                .playlists
+                                .get(playlist_index)
+                                .and_then(|playlist| playlist.tracks.get(*index))
+                                .map(|track| same_path(&track.path, active_path))
+                                .unwrap_or(false)
+                        })
+                    });
+
+                    if let Some(entry) = active_entry {
+                        let rect = egui::Rect::from_min_size(
+                            egui::pos2(visible_rect.left(), entry.top()),
+                            egui::vec2(row_width, TRACK_ROW_HEIGHT),
+                        );
+                        ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                    }
+
+                    // A failed one-shot request should not keep the app in fast repaint mode
+                    // forever. The explicit Now playing action clears filters before setting
+                    // this flag, so hidden-by-search/folder cases can safely end here.
+                    self.scroll_to_active_track_requested = false;
+                }
+
+                if let Some(requested_group) = self.scroll_to_folder_group_requested.clone() {
+                    if let Some(entry) = logical_entries.iter().find(|entry| {
+                        matches!(entry, VirtualTrackEntry::GroupHeader { group, .. } if group == &requested_group)
+                    }) {
+                        let rect = egui::Rect::from_min_size(
+                            egui::pos2(visible_rect.left(), entry.top()),
+                            egui::vec2(row_width, TRACK_GROUP_HEADER_HEIGHT),
+                        );
+                        ui.scroll_to_rect(rect, Some(egui::Align::Min));
+                        self.scroll_to_folder_group_requested = None;
+                    }
+                }
+
                 let mut viewport_group: Option<String> = None;
                 let mut next_group_header_top: Option<f32> = None;
-                let visible_track_len = visible_tracks.len();
-                let track_count = self.current_playlist().map(|playlist| playlist.tracks.len()).unwrap_or(0);
-                let pointer_position = ui.input(|input| input.pointer.hover_pos().or(input.pointer.interact_pos()));
-                for (visible_row_index, (index, track)) in visible_tracks.iter().cloned().enumerate() {
-                    let next_visible_track_index = visible_tracks
-                        .get(visible_row_index + 1)
-                        .map(|(next_index, _)| *next_index);
-                    if show_group_headers && track.group != last_group {
-                        ui.add_space(6.0);
-                        let group = track.group.clone();
-                        let collapsed = self.collapsed_groups.contains(&group);
-                        let mut toggle_group = false;
-                        let repeat_selection_mode = self.state.playback.repeat_mode == RepeatMode::Selection;
-                        let group_indexes = group_track_indexes.get(&group).cloned().unwrap_or_default();
-                        let header_response = ui.horizontal(|ui| {
-                            let icon = if collapsed { Icon::ChevronRight } else { Icon::ChevronDown };
-                            if ui.small_button(ui_icons::icon(icon)).on_hover_text("Collapse/expand folder").clicked() {
-                                toggle_group = true;
+                for entry in &logical_entries {
+                    match entry {
+                        VirtualTrackEntry::GroupHeader { group, top, .. } => {
+                            if *top <= sticky_top {
+                                viewport_group = Some(group.clone());
+                            } else {
+                                next_group_header_top = Some(
+                                    next_group_header_top
+                                        .map(|current| current.min(*top))
+                                        .unwrap_or(*top),
+                                );
+                                break;
                             }
-                            if repeat_selection_mode {
-                                let mut checked = !group_indexes.is_empty()
-                                    && group_indexes.iter().all(|index| self.selected_track_indexes.contains(index));
-                                if ui.checkbox(&mut checked, "").on_hover_text("Include this whole folder in repeat selection").changed() {
-                                    if checked {
+                        }
+                        VirtualTrackEntry::TrackRow { group, top, bottom, .. } => {
+                            if viewport_group.is_none() && *bottom >= visible_rect.top() && *top <= visible_rect.bottom() {
+                                viewport_group = Some(group.clone());
+                            }
+                        }
+                    }
+                }
+
+                if first_rendered > 0 {
+                    let next_top = logical_entries
+                        .get(first_rendered)
+                        .map(VirtualTrackEntry::top)
+                        .unwrap_or(content_bottom);
+                    let skipped = (next_top - ui.cursor().min.y).max(0.0);
+                    if skipped > 0.0 {
+                        ui.add_space(skipped);
+                    }
+                }
+
+                for entry_index in first_rendered..last_rendered_exclusive {
+                    let entry = logical_entries[entry_index].clone();
+                    match entry {
+                        VirtualTrackEntry::GroupHeader { group, .. } => {
+                            ui.add_space(TRACK_GROUP_TOP_GAP);
+                            let collapsed = self.collapsed_groups.contains(&group);
+                            let mut toggle_group = false;
+                            let repeat_selection_mode = self.state.playback.repeat_mode == RepeatMode::Selection;
+                            let group_indexes = group_track_indexes.get(&group).cloned().unwrap_or_default();
+                            let header_response = ui.allocate_ui_with_layout(
+                                egui::vec2(row_width, TRACK_GROUP_HEADER_HEIGHT),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    let icon = if collapsed { Icon::ChevronRight } else { Icon::ChevronDown };
+                                    if ui.small_button(ui_icons::icon(icon)).on_hover_text("Collapse/expand folder").clicked() {
+                                        toggle_group = true;
+                                    }
+                                    if repeat_selection_mode {
+                                        let mut checked = !group_indexes.is_empty()
+                                            && group_indexes.iter().all(|index| self.selected_track_indexes.contains(index));
+                                        if ui.checkbox(&mut checked, "").on_hover_text("Include this whole folder in repeat selection").changed() {
+                                            if checked {
+                                                for index in &group_indexes {
+                                                    self.selected_track_indexes.insert(*index);
+                                                }
+                                            } else {
+                                                for index in &group_indexes {
+                                                    self.selected_track_indexes.remove(index);
+                                                }
+                                            }
+                                            self.persist_repeat_selection_for_current_playlist();
+                                            self.save_state_silently();
+                                        }
+                                    }
+                                    ui.label(egui::RichText::new(group.as_str()).size(13.0).strong());
+                                },
+                            );
+                            header_response.response.context_menu(|ui| {
+                                if self.state.playback.repeat_mode == RepeatMode::Selection {
+                                    if ui.button("Select folder for repeat").clicked() {
                                         for index in &group_indexes {
                                             self.selected_track_indexes.insert(*index);
                                         }
-                                    } else {
+                                        self.persist_repeat_selection_for_current_playlist();
+                                        self.save_state_silently();
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Remove folder from repeat").clicked() {
                                         for index in &group_indexes {
                                             self.selected_track_indexes.remove(index);
                                         }
+                                        self.persist_repeat_selection_for_current_playlist();
+                                        self.save_state_silently();
+                                        ui.close_menu();
                                     }
-                                    self.persist_repeat_selection_for_current_playlist();
-                                    self.save_state_silently();
+                                    ui.separator();
                                 }
-                            }
-                            ui.label(egui::RichText::new(group.as_str()).size(13.0).strong());
-                        });
-                        header_response.response.context_menu(|ui| {
-                            if self.state.playback.repeat_mode == RepeatMode::Selection {
-                                if ui.button("Select folder for repeat").clicked() {
-                                    for index in &group_indexes {
-                                        self.selected_track_indexes.insert(*index);
-                                    }
-                                    self.persist_repeat_selection_for_current_playlist();
-                                    self.save_state_silently();
+                                if ui.button("Move folder up").clicked() {
+                                    self.move_folder_group_in_current_playlist(&group, -1);
                                     ui.close_menu();
                                 }
-                                if ui.button("Remove folder from repeat").clicked() {
-                                    for index in &group_indexes {
-                                        self.selected_track_indexes.remove(index);
-                                    }
-                                    self.persist_repeat_selection_for_current_playlist();
-                                    self.save_state_silently();
+                                if ui.button("Move folder down").clicked() {
+                                    self.move_folder_group_in_current_playlist(&group, 1);
                                     ui.close_menu();
                                 }
-                                ui.separator();
+                            });
+                            if toggle_group {
+                                self.toggle_folder_group_collapsed_and_focus(&group);
+                            } else if header_response.response.double_clicked() {
+                                self.request_folder_group_top(&group);
                             }
-                            if ui.button("Move folder up").clicked() {
-                                self.move_folder_group_in_current_playlist(&group, -1);
-                                ui.close_menu();
+                            paint_list_separator(ui, row_width, false);
+                        }
+                        VirtualTrackEntry::TrackRow {
+                            index,
+                            visible_row_index,
+                            next_visible_track_index,
+                            has_separator_after,
+                            ..
+                        } => {
+                            let Some(track) = self
+                                .state
+                                .playlists
+                                .get(playlist_index)
+                                .and_then(|playlist| playlist.tracks.get(index))
+                                .cloned()
+                            else {
+                                continue;
+                            };
+                            let is_selected = self.selected_track_index == Some(index);
+                            let is_active = self
+                                .active_track_path
+                                .as_ref()
+                                .map(|active| same_path(active, &track.path))
+                                .unwrap_or(false);
+                            let favorite = self.is_favorite(&track.path);
+                            let metadata = if self.player_only_mode {
+                                format_track_metadata_player_only(&track)
+                            } else {
+                                format_track_metadata_compact(&track)
+                            };
+                            let title = if is_active {
+                                format!("{} {}", ui_icons::icon(Icon::Play), track.title)
+                            } else {
+                                track.title.clone()
+                            };
+                            let path = track.path.clone();
+                            let repeat_selection_mode = self.state.playback.repeat_mode == RepeatMode::Selection;
+
+                            if fast_scroll_paint {
+                                let row_rect = paint_track_row_fast_scroll(
+                                    ui,
+                                    row_width,
+                                    &title,
+                                    &metadata,
+                                    is_selected,
+                                    is_active,
+                                    favorite,
+                                    repeat_selection_mode,
+                                    self.selected_track_indexes.contains(&index),
+                                );
+                                if has_separator_after {
+                                    paint_list_separator(ui, row_width, false);
+                                } else if next_track_drop_target_index == Some(track_count) {
+                                    paint_list_edge_separator(ui, row_rect, row_width, true);
+                                }
+                                continue;
                             }
-                            if ui.button("Move folder down").clicked() {
-                                self.move_folder_group_in_current_playlist(&group, 1);
-                                ui.close_menu();
-                            }
-                        });
-                        if toggle_group {
-                            self.toggle_folder_group_collapsed_and_focus(&group);
-                        } else if header_response.response.double_clicked() {
-                            self.request_folder_group_top(&group);
-                        }
-                        if self.scroll_to_folder_group_requested.as_deref() == Some(group.as_str()) {
-                            header_response.response.scroll_to_me(Some(egui::Align::Min));
-                            self.scroll_to_folder_group_requested = None;
-                        }
-                        let header_rect = header_response.response.rect;
-                        if header_rect.top() <= sticky_top {
-                            viewport_group = Some(group.clone());
-                        } else if header_rect.top() > sticky_top {
-                            next_group_header_top = Some(
-                                next_group_header_top
-                                    .map(|current| current.min(header_rect.top()))
-                                    .unwrap_or(header_rect.top()),
-                            );
-                        }
-                        ui.separator();
-                        last_group = group;
-                    }
 
-                    if show_group_headers && self.collapsed_groups.contains(&track.group) {
-                        continue;
-                    }
+                            let row_hovered = next_row_pointer_hovered(ui, row_width, TRACK_ROW_HEIGHT);
+                            let row_response = ui.allocate_ui_with_layout(
+                                egui::vec2(row_width, TRACK_ROW_HEIGHT),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    if repeat_selection_mode {
+                                        let mut checked = self.selected_track_indexes.contains(&index);
+                                        if ui.checkbox(&mut checked, "").on_hover_text("Include in repeat selection").changed() {
+                                            if checked {
+                                                self.selected_track_indexes.insert(index);
+                                            } else {
+                                                self.selected_track_indexes.remove(&index);
+                                            }
+                                            self.persist_repeat_selection_for_current_playlist();
+                                            self.save_state_silently();
+                                        }
+                                    }
 
-                    let is_selected = self.selected_track_index == Some(index);
-                    let is_active = self
-                        .active_track_path
-                        .as_ref()
-                        .map(|active| same_path(active, &track.path))
-                        .unwrap_or(false);
-                    let favorite = self.is_favorite(&track.path);
-                    let metadata = if self.player_only_mode {
-                        format_track_metadata_player_only(&track)
-                    } else {
-                        format_track_metadata_compact(&track)
-                    };
-                    let title = if is_active {
-                        format!("{} {}", ui_icons::icon(Icon::Play), track.title)
-                    } else {
-                        track.title.clone()
-                    };
-                    let path = track.path.clone();
-                    let repeat_selection_mode = self.state.playback.repeat_mode == RepeatMode::Selection;
-
-                    let row_hovered = next_row_pointer_hovered(ui, row_width, 32.0);
-                    let row_response = ui.allocate_ui_with_layout(
-                        egui::vec2(row_width, 32.0),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            if repeat_selection_mode {
-                                let mut checked = self.selected_track_indexes.contains(&index);
-                                if ui.checkbox(&mut checked, "").on_hover_text("Include in repeat selection").changed() {
-                                    if checked {
-                                        self.selected_track_indexes.insert(index);
+                                    let heart = if favorite {
+                                        egui::RichText::new("♥").color(egui::Color32::from_rgb(230, 70, 95)).size(15.0)
                                     } else {
-                                        self.selected_track_indexes.remove(&index);
+                                        egui::RichText::new("♡").size(15.0)
+                                    };
+                                    if ui
+                                        .add_sized(egui::vec2(28.0, 24.0), egui::Button::new(heart))
+                                        .on_hover_text("Toggle favorite")
+                                        .clicked()
+                                    {
+                                        self.toggle_favorite(path.clone());
                                     }
-                                    self.persist_repeat_selection_for_current_playlist();
-                                    self.save_state_silently();
-                                }
-                            }
 
-                            let heart = if favorite {
-                                egui::RichText::new("♥").color(egui::Color32::from_rgb(230, 70, 95)).size(15.0)
-                            } else {
-                                egui::RichText::new("♡").size(15.0)
-                            };
-                            if ui
-                                .add_sized(egui::vec2(28.0, 24.0), egui::Button::new(heart))
-                                .on_hover_text("Toggle favorite")
-                                .clicked()
-                            {
-                                self.toggle_favorite(path.clone());
-                            }
+                                    let body_width = ui.available_width().max(160.0);
+                                    let (body_rect, response) = ui.allocate_exact_size(
+                                        egui::vec2(body_width, 24.0),
+                                        egui::Sense::click(),
+                                    );
 
-                            let body_width = ui.available_width().max(160.0);
-                            let (body_rect, response) = ui.allocate_exact_size(
-                                egui::vec2(body_width, 24.0),
-                                egui::Sense::click(),
+                                    if is_selected {
+                                        ui.painter().rect_filled(body_rect, 5.0, ui.visuals().selection.bg_fill);
+                                    }
+
+                                    let body_padding = 8.0;
+                                    let text_color = if is_selected {
+                                        ui.visuals().selection.stroke.color
+                                    } else if is_active {
+                                        ui.visuals().selection.bg_fill
+                                    } else {
+                                        ui.visuals().widgets.inactive.fg_stroke.color
+                                    };
+                                    let title_font = egui::FontId::proportional(14.0);
+                                    let metadata_font = egui::FontId::proportional(12.0);
+                                    let metadata_color = if is_active || row_hovered {
+                                        ui.visuals().widgets.inactive.fg_stroke.color
+                                    } else {
+                                        ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.50)
+                                    };
+                                    let metadata_width = if metadata.is_empty() {
+                                        0.0
+                                    } else {
+                                        text_width(ui, &metadata, metadata_font.clone(), metadata_color).ceil()
+                                    };
+                                    let metadata_gap = if metadata.is_empty() { 0.0 } else { 6.0 };
+                                    let title_left = body_rect.left() + body_padding;
+                                    let title_right = (body_rect.right() - body_padding - metadata_width - metadata_gap)
+                                        .max(title_left + 24.0);
+                                    let title_rect = egui::Rect::from_min_max(
+                                        egui::pos2(title_left, body_rect.top()),
+                                        egui::pos2(title_right, body_rect.bottom()),
+                                    );
+
+                                    let title = ellipsize_to_width_exact(ui, &title, title_rect.width(), title_font.clone(), text_color);
+                                    ui.painter().with_clip_rect(title_rect).text(
+                                        egui::pos2(title_rect.left(), title_rect.center().y),
+                                        egui::Align2::LEFT_CENTER,
+                                        title,
+                                        title_font,
+                                        text_color,
+                                    );
+
+                                    if !metadata.is_empty() {
+                                        let metadata_rect = egui::Rect::from_min_max(
+                                            egui::pos2(body_rect.right() - body_padding - metadata_width, body_rect.top()),
+                                            egui::pos2(body_rect.right() - body_padding, body_rect.bottom()),
+                                        );
+                                        ui.painter().with_clip_rect(metadata_rect).text(
+                                            egui::pos2(metadata_rect.right(), metadata_rect.center().y),
+                                            egui::Align2::RIGHT_CENTER,
+                                            metadata,
+                                            metadata_font,
+                                            metadata_color,
+                                        );
+                                    }
+
+                                    if response.clicked() {
+                                        self.selected_track_index = Some(index);
+                                    }
+                                    if response.double_clicked() {
+                                        self.selected_track_index = Some(index);
+                                        self.play_path(path.clone(), Some(index), 0.0);
+                                    }
+                                    if response.secondary_clicked() {
+                                        self.selected_track_index = Some(index);
+                                    }
+                                    response.context_menu(|ui| {
+                                        self.render_track_row_context_menu(ui, index, path.clone(), &add_targets);
+                                    });
+                                },
                             );
-
-                            if is_selected {
-                                ui.painter().rect_filled(body_rect, 5.0, ui.visuals().selection.bg_fill);
-                            }
-
-                            let body_padding = 8.0;
-                            let text_color = if is_selected {
-                                ui.visuals().selection.stroke.color
-                            } else if is_active {
-                                ui.visuals().selection.bg_fill
-                            } else {
-                                ui.visuals().widgets.inactive.fg_stroke.color
-                            };
-                            let title_font = egui::FontId::proportional(14.0);
-                            let metadata_font = egui::FontId::proportional(12.0);
-                            let metadata_color = if is_active || row_hovered {
-                                ui.visuals().widgets.inactive.fg_stroke.color
-                            } else {
-                                ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.50)
-                            };
-                            let metadata_width = if metadata.is_empty() {
-                                0.0
-                            } else {
-                                text_width(ui, &metadata, metadata_font.clone(), metadata_color).ceil()
-                            };
-                            let metadata_gap = if metadata.is_empty() { 0.0 } else { 6.0 };
-                            let title_left = body_rect.left() + body_padding;
-                            let title_right = (body_rect.right() - body_padding - metadata_width - metadata_gap)
-                                .max(title_left + 24.0);
-                            let title_rect = egui::Rect::from_min_max(
-                                egui::pos2(title_left, body_rect.top()),
-                                egui::pos2(title_right, body_rect.bottom()),
+                            let mut context_rect = row_response.response.rect.expand(2.0);
+                            context_rect.min.x += if repeat_selection_mode { 62.0 } else { 34.0 };
+                            let context_response = ui.interact(
+                                context_rect,
+                                ui.make_persistent_id(("track_context", index)),
+                                egui::Sense::click_and_drag(),
                             );
-
-                            let title = ellipsize_to_width_exact(ui, &title, title_rect.width(), title_font.clone(), text_color);
-                            ui.painter().with_clip_rect(title_rect).text(
-                                egui::pos2(title_rect.left(), title_rect.center().y),
-                                egui::Align2::LEFT_CENTER,
-                                title,
-                                title_font,
-                                text_color,
-                            );
-
-                            if !metadata.is_empty() {
-                                let metadata_rect = egui::Rect::from_min_max(
-                                    egui::pos2(body_rect.right() - body_padding - metadata_width, body_rect.top()),
-                                    egui::pos2(body_rect.right() - body_padding, body_rect.bottom()),
-                                );
-                                ui.painter().with_clip_rect(metadata_rect).text(
-                                    egui::pos2(metadata_rect.right(), metadata_rect.center().y),
-                                    egui::Align2::RIGHT_CENTER,
-                                    metadata,
-                                    metadata_font,
-                                    metadata_color,
-                                );
-                            }
-
-                            if response.clicked() {
+                            if context_response.clicked() {
                                 self.selected_track_index = Some(index);
                             }
-                            if response.double_clicked() {
+                            if context_response.double_clicked() {
                                 self.selected_track_index = Some(index);
                                 self.play_path(path.clone(), Some(index), 0.0);
                             }
-                            if response.secondary_clicked() {
+                            if context_response.drag_started() {
+                                self.dragging_track_index = Some(index);
+                                self.track_drop_target_index = None;
+                            }
+                            let pointer_over_row = pointer_position
+                                .map(|position| row_response.response.rect.expand(2.0).contains(position))
+                                .unwrap_or(false);
+                            if let Some(from) = self.dragging_track_index {
+                                if pointer_over_row {
+                                    let pointer_y = pointer_position
+                                        .map(|position| position.y)
+                                        .unwrap_or(row_response.response.rect.center().y);
+                                    let drop_after = pointer_y >= row_response.response.rect.center().y;
+                                    let to = if drop_after {
+                                        next_visible_track_index.unwrap_or(track_count)
+                                    } else {
+                                        index
+                                    };
+                                    next_track_drop_target_index = Some(to);
+                                    if ui.input(|input| input.pointer.any_released()) && Self::valid_drop_target(from, to) {
+                                        reorder_track = Some((from, to));
+                                        self.dragging_track_index = None;
+                                    }
+                                }
+                            }
+                            let track_drop_target_for_paint = next_track_drop_target_index
+                                .or(self.track_drop_target_index)
+                                .filter(|to| self.dragging_track_index.map(|from| Self::valid_drop_target(from, *to)).unwrap_or(false));
+                            if self.dragging_track_index == Some(index) && track_drop_target_for_paint.is_some() {
+                                paint_dragged_row_fade(ui, row_response.response.rect);
+                            }
+                            if visible_row_index == 0 && track_drop_target_for_paint == Some(index) {
+                                paint_list_edge_separator(ui, row_response.response.rect, row_width, false);
+                            }
+                            if row_response.response.secondary_clicked() || context_response.secondary_clicked() {
                                 self.selected_track_index = Some(index);
                             }
-                            response.context_menu(|ui| {
+                            context_response.context_menu(|ui| {
                                 self.render_track_row_context_menu(ui, index, path.clone(), &add_targets);
                             });
-                        },
-                    );
-                    let mut context_rect = row_response.response.rect.expand(2.0);
-                    context_rect.min.x += if repeat_selection_mode { 62.0 } else { 34.0 };
-                    let context_response = ui.interact(
-                        context_rect,
-                        ui.make_persistent_id(("track_context", index)),
-                        egui::Sense::click_and_drag(),
-                    );
-                    if context_response.clicked() {
-                        self.selected_track_index = Some(index);
-                    }
-                    if context_response.double_clicked() {
-                        self.selected_track_index = Some(index);
-                        self.play_path(path.clone(), Some(index), 0.0);
-                    }
-                    if context_response.drag_started() {
-                        self.dragging_track_index = Some(index);
-                        self.track_drop_target_index = None;
-                    }
-                    let pointer_over_row = pointer_position
-                        .map(|position| row_response.response.rect.expand(2.0).contains(position))
-                        .unwrap_or(false);
-                    if let Some(from) = self.dragging_track_index {
-                        if pointer_over_row {
-                            let pointer_y = pointer_position
-                                .map(|position| position.y)
-                                .unwrap_or(row_response.response.rect.center().y);
-                            let drop_after = pointer_y >= row_response.response.rect.center().y;
-                            let to = if drop_after {
-                                next_visible_track_index.unwrap_or(track_count)
-                            } else {
-                                index
-                            };
-                            next_track_drop_target_index = Some(to);
-                            if ui.input(|input| input.pointer.any_released()) && Self::valid_drop_target(from, to) {
-                                reorder_track = Some((from, to));
-                                self.dragging_track_index = None;
+                            if has_separator_after {
+                                let separator_drop_target = next_visible_track_index.unwrap_or(index + 1);
+                                paint_list_separator(ui, row_width, track_drop_target_for_paint == Some(separator_drop_target));
+                            } else if track_drop_target_for_paint == Some(track_count) {
+                                paint_list_edge_separator(ui, row_response.response.rect, row_width, true);
                             }
                         }
                     }
-                    let track_drop_target_for_paint = next_track_drop_target_index
-                        .or(self.track_drop_target_index)
-                        .filter(|to| self.dragging_track_index.map(|from| Self::valid_drop_target(from, *to)).unwrap_or(false));
-                    if self.dragging_track_index == Some(index) && track_drop_target_for_paint.is_some() {
-                        paint_dragged_row_fade(ui, row_response.response.rect);
-                    }
-                    if visible_row_index == 0 && track_drop_target_for_paint == Some(index) {
-                        paint_list_edge_separator(ui, row_response.response.rect, row_width, false);
-                    }
-                    if row_response.response.secondary_clicked() || context_response.secondary_clicked() {
-                        self.selected_track_index = Some(index);
-                    }
-                    context_response.context_menu(|ui| {
-                        self.render_track_row_context_menu(ui, index, path.clone(), &add_targets);
-                    });
-                    if viewport_group.is_none() && row_response.response.rect.intersects(visible_rect) {
-                        viewport_group = Some(track.group.clone());
-                    }
-                    if self.scroll_to_active_track_requested && is_active {
-                        row_response.response.scroll_to_me(Some(egui::Align::Center));
-                        self.scroll_to_active_track_requested = false;
-                    }
-                    if visible_row_index + 1 < visible_track_len {
-                        let separator_drop_target = next_visible_track_index.unwrap_or(index + 1);
-                        paint_list_separator(ui, row_width, track_drop_target_for_paint == Some(separator_drop_target));
-                    } else if track_drop_target_for_paint == Some(track_count) {
-                        paint_list_edge_separator(ui, row_response.response.rect, row_width, true);
-                    }
+                }
+
+                let remaining = (content_bottom - ui.cursor().min.y).max(0.0);
+                if remaining > 0.0 {
+                    ui.add_space(remaining);
                 }
 
                 if show_group_headers && self.current_playlist_scroll_offset_y() > 2.0 {
                     if let Some(group) = viewport_group {
-                        let sticky_height = 24.0;
+                        let sticky_height = TRACK_GROUP_HEADER_HEIGHT;
                         let push_offset_y = next_group_header_top
                             .map(|next_top| (next_top - sticky_top - sticky_height).min(0.0))
                             .unwrap_or(0.0);
@@ -611,4 +827,133 @@ impl AudioOrbitApp {
             ui.close_menu();
         }
     }
+}
+
+fn paint_track_row_fast_scroll(
+    ui: &mut egui::Ui,
+    row_width: f32,
+    title: &str,
+    metadata: &str,
+    is_selected: bool,
+    is_active: bool,
+    favorite: bool,
+    repeat_selection_mode: bool,
+    repeat_selected: bool,
+) -> egui::Rect {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(row_width, TRACK_ROW_HEIGHT),
+        egui::Sense::hover(),
+    );
+
+    // Keep the cheap scroll renderer visually identical to the fully interactive
+    // row layout. During scroll we deliberately skip egui widgets/context menus,
+    // but spacing and text clipping must not change between the two modes, or the
+    // list appears to vibrate while scrolling large playlists.
+    let item_gap = ui.spacing().item_spacing.x;
+    let button_size = egui::vec2(28.0, 24.0);
+    let body_height = 24.0;
+    let mut left = rect.left();
+
+    let text_color = if is_selected {
+        ui.visuals().selection.stroke.color
+    } else if is_active {
+        ui.visuals().selection.bg_fill
+    } else {
+        ui.visuals().widgets.inactive.fg_stroke.color
+    };
+    let title_font = egui::FontId::proportional(14.0);
+    let metadata_font = egui::FontId::proportional(12.0);
+    let metadata_color = ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.50);
+
+    if repeat_selection_mode {
+        let checkbox_side = ui.spacing().interact_size.y.min(TRACK_ROW_HEIGHT).max(18.0);
+        let checkbox_rect = egui::Rect::from_center_size(
+            egui::pos2(left + checkbox_side * 0.5, rect.center().y),
+            egui::vec2(checkbox_side, checkbox_side),
+        );
+        let marker = if repeat_selected { "☑" } else { "☐" };
+        ui.painter().text(
+            checkbox_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            marker,
+            metadata_font.clone(),
+            metadata_color,
+        );
+        left += checkbox_side + item_gap;
+    }
+
+    let heart = if favorite { "♥" } else { "♡" };
+    let heart_color = if favorite {
+        egui::Color32::from_rgb(230, 70, 95)
+    } else {
+        ui.visuals().widgets.inactive.fg_stroke.color
+    };
+    let heart_rect = egui::Rect::from_min_size(
+        egui::pos2(left, rect.center().y - button_size.y * 0.5),
+        button_size,
+    );
+    let heart_visuals = ui.visuals().widgets.inactive;
+    ui.painter().rect(
+        heart_rect,
+        4.0,
+        heart_visuals.bg_fill,
+        heart_visuals.bg_stroke,
+        egui::StrokeKind::Outside,
+    );
+    ui.painter().text(
+        heart_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        heart,
+        egui::FontId::proportional(15.0),
+        heart_color,
+    );
+    left = heart_rect.right() + item_gap;
+
+    let body_rect = egui::Rect::from_min_max(
+        egui::pos2(left, rect.center().y - body_height * 0.5),
+        egui::pos2(rect.right(), rect.center().y + body_height * 0.5),
+    );
+
+    if is_selected {
+        ui.painter().rect_filled(body_rect, 5.0, ui.visuals().selection.bg_fill);
+    }
+
+    let body_padding = 8.0;
+    let metadata_width = if metadata.is_empty() {
+        0.0
+    } else {
+        text_width(ui, metadata, metadata_font.clone(), metadata_color).ceil()
+    };
+    let metadata_gap = if metadata.is_empty() { 0.0 } else { 6.0 };
+    let title_left = body_rect.left() + body_padding;
+    let title_right = (body_rect.right() - body_padding - metadata_width - metadata_gap)
+        .max(title_left + 24.0);
+    let title_rect = egui::Rect::from_min_max(
+        egui::pos2(title_left, body_rect.top()),
+        egui::pos2(title_right, body_rect.bottom()),
+    );
+    let clipped_title = ellipsize_to_width_exact(ui, title, title_rect.width(), title_font.clone(), text_color);
+    ui.painter().with_clip_rect(title_rect).text(
+        egui::pos2(title_rect.left(), title_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        clipped_title,
+        title_font,
+        text_color,
+    );
+
+    if !metadata.is_empty() {
+        let metadata_rect = egui::Rect::from_min_max(
+            egui::pos2(body_rect.right() - body_padding - metadata_width, body_rect.top()),
+            egui::pos2(body_rect.right() - body_padding, body_rect.bottom()),
+        );
+        ui.painter().with_clip_rect(metadata_rect).text(
+            egui::pos2(metadata_rect.right(), metadata_rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            metadata,
+            metadata_font,
+            metadata_color,
+        );
+    }
+
+    rect
 }

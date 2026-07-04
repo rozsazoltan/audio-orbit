@@ -11,6 +11,9 @@ mod ui_icons;
 mod updater;
 mod app;
 
+#[cfg(debug_assertions)]
+use crate::app::dev_metrics::DevMetricsPanelState;
+
 use crate::{
     audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo, PreparedPlayback, RadioVisualizerFrame},
     config::{
@@ -42,6 +45,13 @@ const RADIO_WAVEFORM_BAR_PITCH_PIXELS: f32 = 3.0;
 const WAVEFORM_BAR_WIDTH_PIXELS: f32 = 1.0;
 const RADIO_WAVEFORM_MAX_VISIBLE_SECONDS: f32 = 180.0;
 const RADIO_METADATA_REFRESH_INTERVAL_SECONDS: u64 = 5;
+const ACTIVE_INPUT_REPAINT_INTERVAL: Duration = Duration::from_millis(16);
+const WAVEFORM_LOADING_REPAINT_INTERVAL: Duration = Duration::from_millis(80);
+const RADIO_REPAINT_INTERVAL: Duration = Duration::from_millis(40);
+const PLAYBACK_REPAINT_INTERVAL: Duration = Duration::from_millis(250);
+const BACKGROUND_WORK_REPAINT_INTERVAL: Duration = Duration::from_millis(160);
+const STATUS_REPAINT_INTERVAL: Duration = Duration::from_millis(500);
+const IDLE_REPAINT_INTERVAL: Duration = Duration::from_millis(1000);
 
 fn min_window_size_for_mode(player_only_mode: bool) -> egui::Vec2 {
     if player_only_mode {
@@ -328,6 +338,12 @@ struct AudioOrbitApp {
     last_update_check: Option<updater::UpdateCheck>,
     update_check_started_at: Option<Instant>,
     update_install_started_at: Option<Instant>,
+    #[cfg(debug_assertions)]
+    dev_metrics: DevMetricsPanelState,
+    #[cfg(debug_assertions)]
+    show_dev_metrics_window: bool,
+    #[cfg(debug_assertions)]
+    dev_metrics_window_open_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 
@@ -1043,7 +1059,7 @@ fn draw_waveform_seek(
     if waveform.is_empty() {
         if show_loading_wave {
             paint_waveform_loading_wave(ui, rect);
-            ui.ctx().request_repaint_after(Duration::from_millis(33));
+            ui.ctx().request_repaint_after(WAVEFORM_LOADING_REPAINT_INTERVAL);
         }
         return response;
     }

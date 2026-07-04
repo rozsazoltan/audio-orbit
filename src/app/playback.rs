@@ -65,6 +65,23 @@ impl AudioOrbitApp {
     ) {
         self.prepare_track_playback(path, index, start_seconds, crossfade_seconds, false);
     }
+
+    fn request_active_track_scroll_if_changed(
+        &mut self,
+        previous_index: Option<usize>,
+        previous_path: Option<PathBuf>,
+        new_index: Option<usize>,
+        new_path: &Path,
+    ) {
+        let path_changed = previous_path
+            .as_ref()
+            .map(|path| !same_path(path, new_path))
+            .unwrap_or(true);
+        if path_changed || previous_index != new_index {
+            self.scroll_to_active_track_requested = true;
+        }
+    }
+
     pub(crate) fn cached_track_for_path(&self, index: Option<usize>, path: &Path) -> Option<&Track> {
         let playlist = self.current_playlist()?;
         index
@@ -133,10 +150,13 @@ impl AudioOrbitApp {
                     self.radio_started_at = None;
                     self.last_radio_title_lookup_at = None;
                     self.radio_title_receiver = None;
+                    let previous_track_index = self.active_track_index;
+                    let previous_track_path = self.active_track_path.clone();
                     self.active_playlist_index = Some(playlist_index);
                     self.selected_track_index = index;
                     self.active_track_index = index;
                     self.active_track_path = Some(info.path.clone());
+                    self.request_active_track_scroll_if_changed(previous_track_index, previous_track_path, index, &info.path);
                     self.pending_track_switch = None;
                     self.crossfade_started_for_path = None;
                     self.store_playback_metadata(&info);
@@ -196,10 +216,13 @@ impl AudioOrbitApp {
                 self.radio_started_at = None;
                 self.last_radio_title_lookup_at = None;
                 self.radio_title_receiver = None;
+                let previous_track_index = self.active_track_index;
+                let previous_track_path = self.active_track_path.clone();
                 self.active_playlist_index = Some(playlist_index);
                 self.selected_track_index = index;
                 self.active_track_index = index;
                 self.active_track_path = Some(info.path.clone());
+                self.request_active_track_scroll_if_changed(previous_track_index, previous_track_path, index, &info.path);
                 self.pending_track_switch = None;
                 self.crossfade_started_for_path = None;
                 self.store_playback_metadata(&info);
@@ -325,11 +348,14 @@ impl AudioOrbitApp {
                 self.radio_started_at = None;
                 self.last_radio_title_lookup_at = None;
                 self.radio_title_receiver = None;
+                let previous_track_index = self.active_track_index;
+                let previous_track_path = self.active_track_path.clone();
                 self.active_playlist_index = Some(playlist_index);
                 self.selected_track_index = index;
 
                 self.active_track_index = index;
                 self.active_track_path = Some(info.path.clone());
+                self.request_active_track_scroll_if_changed(previous_track_index, previous_track_path, index, &info.path);
                 self.pending_track_switch = None;
                 self.crossfade_started_for_path = None;
                 self.store_playback_metadata(&info);
@@ -599,10 +625,13 @@ impl AudioOrbitApp {
         }
 
         self.pending_track_switch = None;
+        let previous_track_index = self.active_track_index;
+        let previous_track_path = self.active_track_path.clone();
         self.active_track_index = pending.index;
         self.active_playlist_index = Some(pending.playlist_index);
         self.active_track_path = Some(pending.info.path.clone());
         self.selected_track_index = pending.index;
+        self.request_active_track_scroll_if_changed(previous_track_index, previous_track_path, pending.index, &pending.info.path);
         self.crossfade_started_for_path = None;
         self.remember_last_played_track(pending.index, &pending.info.path);
         self.store_playback_metadata(&pending.info);
