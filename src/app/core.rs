@@ -36,6 +36,8 @@ impl AudioOrbitApp {
                     last_fast_seek_started_at: None,
                     silence_analysis_cache: BTreeMap::new(),
                     pending_folder_scan_receiver: None,
+                    pending_library_sync_receiver: None,
+                    last_library_sync_at: Instant::now(),
                     pending_profile_apply_at: None,
                     profile_apply_applied_until: None,
                     waveform_drag_position_seconds: None,
@@ -124,6 +126,8 @@ impl AudioOrbitApp {
                 last_fast_seek_started_at: None,
                 silence_analysis_cache: BTreeMap::new(),
                 pending_folder_scan_receiver: None,
+                pending_library_sync_receiver: None,
+                last_library_sync_at: Instant::now(),
                 pending_profile_apply_at: None,
                 profile_apply_applied_until: None,
                 waveform_drag_position_seconds: None,
@@ -201,6 +205,7 @@ impl AudioOrbitApp {
         app.restore_last_played_track_selection();
         app.restore_saved_playback_session();
         app.restore_repeat_selection_for_current_playlist();
+        app.start_library_sync(LibrarySyncTrigger::Startup, false);
         app
     }
     pub(crate) fn remember_window_geometry(&mut self, context: &egui::Context) {

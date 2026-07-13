@@ -18,8 +18,8 @@ use crate::{
     audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo, PreparedPlayback, RadioVisualizerFrame},
     config::{
         app_data_dir, app_version_label, collect_audio_files_from_folder, default_backup_file_name, display_file_name, export_state_zip,
-        import_state_zip, load_state, same_path, save_state, LastPlayedTrack, PlaybackSession, Playlist, PlaylistKind, RadioStation, RepeatMode, SavedState,
-        Track, WindowGeometry, FAVORITES_PLAYLIST_NAME,
+        import_state_zip, load_state, path_key, same_path, save_state, LastPlayedTrack, PlaybackSession, Playlist, PlaylistKind, RadioStation,
+        RepeatMode, SavedState, Track, WindowGeometry, FAVORITES_PLAYLIST_NAME,
     },
     dsp::{DspSettings, OrbitMode},
 };
@@ -32,7 +32,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::Command,
-    sync::mpsc,
+    sync::{mpsc, Arc},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -52,6 +52,7 @@ const PLAYBACK_REPAINT_INTERVAL: Duration = Duration::from_millis(250);
 const BACKGROUND_WORK_REPAINT_INTERVAL: Duration = Duration::from_millis(160);
 const STATUS_REPAINT_INTERVAL: Duration = Duration::from_millis(500);
 const IDLE_REPAINT_INTERVAL: Duration = Duration::from_millis(1000);
+const AUTO_LIBRARY_SYNC_INTERVAL: Duration = Duration::from_secs(30);
 const SEEK_PREPARE_DEBOUNCE: Duration = Duration::from_millis(700);
 const FAST_SEEK_COALESCE_INTERVAL: Duration = Duration::from_millis(140);
 
@@ -237,6 +238,33 @@ struct PendingFolderScanResult {
     files: Vec<PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LibrarySyncTrigger {
+    Startup,
+    Manual,
+    Automatic,
+}
+
+#[derive(Clone, Debug)]
+struct FolderLibrarySyncTarget {
+    playlist_index: usize,
+    playlist_name: String,
+    source_folder: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct FolderLibrarySyncResult {
+    target: FolderLibrarySyncTarget,
+    files: Result<Arc<Vec<PathBuf>>, String>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingLibrarySyncResult {
+    trigger: LibrarySyncTrigger,
+    availability: BTreeMap<String, bool>,
+    folder_results: Vec<FolderLibrarySyncResult>,
+}
+
 #[derive(Clone, Debug)]
 enum DetailsModal {
     Track(PathBuf),
@@ -334,6 +362,8 @@ struct AudioOrbitApp {
     last_fast_seek_started_at: Option<Instant>,
     silence_analysis_cache: BTreeMap<PathBuf, SilenceAnalysisCacheEntry>,
     pending_folder_scan_receiver: Option<mpsc::Receiver<Result<PendingFolderScanResult, String>>>,
+    pending_library_sync_receiver: Option<mpsc::Receiver<PendingLibrarySyncResult>>,
+    last_library_sync_at: Instant,
     pending_profile_apply_at: Option<Instant>,
     profile_apply_applied_until: Option<Instant>,
     waveform_drag_position_seconds: Option<f32>,

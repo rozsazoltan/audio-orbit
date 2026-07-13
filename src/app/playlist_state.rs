@@ -128,7 +128,19 @@ impl AudioOrbitApp {
     }
     pub(crate) fn eligible_track_indexes(&self) -> Vec<usize> {
         self.current_playlist()
-            .map(Playlist::filtered_track_indexes)
+            .map(|playlist| {
+                playlist
+                    .filtered_track_indexes()
+                    .into_iter()
+                    .filter(|index| {
+                        playlist
+                            .tracks
+                            .get(*index)
+                            .map(|track| !track.missing)
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     }
     pub(crate) fn visible_track_indexes(&self) -> Vec<usize> {
@@ -158,6 +170,15 @@ impl AudioOrbitApp {
         } else {
             self.eligible_track_indexes()
         };
+        let indexes = indexes
+            .into_iter()
+            .filter(|index| {
+                self.current_playlist()
+                    .and_then(|playlist| playlist.tracks.get(*index))
+                    .map(|track| !track.missing)
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
 
         if self.state.playback.repeat_mode == RepeatMode::Selection && !self.selected_track_indexes.is_empty() {
             indexes
@@ -247,14 +268,14 @@ impl AudioOrbitApp {
 
         if let Some(playlist_index) = preferred_playlist {
             if let Some(playlist) = self.state.playlists.get(playlist_index) {
-                if let Some(track_index) = playlist.tracks.iter().position(|track| same_path(&track.path, session_path)) {
+                if let Some(track_index) = playlist.tracks.iter().position(|track| !track.missing && same_path(&track.path, session_path)) {
                     return Some((playlist_index, track_index, playlist.tracks[track_index].path.clone()));
                 }
             }
         }
 
         for (playlist_index, playlist) in self.state.playlists.iter().enumerate() {
-            if let Some(track_index) = playlist.tracks.iter().position(|track| same_path(&track.path, session_path)) {
+            if let Some(track_index) = playlist.tracks.iter().position(|track| !track.missing && same_path(&track.path, session_path)) {
                 return Some((playlist_index, track_index, playlist.tracks[track_index].path.clone()));
             }
         }

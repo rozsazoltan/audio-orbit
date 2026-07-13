@@ -77,6 +77,7 @@ impl AudioOrbitApp {
             || self.pending_fast_seek.is_some()
             || self.pending_seek_prepare.is_some()
             || self.pending_folder_scan_receiver.is_some()
+            || self.pending_library_sync_receiver.is_some()
             || self.update_check_receiver.is_some()
             || self.update_install_receiver.is_some()
             || self.radio_title_receiver.is_some()
@@ -110,6 +111,8 @@ impl eframe::App for AudioOrbitApp {
         self.refresh_radio_title_periodically();
         self.process_pending_profile_apply();
         self.process_folder_scan_events();
+        self.process_library_sync_events();
+        self.maybe_start_auto_library_sync();
         self.process_pending_fast_seek();
         self.process_pending_seek_prepare();
         self.process_prepared_track_playback();

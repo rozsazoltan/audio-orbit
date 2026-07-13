@@ -124,14 +124,31 @@ impl AudioOrbitApp {
             }
         });
 
-        ui.horizontal(|ui| {
-            let can_rescan = self
-                .current_playlist()
-                .and_then(|playlist| playlist.source_folder.as_ref())
-                .is_some();
-
+        ui.horizontal_wrapped(|ui| {
+            let scan_idle = self.pending_folder_scan_receiver.is_none()
+                && self.pending_library_sync_receiver.is_none();
             if ui
-                .add_enabled(can_rescan, egui::Button::new(ui_icons::label(Icon::FolderSync, "Rescan folder")))
+                .add_enabled(
+                    scan_idle,
+                    egui::Button::new(ui_icons::label(Icon::RefreshCw, "Sync library")),
+                )
+                .on_hover_text("Check saved tracks and scan folder playlists for added, restored, or missing files.")
+                .clicked()
+            {
+                self.start_library_sync(LibrarySyncTrigger::Manual, true);
+            }
+
+            let can_rescan = scan_idle
+                && self
+                    .current_playlist()
+                    .and_then(|playlist| playlist.source_folder.as_ref())
+                    .is_some();
+            if ui
+                .add_enabled(
+                    can_rescan,
+                    egui::Button::new(ui_icons::label(Icon::FolderSync, "Sync folder")),
+                )
+                .on_hover_text("Scan only selected folder playlist. Missing entries stay visible.")
                 .clicked()
             {
                 self.rescan_current_folder();

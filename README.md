@@ -33,7 +33,7 @@ Audio Orbit plays local music files from manual playlists or scanner-owned folde
 
 Folder playlists are created from a selected directory. You choose how many folder levels should be used for grouping, and Audio Orbit scans supported audio files under that folder.
 
-Folder playlists are scanner-owned. You do not manually add individual tracks to them; instead, you add files to the folder and rescan. Manual playlists and Favorites can receive individual tracks.
+Folder playlists are scanner-owned. You do not manually add individual tracks to them; instead, add files to the folder and sync the playlist. Missing files remain visible as dimmed entries, while files that return are restored automatically on the next sync. Manual playlists and Favorites receive the same missing-file status without losing their saved ordering.
 
 ### Internet radio
 
@@ -54,6 +54,8 @@ Audio Orbit supports common desktop-player behavior:
 - adjust volume from the top player bar, including player-only mode
 - adjust volume with the mouse wheel over the top player bar when the pointer is over the title, waveform, or controls
 - optionally switch playback automatically when the system default output device changes
+- retain missing playlist entries as dimmed rows and skip them during playback
+- optionally synchronize folder playlists in the background without restarting the app
 - remember the last played local track between app launches
 - play saved internet radio streams from the Radio tab
 - favorite radio stations and filter the Radio list to favorites
@@ -84,6 +86,7 @@ Backups are ZIP files containing the full app state:
 - silence skip settings
 - internet radio station list
 - update settings
+- library synchronization settings
 - UI layout settings
 
 Audio files themselves are not embedded in the backup. The backup stores library and playlist state, not your music collection.
@@ -141,6 +144,10 @@ Artist B / Album A
 ```
 
 Folder groups can be collapsed or expanded in the track list. When a folder playlist only has one group, Audio Orbit hides the redundant folder group headers.
+
+Use **Sync folder** to scan the selected folder playlist, or **Sync library** to check every saved track and scan every folder playlist. Deleted or unavailable files stay in place as dimmed rows, preserving Favorites order, manual playlist order, and folder context. Restored files become playable again after sync.
+
+Enable **Settings > Library sync > Automatically sync library** for background synchronization. Audio Orbit checks at most once every 30 seconds, adds newly discovered audio files, updates missing-file state, and performs all file-system work outside the UI thread. Leave it disabled to use only the manual sync buttons.
 
 ### Play music
 
@@ -212,6 +219,8 @@ Audio Orbit is a local music player, not a system-wide Windows audio processor. 
 The orbit effect is headphone-friendly stereo processing, not true HRTF-based 3D surround virtualization.
 
 Support for audio formats depends on the bundled Rust audio decoding stack. Common formats such as MP3, WAV, FLAC, OGG, OPUS, M4A, MP4, and AAC are intended to work, but every possible codec/container combination cannot be guaranteed without an FFmpeg backend.
+
+Automatic library synchronization uses lightweight background polling rather than a permanent file-system watcher. Changes can take up to roughly 30 seconds to appear. Recursive folder scans do not follow symbolic links or Windows reparse points.
 
 ## Contributing
 

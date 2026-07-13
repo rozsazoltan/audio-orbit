@@ -143,6 +143,8 @@ pub struct Track {
     pub waveform_brightness: Vec<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub favorite_added_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub missing: bool,
 }
 
 impl Track {
@@ -157,8 +159,9 @@ impl Track {
         let group = folder_group_for_path(&path, root, folder_depth);
         // Keep large folder imports responsive: expensive decoder/tag metadata is filled
         // lazily from playback results instead of being read for every scanned file.
+        let file_metadata = fs::metadata(&path).ok().filter(|metadata| metadata.is_file());
         let metadata = TrackMetadata {
-            size_bytes: fs::metadata(&path).ok().map(|metadata| metadata.len()),
+            size_bytes: file_metadata.as_ref().map(|metadata| metadata.len()),
             ..Default::default()
         };
 
@@ -170,6 +173,7 @@ impl Track {
             waveform: Vec::new(),
             waveform_brightness: Vec::new(),
             favorite_added_sequence: None,
+            missing: file_metadata.is_none(),
         }
     }
 
@@ -184,6 +188,7 @@ impl Track {
         self.metadata.duration_seconds = Some(duration_seconds);
         self.metadata.sample_rate_hz = Some(sample_rate_hz);
         self.metadata.channels = Some(channels.min(u8::MAX as u16) as u8);
+        self.missing = false;
         if self.metadata.size_bytes.is_none() {
             self.metadata.size_bytes = fs::metadata(&self.path).ok().map(|metadata| metadata.len());
         }
@@ -260,6 +265,22 @@ fn default_playback_session_source() -> String {
     "music".to_owned()
 }
 
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TrackAvailabilityStats {
+    pub restored: usize,
+    pub newly_missing: usize,
+    pub missing_total: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FolderSyncStats {
+    pub added: usize,
+    pub restored: usize,
+    pub newly_missing: usize,
+    pub missing_total: usize,
+    pub present_total: usize,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Playlist {
@@ -367,10 +388,85 @@ impl Playlist {
         let folder_depth = self.folder_depth;
         self.tracks = files
             .into_iter()
-            .map(|path| Track::from_path(path, root.as_deref(), folder_depth))
+            .map(|path| {
+                let mut track = Track::from_path(path, root.as_deref(), folder_depth);
+                track.missing = false;
+                track
+            })
             .collect();
         self.sort_tracks();
         self.ensure_selected_group_exists();
+    }
+
+    pub fn apply_track_availability(
+        &mut self,
+        availability: &BTreeMap<String, bool>,
+    ) -> TrackAvailabilityStats {
+        let mut stats = TrackAvailabilityStats::default();
+
+        for track in &mut self.tracks {
+            let Some(is_present) = availability.get(&path_key(&track.path)).copied() else {
+                if track.missing {
+                    stats.missing_total += 1;
+                }
+                continue;
+            };
+
+            let was_missing = track.missing;
+            track.missing = !is_present;
+            if was_missing && is_present {
+                stats.restored += 1;
+            } else if !was_missing && !is_present {
+                stats.newly_missing += 1;
+            }
+            if track.missing {
+                stats.missing_total += 1;
+            }
+        }
+
+        stats
+    }
+
+    pub fn merge_tracks_from_folder_scan(&mut self, files: &[PathBuf]) -> FolderSyncStats {
+        let root = self.source_folder.clone();
+        let folder_depth = self.folder_depth;
+        let mut scanned = BTreeMap::new();
+        for path in files {
+            scanned
+                .entry(path_key(path))
+                .or_insert_with(|| path.clone());
+        }
+
+        let mut stats = FolderSyncStats::default();
+        for track in &mut self.tracks {
+            if scanned.remove(&path_key(&track.path)).is_some() {
+                if track.missing {
+                    stats.restored += 1;
+                }
+                track.missing = false;
+                stats.present_total += 1;
+            } else {
+                if !track.missing {
+                    stats.newly_missing += 1;
+                }
+                track.missing = true;
+                stats.missing_total += 1;
+            }
+        }
+
+        for path in scanned.into_values() {
+            let mut track = Track::from_path(path, root.as_deref(), folder_depth);
+            track.missing = false;
+            self.tracks.push(track);
+            stats.added += 1;
+            stats.present_total += 1;
+        }
+
+        if stats.added > 0 {
+            self.sort_tracks();
+        }
+        self.ensure_selected_group_exists();
+        stats
     }
 
     pub fn folder_groups(&self) -> Vec<String> {
@@ -509,6 +605,20 @@ pub fn default_recording_output_folder() -> Option<PathBuf> {
         .and_then(|path| path.parent().map(|parent| parent.join(".audio-orbit-records")))
 }
 
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LibrarySettings {
+    #[serde(default)]
+    pub auto_sync_folder_playlists: bool,
+}
+
+impl Default for LibrarySettings {
+    fn default() -> Self {
+        Self {
+            auto_sync_folder_playlists: false,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UpdateSettings {
@@ -672,6 +782,10 @@ fn default_true() -> bool {
     true
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SavedState {
     pub playlists: Vec<Playlist>,
@@ -692,6 +806,8 @@ pub struct SavedState {
     pub playback: PlaybackSettings,
     #[serde(default)]
     pub recording: RecordingSettings,
+    #[serde(default)]
+    pub library: LibrarySettings,
     #[serde(default)]
     pub ui: UiSettings,
 }
@@ -720,6 +836,7 @@ impl Default for SavedState {
             playback_session: PlaybackSession::default(),
             playback: PlaybackSettings::default(),
             recording: RecordingSettings::default(),
+            library: LibrarySettings::default(),
             ui: UiSettings::default(),
         }
     }
@@ -818,13 +935,19 @@ pub fn collect_audio_files_from_folder(root: &Path) -> Result<Vec<PathBuf>> {
                 format!("failed to inspect a folder entry under {}", directory.display())
             })?;
             let path = entry.path();
-            let metadata = entry.metadata().with_context(|| {
-                format!("failed to read file metadata: {}", path.display())
+            let file_type = entry.file_type().with_context(|| {
+                format!("failed to read file type: {}", path.display())
             })?;
 
-            if metadata.is_dir() {
+            // Never follow symbolic links or Windows reparse points during
+            // recursive scans. This prevents cycles and avoids leaving the
+            // user-selected folder through junctions or mounted paths.
+            if is_recursive_scan_link(&path, &file_type) {
+                continue;
+            }
+            if file_type.is_dir() {
                 directories.push(path);
-            } else if metadata.is_file() && is_supported_audio_file(&path) {
+            } else if file_type.is_file() && is_supported_audio_file(&path) {
                 files.push(path);
             }
         }
@@ -846,8 +969,34 @@ pub fn is_supported_audio_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn is_recursive_scan_link(path: &Path, file_type: &fs::FileType) -> bool {
+    if file_type.is_symlink() {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        return fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+            .unwrap_or(true);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+pub fn path_key(path: &Path) -> String {
+    path.to_string_lossy().to_lowercase()
+}
+
 pub fn same_path(left: &Path, right: &Path) -> bool {
-    left.to_string_lossy().to_lowercase() == right.to_string_lossy().to_lowercase()
+    path_key(left) == path_key(right)
 }
 
 pub fn display_file_name(path: &Path) -> String {
@@ -1027,5 +1176,132 @@ mod tests {
         assert!(!serde_json::to_string(&playlist)
             .unwrap()
             .contains("favorite_added_sequence"));
+    }
+
+    #[test]
+    fn library_settings_keep_automatic_sync_disabled_for_existing_state() {
+        let settings: LibrarySettings = serde_json::from_str("{}").unwrap();
+
+        assert!(!settings.auto_sync_folder_playlists);
+    }
+
+    #[test]
+    fn tracks_from_existing_state_default_to_available() {
+        let track: Track = serde_json::from_str(
+            r#"{"path":"C:/Music/Track.mp3","title":"Track","group":"Root"}"#,
+        )
+        .unwrap();
+
+        assert!(!track.missing);
+    }
+
+    #[test]
+    fn folder_sync_retains_missing_tracks_and_adds_new_files() {
+        let root = PathBuf::from("C:/Music");
+        let alpha = root.join("Alpha.mp3");
+        let beta = root.join("Beta.mp3");
+        let gamma = root.join("Gamma.mp3");
+        let mut playlist = Playlist::from_folder(
+            "Folder",
+            root,
+            1,
+            vec![alpha.clone(), beta.clone()],
+        );
+
+        let stats = playlist.merge_tracks_from_folder_scan(&[beta.clone(), gamma.clone()]);
+
+        assert_eq!(stats.added, 1);
+        assert_eq!(stats.newly_missing, 1);
+        assert_eq!(stats.missing_total, 1);
+        assert_eq!(track_paths(&playlist), owned_paths(&[&alpha, &beta, &gamma]));
+        assert!(playlist.tracks[0].missing);
+        assert!(!playlist.tracks[1].missing);
+        assert!(!playlist.tracks[2].missing);
+
+        let restored = playlist.merge_tracks_from_folder_scan(&[alpha.clone(), beta, gamma]);
+        assert_eq!(restored.restored, 1);
+        assert_eq!(restored.missing_total, 0);
+        assert!(playlist.tracks.iter().all(|track| !track.missing));
+    }
+
+    #[test]
+    fn folder_sync_preserves_existing_order_when_only_availability_changes() {
+        let root = PathBuf::from("C:/Music");
+        let alpha = root.join("Alpha.mp3");
+        let beta = root.join("Beta.mp3");
+        let mut playlist = Playlist::from_folder(
+            "Folder",
+            root,
+            1,
+            vec![alpha.clone(), beta.clone()],
+        );
+        playlist.tracks.swap(0, 1);
+
+        playlist.merge_tracks_from_folder_scan(std::slice::from_ref(&beta));
+        assert_eq!(track_paths(&playlist), owned_paths(&[&beta, &alpha]));
+        assert!(playlist.tracks[1].missing);
+
+        playlist.merge_tracks_from_folder_scan(&[alpha.clone(), beta.clone()]);
+        assert_eq!(track_paths(&playlist), owned_paths(&[&beta, &alpha]));
+        assert!(playlist.tracks.iter().all(|track| !track.missing));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_scan_does_not_follow_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let test_root = std::env::temp_dir().join(format!(
+            "audio-orbit-folder-scan-{}-{unique}",
+            std::process::id()
+        ));
+        let library = test_root.join("library");
+        let outside = test_root.join("outside");
+        fs::create_dir_all(&library).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let inside_track = library.join("inside.mp3");
+        fs::write(&inside_track, b"").unwrap();
+        fs::write(outside.join("outside.mp3"), b"").unwrap();
+        symlink(&outside, library.join("linked")).unwrap();
+
+        let files = collect_audio_files_from_folder(&library).unwrap();
+
+        assert_eq!(files, vec![inside_track]);
+        fs::remove_dir_all(test_root).unwrap();
+    }
+
+    #[test]
+    fn availability_check_marks_and_restores_manual_tracks_without_reordering() {
+        let alpha = PathBuf::from("C:/Music/Alpha.mp3");
+        let beta = PathBuf::from("C:/Music/Beta.mp3");
+        let mut playlist = Playlist::new("Manual");
+        playlist.tracks = vec![
+            Track::from_path(alpha.clone(), None, 0),
+            Track::from_path(beta.clone(), None, 0),
+        ];
+        for track in &mut playlist.tracks {
+            track.missing = false;
+        }
+
+        let availability = BTreeMap::from([
+            (path_key(&alpha), false),
+            (path_key(&beta), true),
+        ]);
+        let missing = playlist.apply_track_availability(&availability);
+
+        assert_eq!(missing.newly_missing, 1);
+        assert_eq!(missing.missing_total, 1);
+        assert_eq!(track_paths(&playlist), owned_paths(&[&alpha, &beta]));
+
+        let restored = playlist.apply_track_availability(&BTreeMap::from([
+            (path_key(&alpha), true),
+            (path_key(&beta), true),
+        ]));
+        assert_eq!(restored.restored, 1);
+        assert_eq!(restored.missing_total, 0);
     }
 }
