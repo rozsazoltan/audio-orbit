@@ -202,6 +202,29 @@ impl AudioOrbitApp {
         };
         self.save_state_silently();
     }
+    pub(crate) fn sort_current_favorites_by_added(&mut self) {
+        let is_favorites = self
+            .current_playlist()
+            .map(|playlist| playlist.kind == PlaylistKind::Favorites)
+            .unwrap_or(false);
+        if !is_favorites {
+            return;
+        }
+
+        self.persist_repeat_selection_for_current_playlist();
+        let selected_path = self.selected_track_path();
+        let should_sort = self.current_playlist().map(|playlist| playlist.tracks.len() > 1).unwrap_or(false);
+        if should_sort {
+            self.push_playlist_order_undo();
+        }
+        if let Some(playlist) = self.current_playlist_mut() {
+            playlist.sort_favorites_by_added();
+        }
+        self.restore_track_selection_after_reorder(selected_path);
+        self.status_message = "Sorted Favorites by most recently added.".to_owned();
+        self.save_state_silently();
+    }
+
     pub(crate) fn move_track_in_current_playlist(&mut self, index: usize, delta: isize) {
         self.persist_repeat_selection_for_current_playlist();
         let selected_path = self.selected_track_path();

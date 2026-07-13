@@ -18,18 +18,35 @@ impl AudioOrbitApp {
             return;
         }
 
-        let added_count = files.len();
-        let Some((start_index, playlist_name)) = self.current_playlist_mut().map(|playlist| {
-            let start_index = playlist.tracks.len();
-            playlist.add_files(files);
-            (start_index, playlist.name.clone())
+        let Some((added_paths, playlist_name, playlist_kind)) = self.current_playlist_mut().map(|playlist| {
+            let added_paths = playlist.add_files(files);
+            (added_paths, playlist.name.clone(), playlist.kind.clone())
         }) else {
             return;
         };
 
-        self.selected_track_index = Some(start_index);
+        let added_count = added_paths.len();
+        let selected_path = if playlist_kind == PlaylistKind::Favorites {
+            added_paths.last()
+        } else {
+            added_paths.first()
+        };
+        self.selected_track_index = selected_path.and_then(|path| {
+            self.current_playlist()
+                .and_then(|playlist| playlist.tracks.iter().position(|track| same_path(&track.path, path)))
+        });
+        if self.active_playlist_index == Some(self.state.selected_playlist_index) {
+            self.active_track_index = self.active_track_path.as_ref().and_then(|active_path| {
+                self.current_playlist()
+                    .and_then(|playlist| playlist.tracks.iter().position(|track| same_path(&track.path, active_path)))
+            });
+        }
         self.ensure_selected_track_visible();
-        self.status_message = format!("Added {added_count} track(s) to {playlist_name}.");
+        self.status_message = if added_count == 0 {
+            format!("Selected tracks are already in {playlist_name}.")
+        } else {
+            format!("Added {added_count} track(s) to {playlist_name}.")
+        };
         self.error_message = None;
         self.save_state_silently();
     }

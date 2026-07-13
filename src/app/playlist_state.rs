@@ -426,6 +426,9 @@ impl AudioOrbitApp {
             return;
         };
 
+        let favorites_is_selected = self.state.selected_playlist_index == favorites_index;
+        let selected_path = favorites_is_selected.then(|| self.selected_track_path()).flatten();
+        let selected_index = self.selected_track_index.unwrap_or(0);
         let is_favorite = self.is_favorite(&path);
         if let Some(favorites) = self.state.playlists.get_mut(favorites_index) {
             if is_favorite {
@@ -436,6 +439,29 @@ impl AudioOrbitApp {
                 self.status_message = "Added to Favorites.".to_owned();
             }
         }
+
+        if favorites_is_selected {
+            let favorites = &self.state.playlists[favorites_index];
+            self.selected_track_index = selected_path
+                .as_ref()
+                .and_then(|selected_path| {
+                    favorites
+                        .tracks
+                        .iter()
+                        .position(|track| same_path(&track.path, selected_path))
+                })
+                .or_else(|| next_valid_track_index(selected_index, favorites.tracks.len()));
+            self.ensure_selected_track_visible();
+        }
+        if self.active_playlist_index == Some(favorites_index) {
+            self.active_track_index = self.active_track_path.as_ref().and_then(|active_path| {
+                self.state.playlists[favorites_index]
+                    .tracks
+                    .iter()
+                    .position(|track| same_path(&track.path, active_path))
+            });
+        }
+
         self.save_state_silently();
     }
     pub(crate) fn add_track_to_playlist(&mut self, path: PathBuf, playlist_index: usize) {
@@ -449,10 +475,20 @@ impl AudioOrbitApp {
         }
 
         let playlist_name = playlist.name.clone();
-        if playlist.add_track_path(path, None, 0) {
-            self.status_message = format!("Added track to {playlist_name}.");
+        let added = playlist.add_track_path(path, None, 0);
+        self.status_message = if added {
+            format!("Added track to {playlist_name}.")
         } else {
-            self.status_message = format!("Track is already in {playlist_name}.");
+            format!("Track is already in {playlist_name}.")
+        };
+
+        if added && self.active_playlist_index == Some(playlist_index) {
+            self.active_track_index = self.active_track_path.as_ref().and_then(|active_path| {
+                self.state.playlists[playlist_index]
+                    .tracks
+                    .iter()
+                    .position(|track| same_path(&track.path, active_path))
+            });
         }
         self.save_state_silently();
     }
