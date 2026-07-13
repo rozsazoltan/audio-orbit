@@ -166,7 +166,7 @@ When repeat selection is active, checkboxes appear in the track list so you can 
 
 ### Search tracks
 
-Use the search button in the track list header to reveal search. Search filters by track title, folder group, and file path. Use **Next result** to jump between matches. Folder playlist context remains visible above the list, the folder dropdown grows with available entries, and **Now playing** scrolls the list back to the active track.
+Use the search button in the track list header to reveal search. Search filters by track title, folder group, and file path. Use **Next result** to jump between matches. Folder playlist context remains visible above the list, the folder dropdown grows with available entries, and **Now playing** scrolls the list back to the active track. A track's right-click menu also offers **Search in playlist** when the same exact path or file name exists in another playlist; selecting a result opens that playlist and centers the matching track. Matching is evaluated only while the context menu is open and never scans the file system.
 
 ### Waveform and silence skip
 

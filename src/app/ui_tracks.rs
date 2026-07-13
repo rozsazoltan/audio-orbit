@@ -6,6 +6,9 @@ const TRACK_GROUP_TOP_GAP: f32 = 6.0;
 const TRACK_GROUP_HEADER_HEIGHT: f32 = 24.0;
 const TRACK_GROUP_BLOCK_HEIGHT: f32 = TRACK_GROUP_TOP_GAP + TRACK_GROUP_HEADER_HEIGHT + TRACK_SEPARATOR_HEIGHT;
 const TRACK_LIST_OVERSCAN_ROWS: f32 = 4.0;
+const PLAYLIST_SUBMENU_WIDTH: f32 = 176.0;
+const PLAYLIST_SUBMENU_MAX_HEIGHT: f32 = 320.0;
+const PLAYLIST_SUBMENU_OVERLAP: f32 = -4.0;
 
 #[derive(Clone, Debug)]
 enum VirtualTrackEntry {
@@ -25,6 +28,48 @@ enum VirtualTrackEntry {
     },
 }
 
+#[derive(Clone, Debug)]
+struct PlaylistTrackTarget {
+    playlist_index: usize,
+    track_path: PathBuf,
+    playlist_name: String,
+    kind: PlaylistKind,
+}
+
+fn find_track_by_exact_path_or_file_name(playlist: &Playlist, path: &Path) -> Option<usize> {
+    let source_path = normalized_path(path);
+    let source_file_name = normalized_file_name(path);
+    let mut exact_file_name_match = None;
+
+    for (track_index, track) in playlist.tracks.iter().enumerate() {
+        if normalized_path(&track.path) == source_path {
+            return Some(track_index);
+        }
+
+        if exact_file_name_match.is_none() {
+            let candidate_file_name = normalized_file_name(&track.path);
+            if let (Some(source), Some(candidate)) =
+                (source_file_name.as_deref(), candidate_file_name.as_deref())
+            {
+                if source == candidate {
+                    exact_file_name_match = Some(track_index);
+                }
+            }
+        }
+    }
+
+    exact_file_name_match
+}
+
+fn normalized_path(path: &Path) -> String {
+    path.to_string_lossy().to_lowercase()
+}
+
+fn normalized_file_name(path: &Path) -> Option<String> {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+}
+
 impl VirtualTrackEntry {
     fn top(&self) -> f32 {
         match self {
@@ -38,7 +83,6 @@ impl VirtualTrackEntry {
         }
     }
 }
-
 
 impl AudioOrbitApp {
     pub(crate) fn render_track_panel(&mut self, ui: &mut egui::Ui) {
@@ -218,6 +262,7 @@ impl AudioOrbitApp {
         ui.separator();
 
         if visible_count == 0 {
+            self.scroll_to_track_path_requested = None;
             ui.centered_and_justified(|ui| {
                 if self.show_track_search && !self.track_search_query.trim().is_empty() {
                     ui.label("No tracks match the current search.");
@@ -243,14 +288,6 @@ impl AudioOrbitApp {
                 }
             }
         }
-
-        let add_targets: Vec<(usize, String, PlaylistKind)> = self
-            .state
-            .playlists
-            .iter()
-            .enumerate()
-            .map(|(index, playlist)| (index, playlist.name.clone(), playlist.kind.clone()))
-            .collect();
 
         let row_width = (ui.available_width() - 22.0).max(320.0);
         let scroll_height = ui.available_height();
@@ -352,6 +389,30 @@ impl AudioOrbitApp {
                     .rposition(|entry| entry.top() <= render_bottom)
                     .map(|index| index + 1)
                     .unwrap_or(first_rendered);
+
+                if let Some(requested_path) = self.scroll_to_track_path_requested.clone() {
+                    let requested_entry = logical_entries.iter().find(|entry| {
+                        let VirtualTrackEntry::TrackRow { index, .. } = entry else {
+                            return false;
+                        };
+                        self.state
+                            .playlists
+                            .get(playlist_index)
+                            .and_then(|playlist| playlist.tracks.get(*index))
+                            .map(|track| same_path(&track.path, &requested_path))
+                            .unwrap_or(false)
+                    });
+
+                    if let Some(entry) = requested_entry {
+                        let rect = egui::Rect::from_min_size(
+                            egui::pos2(visible_rect.left(), entry.top()),
+                            egui::vec2(row_width, TRACK_ROW_HEIGHT),
+                        );
+                        ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                    }
+
+                    self.scroll_to_track_path_requested = None;
+                }
 
                 if self.scroll_to_active_track_requested {
                     let active_entry = self.active_track_path.as_ref().and_then(|active_path| {
@@ -663,7 +724,7 @@ impl AudioOrbitApp {
                                         self.selected_track_index = Some(index);
                                     }
                                     response.context_menu(|ui| {
-                                        self.render_track_row_context_menu(ui, index, path.clone(), &add_targets);
+                                        self.render_track_row_context_menu(ui, index, path.clone());
                                     });
                                 },
                             );
@@ -719,7 +780,7 @@ impl AudioOrbitApp {
                                 self.selected_track_index = Some(index);
                             }
                             context_response.context_menu(|ui| {
-                                self.render_track_row_context_menu(ui, index, path.clone(), &add_targets);
+                                self.render_track_row_context_menu(ui, index, path.clone());
                             });
                             if has_separator_after {
                                 let separator_drop_target = next_visible_track_index.unwrap_or(index + 1);
@@ -779,12 +840,32 @@ impl AudioOrbitApp {
             self.move_track_to_index_in_current_playlist(from, to);
         }
     }
+    fn matching_playlist_tracks(&self, path: &Path) -> Vec<PlaylistTrackTarget> {
+        let current_playlist_index = self.state.selected_playlist_index;
+
+        self.state
+            .playlists
+            .iter()
+            .enumerate()
+            .filter(|(playlist_index, _)| *playlist_index != current_playlist_index)
+            .filter_map(|(playlist_index, playlist)| {
+                find_track_by_exact_path_or_file_name(playlist, path).map(|track_index| {
+                    PlaylistTrackTarget {
+                        playlist_index,
+                        track_path: playlist.tracks[track_index].path.clone(),
+                        playlist_name: playlist.name.clone(),
+                        kind: playlist.kind.clone(),
+                    }
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn render_track_row_context_menu(
         &mut self,
         ui: &mut egui::Ui,
         index: usize,
         path: PathBuf,
-        add_targets: &[(usize, String, PlaylistKind)],
     ) {
         if ui.button(ui_icons::label(Icon::Play, "Play now")).clicked() {
             self.selected_track_index = Some(index);
@@ -808,17 +889,85 @@ impl AudioOrbitApp {
             ui.close_menu();
         }
 
-        ui.menu_button(ui_icons::label(Icon::ListPlus, "Add to playlist"), |ui| {
-            for (target_index, target_name, kind) in add_targets.iter() {
-                if kind.accepts_manual_tracks() {
-                    let label = format!("{} {}", kind.icon(), target_name);
-                    if ui.button(label).clicked() {
-                        self.add_track_to_playlist(path.clone(), *target_index);
-                        ui.close_menu();
-                    }
-                }
-            }
+        ui.scope(|ui| {
+            ui.spacing_mut().menu_spacing = PLAYLIST_SUBMENU_OVERLAP;
+            ui.menu_button(ui_icons::label(Icon::ListPlus, "Add to playlist"), |ui| {
+                let add_targets = self
+                    .state
+                    .playlists
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, playlist)| playlist.accepts_manual_tracks())
+                    .map(|(playlist_index, playlist)| {
+                        (playlist_index, playlist.name.clone(), playlist.kind.clone())
+                    })
+                    .collect::<Vec<_>>();
+
+                ui.set_width(PLAYLIST_SUBMENU_WIDTH);
+                egui::ScrollArea::vertical()
+                    .id_salt("track_add_playlist_targets")
+                    .max_height(PLAYLIST_SUBMENU_MAX_HEIGHT)
+                    .show(ui, |ui| {
+                        ui.set_width(PLAYLIST_SUBMENU_WIDTH);
+                        for (target_index, target_name, kind) in add_targets {
+                            let label = format!("{} {}", kind.icon(), target_name);
+                            let response = ui
+                                .add_sized(
+                                    egui::vec2(
+                                        PLAYLIST_SUBMENU_WIDTH,
+                                        ui.spacing().interact_size.y,
+                                    ),
+                                    egui::Button::new(label).truncate(),
+                                )
+                                .on_hover_text(target_name);
+                            if response.clicked() {
+                                self.add_track_to_playlist(path.clone(), target_index);
+                                ui.close_menu();
+                            }
+                        }
+                    });
+            });
         });
+
+        let playlist_matches = self.matching_playlist_tracks(&path);
+        let search_label = ui_icons::label(Icon::Search, "Search in playlist");
+        if playlist_matches.is_empty() {
+            ui.add_enabled(false, egui::Button::new(search_label))
+                .on_hover_text("Track is not present in another playlist.");
+        } else {
+            ui.scope(|ui| {
+                ui.spacing_mut().menu_spacing = PLAYLIST_SUBMENU_OVERLAP;
+                ui.menu_button(search_label, |ui| {
+                    ui.set_width(PLAYLIST_SUBMENU_WIDTH);
+                    egui::ScrollArea::vertical()
+                        .id_salt("track_search_playlist_targets")
+                        .max_height(PLAYLIST_SUBMENU_MAX_HEIGHT)
+                        .show(ui, |ui| {
+                            ui.set_width(PLAYLIST_SUBMENU_WIDTH);
+                            for target in playlist_matches.iter() {
+                                let label =
+                                    format!("{} {}", target.kind.icon(), target.playlist_name);
+                                let response = ui
+                                    .add_sized(
+                                        egui::vec2(
+                                            PLAYLIST_SUBMENU_WIDTH,
+                                            ui.spacing().interact_size.y,
+                                        ),
+                                        egui::Button::new(label).truncate(),
+                                    )
+                                    .on_hover_text(&target.playlist_name);
+                                if response.clicked() {
+                                    self.jump_to_track_in_playlist(
+                                        target.playlist_index,
+                                        target.track_path.clone(),
+                                    );
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                });
+            });
+        }
 
         let can_remove_from_playlist = self
             .current_playlist()
@@ -965,4 +1114,46 @@ fn paint_track_row_fast_scroll(
     }
 
     rect
+}
+
+#[cfg(test)]
+mod playlist_search_tests {
+    use super::*;
+
+    #[test]
+    fn playlist_search_prefers_exact_path_over_earlier_file_name_match() {
+        let requested = PathBuf::from("C:/Music/Artist/Track.mp3");
+        let mut playlist = Playlist::new("Target");
+        playlist.tracks = vec![
+            Track::from_path(PathBuf::from("D:/Archive/Track.mp3"), None, 0),
+            Track::from_path(requested.clone(), None, 0),
+        ];
+
+        assert_eq!(find_track_by_exact_path_or_file_name(&playlist, &requested), Some(1));
+    }
+
+    #[test]
+    fn playlist_search_falls_back_to_exact_file_name() {
+        let requested = PathBuf::from("C:/Music/Artist/Track.mp3");
+        let mut playlist = Playlist::new("Target");
+        playlist.tracks = vec![
+            Track::from_path(PathBuf::from("D:/Archive/Other Track.mp3"), None, 0),
+            Track::from_path(PathBuf::from("D:/Archive/TRACK.MP3"), None, 0),
+        ];
+
+        assert_eq!(find_track_by_exact_path_or_file_name(&playlist, &requested), Some(1));
+    }
+
+    #[test]
+    fn playlist_search_rejects_partial_file_name_matches() {
+        let requested = PathBuf::from("C:/Music/Artist/Track.mp3");
+        let mut playlist = Playlist::new("Target");
+        playlist.tracks = vec![Track::from_path(
+            PathBuf::from("D:/Archive/Track (Remix).mp3"),
+            None,
+            0,
+        )];
+
+        assert_eq!(find_track_by_exact_path_or_file_name(&playlist, &requested), None);
+    }
 }
