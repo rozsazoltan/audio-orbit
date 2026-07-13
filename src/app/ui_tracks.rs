@@ -6,6 +6,214 @@ const TRACK_GROUP_TOP_GAP: f32 = 6.0;
 const TRACK_GROUP_HEADER_HEIGHT: f32 = 24.0;
 const TRACK_GROUP_BLOCK_HEIGHT: f32 = TRACK_GROUP_TOP_GAP + TRACK_GROUP_HEADER_HEIGHT + TRACK_SEPARATOR_HEIGHT;
 const TRACK_LIST_OVERSCAN_ROWS: f32 = 4.0;
+const PLAYLIST_SUBMENU_MAX_HEIGHT: f32 = 320.0;
+const PLAYLIST_SUBMENU_GAP: f32 = 1.0;
+const PLAYLIST_SUBMENU_HOVER_GRACE_SECONDS: f64 = 0.35;
+const PLAYLIST_SUBMENU_STALE_SECONDS: f64 = 0.50;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum PlaylistSubmenuKind {
+    Add,
+    Search,
+}
+
+#[derive(Clone, Debug)]
+enum PlaylistSubmenuAction {
+    Add { playlist_index: usize },
+    Search {
+        playlist_index: usize,
+        track_path: PathBuf,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct PlaylistSubmenuEntry {
+    action: PlaylistSubmenuAction,
+    rect: egui::Rect,
+}
+
+#[derive(Clone, Debug)]
+struct PlaylistSubmenuState {
+    owner_path: PathBuf,
+    kind: PlaylistSubmenuKind,
+    popup_rect: egui::Rect,
+    entries: Vec<PlaylistSubmenuEntry>,
+    last_hovered_at: f64,
+    last_rendered_at: f64,
+}
+
+fn playlist_submenu_state_id() -> egui::Id {
+    egui::Id::new("audio_orbit_track_playlist_submenu")
+}
+
+fn load_playlist_submenu_state(context: &egui::Context) -> Option<PlaylistSubmenuState> {
+    context.data_mut(|data| {
+        data.get_temp::<Option<PlaylistSubmenuState>>(playlist_submenu_state_id())
+            .flatten()
+    })
+}
+
+fn store_playlist_submenu_state(
+    context: &egui::Context,
+    state: Option<PlaylistSubmenuState>,
+) {
+    context.data_mut(|data| data.insert_temp(playlist_submenu_state_id(), state));
+}
+
+fn menu_style(ui: &mut egui::Ui) {
+    ui.style_mut().spacing.button_padding = egui::vec2(2.0, 0.0);
+    ui.visuals_mut().widgets.active.bg_stroke = egui::Stroke::NONE;
+    ui.visuals_mut().widgets.hovered.bg_stroke = egui::Stroke::NONE;
+    ui.visuals_mut().widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+    ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
+}
+
+fn render_playlist_submenu(
+    ui: &mut egui::Ui,
+    owner_path: &Path,
+    kind: PlaylistSubmenuKind,
+    trigger_label: String,
+    entries: Vec<(String, PlaylistSubmenuAction)>,
+    disabled_hover_text: Option<&str>,
+) {
+    let frame = egui::Frame::menu(ui.style());
+    let frame_margin = frame.total_margin();
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+    let text_color = ui.visuals().widgets.inactive.fg_stroke.color;
+    let button_padding = ui.spacing().button_padding;
+    let longest_text_width = entries
+        .iter()
+        .map(|(label, _)| text_width(ui, label, font_id.clone(), text_color))
+        .fold(0.0, f32::max);
+    let content_width = (longest_text_width + button_padding.x * 2.0).ceil().max(1.0);
+    let outer_width = content_width + frame_margin.left + frame_margin.right;
+    let gap = ui.spacing().menu_spacing.max(PLAYLIST_SUBMENU_GAP);
+    let screen_rect = ui.ctx().screen_rect();
+    let trigger_hint = ui.available_rect_before_wrap();
+    let available_right = screen_rect.right() - trigger_hint.right() - gap;
+    let available_left = trigger_hint.left() - screen_rect.left() - gap;
+    let open_left = available_right < outer_width && available_left > available_right;
+    let arrow = if open_left { "◀" } else { "▶" };
+    let button = egui::Button::new(trigger_label).shortcut_text(arrow);
+
+    if entries.is_empty() {
+        let response = ui.add_enabled(false, button);
+        if let Some(hover_text) = disabled_hover_text {
+            response.on_hover_text(hover_text);
+        }
+        if load_playlist_submenu_state(ui.ctx())
+            .as_ref()
+            .is_some_and(|state| state.owner_path == owner_path && state.kind == kind)
+        {
+            store_playlist_submenu_state(ui.ctx(), None);
+        }
+        return;
+    }
+
+    let response = ui.add(button);
+    let now = ui.input(|input| input.time);
+    let pointer_position = ui.input(|input| input.pointer.hover_pos());
+    let mut state = load_playlist_submenu_state(ui.ctx());
+
+    if response.hovered() {
+        let preserve_popup = state
+            .as_ref()
+            .filter(|state| state.owner_path == owner_path && state.kind == kind)
+            .map(|state| (state.popup_rect, state.entries.clone()))
+            .unwrap_or((egui::Rect::NOTHING, Vec::new()));
+
+        state = Some(PlaylistSubmenuState {
+            owner_path: owner_path.to_path_buf(),
+            kind,
+            popup_rect: preserve_popup.0,
+            entries: preserve_popup.1,
+            last_hovered_at: now,
+            last_rendered_at: now,
+        });
+    }
+
+    let Some(mut active_state) = state else {
+        return;
+    };
+    if active_state.owner_path != owner_path || active_state.kind != kind {
+        return;
+    }
+
+    let pointer_in_popup = pointer_position
+        .map(|position| active_state.popup_rect.contains(position))
+        .unwrap_or(false);
+    if response.hovered() || pointer_in_popup {
+        active_state.last_hovered_at = now;
+    } else if now - active_state.last_hovered_at > PLAYLIST_SUBMENU_HOVER_GRACE_SECONDS {
+        store_playlist_submenu_state(ui.ctx(), None);
+        return;
+    }
+
+    let available_right = screen_rect.right() - response.rect.right() - gap;
+    let available_left = response.rect.left() - screen_rect.left() - gap;
+    let open_left = available_right < outer_width && available_left > available_right;
+    let (pivot, position) = if open_left {
+        (
+            egui::Align2::RIGHT_TOP,
+            egui::pos2(response.rect.left() - gap, response.rect.top() - frame_margin.top),
+        )
+    } else {
+        (
+            egui::Align2::LEFT_TOP,
+            egui::pos2(response.rect.right() + gap, response.rect.top() - frame_margin.top),
+        )
+    };
+
+    let available_content_height =
+        (screen_rect.bottom() - response.rect.top() - frame_margin.bottom).max(ui.spacing().interact_size.y);
+    let max_height = PLAYLIST_SUBMENU_MAX_HEIGHT.min(available_content_height);
+    let popup_entries = entries;
+    let mut rendered_entries = Vec::with_capacity(popup_entries.len());
+    let area_id = egui::Id::new(("track_playlist_submenu_area", owner_path, kind));
+    let area_response = egui::Area::new(area_id)
+        .kind(egui::UiKind::Menu)
+        .order(egui::Order::Foreground)
+        .pivot(pivot)
+        .fixed_pos(position)
+        .default_width(content_width)
+        .constrain(false)
+        .fade_in(false)
+        .sense(egui::Sense::hover())
+        .show(ui.ctx(), |ui| {
+            menu_style(ui);
+            frame.show(ui, |ui| {
+                ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                    ui.set_min_width(content_width);
+                    egui::ScrollArea::vertical()
+                        .id_salt(("track_playlist_submenu_scroll", owner_path, kind))
+                        .max_height(max_height)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.set_min_width(content_width);
+                            for (label, action) in popup_entries {
+                                let item_response = ui.button(&label);
+                                rendered_entries.push(PlaylistSubmenuEntry {
+                                    action,
+                                    rect: item_response.rect,
+                                });
+                            }
+                        });
+                });
+            });
+        });
+
+    active_state.popup_rect = area_response.response.rect;
+    active_state.entries = rendered_entries;
+    active_state.last_rendered_at = now;
+    let pointer_in_rendered_popup = pointer_position
+        .map(|position| active_state.popup_rect.contains(position))
+        .unwrap_or(false);
+    if pointer_in_rendered_popup {
+        active_state.last_hovered_at = now;
+    }
+    store_playlist_submenu_state(ui.ctx(), Some(active_state));
+    ui.ctx().request_repaint_after(Duration::from_millis(50));
+}
 
 #[derive(Clone, Debug)]
 enum VirtualTrackEntry {
@@ -25,6 +233,48 @@ enum VirtualTrackEntry {
     },
 }
 
+#[derive(Clone, Debug)]
+struct PlaylistTrackTarget {
+    playlist_index: usize,
+    track_path: PathBuf,
+    playlist_name: String,
+    kind: PlaylistKind,
+}
+
+fn find_track_by_exact_path_or_file_name(playlist: &Playlist, path: &Path) -> Option<usize> {
+    let source_path = normalized_path(path);
+    let source_file_name = normalized_file_name(path);
+    let mut exact_file_name_match = None;
+
+    for (track_index, track) in playlist.tracks.iter().enumerate() {
+        if normalized_path(&track.path) == source_path {
+            return Some(track_index);
+        }
+
+        if exact_file_name_match.is_none() {
+            let candidate_file_name = normalized_file_name(&track.path);
+            if let (Some(source), Some(candidate)) =
+                (source_file_name.as_deref(), candidate_file_name.as_deref())
+            {
+                if source == candidate {
+                    exact_file_name_match = Some(track_index);
+                }
+            }
+        }
+    }
+
+    exact_file_name_match
+}
+
+fn normalized_path(path: &Path) -> String {
+    path.to_string_lossy().to_lowercase()
+}
+
+fn normalized_file_name(path: &Path) -> Option<String> {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+}
+
 impl VirtualTrackEntry {
     fn top(&self) -> f32 {
         match self {
@@ -39,9 +289,9 @@ impl VirtualTrackEntry {
     }
 }
 
-
 impl AudioOrbitApp {
     pub(crate) fn render_track_panel(&mut self, ui: &mut egui::Ui) {
+        self.process_playlist_submenu_input(ui.ctx());
         let Some(playlist) = self.current_playlist() else {
             ui.heading("No playlist");
             return;
@@ -218,6 +468,7 @@ impl AudioOrbitApp {
         ui.separator();
 
         if visible_count == 0 {
+            self.scroll_to_track_path_requested = None;
             ui.centered_and_justified(|ui| {
                 if self.show_track_search && !self.track_search_query.trim().is_empty() {
                     ui.label("No tracks match the current search.");
@@ -243,14 +494,6 @@ impl AudioOrbitApp {
                 }
             }
         }
-
-        let add_targets: Vec<(usize, String, PlaylistKind)> = self
-            .state
-            .playlists
-            .iter()
-            .enumerate()
-            .map(|(index, playlist)| (index, playlist.name.clone(), playlist.kind.clone()))
-            .collect();
 
         let row_width = (ui.available_width() - 22.0).max(320.0);
         let scroll_height = ui.available_height();
@@ -352,6 +595,30 @@ impl AudioOrbitApp {
                     .rposition(|entry| entry.top() <= render_bottom)
                     .map(|index| index + 1)
                     .unwrap_or(first_rendered);
+
+                if let Some(requested_path) = self.scroll_to_track_path_requested.clone() {
+                    let requested_entry = logical_entries.iter().find(|entry| {
+                        let VirtualTrackEntry::TrackRow { index, .. } = entry else {
+                            return false;
+                        };
+                        self.state
+                            .playlists
+                            .get(playlist_index)
+                            .and_then(|playlist| playlist.tracks.get(*index))
+                            .map(|track| same_path(&track.path, &requested_path))
+                            .unwrap_or(false)
+                    });
+
+                    if let Some(entry) = requested_entry {
+                        let rect = egui::Rect::from_min_size(
+                            egui::pos2(visible_rect.left(), entry.top()),
+                            egui::vec2(row_width, TRACK_ROW_HEIGHT),
+                        );
+                        ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                    }
+
+                    self.scroll_to_track_path_requested = None;
+                }
 
                 if self.scroll_to_active_track_requested {
                     let active_entry = self.active_track_path.as_ref().and_then(|active_path| {
@@ -663,7 +930,7 @@ impl AudioOrbitApp {
                                         self.selected_track_index = Some(index);
                                     }
                                     response.context_menu(|ui| {
-                                        self.render_track_row_context_menu(ui, index, path.clone(), &add_targets);
+                                        self.render_track_row_context_menu(ui, index, path.clone());
                                     });
                                 },
                             );
@@ -719,7 +986,7 @@ impl AudioOrbitApp {
                                 self.selected_track_index = Some(index);
                             }
                             context_response.context_menu(|ui| {
-                                self.render_track_row_context_menu(ui, index, path.clone(), &add_targets);
+                                self.render_track_row_context_menu(ui, index, path.clone());
                             });
                             if has_separator_after {
                                 let separator_drop_target = next_visible_track_index.unwrap_or(index + 1);
@@ -779,12 +1046,79 @@ impl AudioOrbitApp {
             self.move_track_to_index_in_current_playlist(from, to);
         }
     }
+    fn process_playlist_submenu_input(&mut self, context: &egui::Context) {
+        let Some(state) = load_playlist_submenu_state(context) else {
+            return;
+        };
+        let now = context.input(|input| input.time);
+        if now - state.last_rendered_at > PLAYLIST_SUBMENU_STALE_SECONDS {
+            store_playlist_submenu_state(context, None);
+            return;
+        }
+
+        let pressed_position = context.input(|input| {
+            input.events.iter().find_map(|event| match event {
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    ..
+                } => Some(*pos),
+                _ => None,
+            })
+        });
+        let Some(position) = pressed_position else {
+            return;
+        };
+        let Some(action) = state
+            .entries
+            .iter()
+            .find(|entry| entry.rect.contains(position))
+            .map(|entry| entry.action.clone())
+        else {
+            return;
+        };
+
+        store_playlist_submenu_state(context, None);
+        match action {
+            PlaylistSubmenuAction::Add { playlist_index } => {
+                self.add_track_to_playlist(state.owner_path, playlist_index);
+            }
+            PlaylistSubmenuAction::Search {
+                playlist_index,
+                track_path,
+            } => {
+                self.jump_to_track_in_playlist(playlist_index, track_path);
+            }
+        }
+    }
+
+    fn matching_playlist_tracks(&self, path: &Path) -> Vec<PlaylistTrackTarget> {
+        let current_playlist_index = self.state.selected_playlist_index;
+
+        self.state
+            .playlists
+            .iter()
+            .enumerate()
+            .filter(|(playlist_index, _)| *playlist_index != current_playlist_index)
+            .filter_map(|(playlist_index, playlist)| {
+                find_track_by_exact_path_or_file_name(playlist, path).map(|track_index| {
+                    PlaylistTrackTarget {
+                        playlist_index,
+                        track_path: playlist.tracks[track_index].path.clone(),
+                        playlist_name: playlist.name.clone(),
+                        kind: playlist.kind.clone(),
+                    }
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn render_track_row_context_menu(
         &mut self,
         ui: &mut egui::Ui,
         index: usize,
         path: PathBuf,
-        add_targets: &[(usize, String, PlaylistKind)],
     ) {
         if ui.button(ui_icons::label(Icon::Play, "Play now")).clicked() {
             self.selected_track_index = Some(index);
@@ -808,17 +1142,49 @@ impl AudioOrbitApp {
             ui.close_menu();
         }
 
-        ui.menu_button(ui_icons::label(Icon::ListPlus, "Add to playlist"), |ui| {
-            for (target_index, target_name, kind) in add_targets.iter() {
-                if kind.accepts_manual_tracks() {
-                    let label = format!("{} {}", kind.icon(), target_name);
-                    if ui.button(label).clicked() {
-                        self.add_track_to_playlist(path.clone(), *target_index);
-                        ui.close_menu();
-                    }
-                }
-            }
-        });
+        let add_targets = self
+            .state
+            .playlists
+            .iter()
+            .enumerate()
+            .filter(|(_, playlist)| playlist.accepts_manual_tracks())
+            .map(|(playlist_index, playlist)| {
+                (
+                    format!("{} {}", playlist.kind.icon(), playlist.name),
+                    PlaylistSubmenuAction::Add { playlist_index },
+                )
+            })
+            .collect::<Vec<_>>();
+        render_playlist_submenu(
+            ui,
+            &path,
+            PlaylistSubmenuKind::Add,
+            ui_icons::label(Icon::ListPlus, "Add to playlist"),
+            add_targets,
+            None,
+        );
+
+        let playlist_matches = self
+            .matching_playlist_tracks(&path)
+            .into_iter()
+            .map(|target| {
+                (
+                    format!("{} {}", target.kind.icon(), target.playlist_name),
+                    PlaylistSubmenuAction::Search {
+                        playlist_index: target.playlist_index,
+                        track_path: target.track_path,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        render_playlist_submenu(
+            ui,
+            &path,
+            PlaylistSubmenuKind::Search,
+            ui_icons::label(Icon::Search, "Search in playlist"),
+            playlist_matches,
+            Some("Track is not present in another playlist."),
+        );
 
         let can_remove_from_playlist = self
             .current_playlist()
@@ -965,4 +1331,46 @@ fn paint_track_row_fast_scroll(
     }
 
     rect
+}
+
+#[cfg(test)]
+mod playlist_search_tests {
+    use super::*;
+
+    #[test]
+    fn playlist_search_prefers_exact_path_over_earlier_file_name_match() {
+        let requested = PathBuf::from("C:/Music/Artist/Track.mp3");
+        let mut playlist = Playlist::new("Target");
+        playlist.tracks = vec![
+            Track::from_path(PathBuf::from("D:/Archive/Track.mp3"), None, 0),
+            Track::from_path(requested.clone(), None, 0),
+        ];
+
+        assert_eq!(find_track_by_exact_path_or_file_name(&playlist, &requested), Some(1));
+    }
+
+    #[test]
+    fn playlist_search_falls_back_to_exact_file_name() {
+        let requested = PathBuf::from("C:/Music/Artist/Track.mp3");
+        let mut playlist = Playlist::new("Target");
+        playlist.tracks = vec![
+            Track::from_path(PathBuf::from("D:/Archive/Other Track.mp3"), None, 0),
+            Track::from_path(PathBuf::from("D:/Archive/TRACK.MP3"), None, 0),
+        ];
+
+        assert_eq!(find_track_by_exact_path_or_file_name(&playlist, &requested), Some(1));
+    }
+
+    #[test]
+    fn playlist_search_rejects_partial_file_name_matches() {
+        let requested = PathBuf::from("C:/Music/Artist/Track.mp3");
+        let mut playlist = Playlist::new("Target");
+        playlist.tracks = vec![Track::from_path(
+            PathBuf::from("D:/Archive/Track (Remix).mp3"),
+            None,
+            0,
+        )];
+
+        assert_eq!(find_track_by_exact_path_or_file_name(&playlist, &requested), None);
+    }
 }

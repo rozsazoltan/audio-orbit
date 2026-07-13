@@ -86,6 +86,7 @@ impl AudioOrbitApp {
             || self.focus_track_search
             || self.focus_radio_search
             || self.scroll_to_active_track_requested
+            || self.scroll_to_track_path_requested.is_some()
             || self.scroll_to_active_radio_requested
             || self.scroll_to_folder_group_requested.is_some()
     }

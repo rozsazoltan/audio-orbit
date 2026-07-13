@@ -352,6 +352,7 @@ struct AudioOrbitApp {
     focus_track_search: bool,
     focus_radio_search: bool,
     scroll_to_active_track_requested: bool,
+    scroll_to_track_path_requested: Option<PathBuf>,
     scroll_to_active_radio_requested: bool,
     scroll_to_folder_group_requested: Option<String>,
     active_tab: MainContentTab,

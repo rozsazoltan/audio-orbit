@@ -18,9 +18,52 @@ impl AudioOrbitApp {
         self.restore_repeat_selection_for_current_playlist();
         self.selected_track_index = self.eligible_track_indexes().first().copied();
         self.collapsed_groups.clear();
+        self.scroll_to_track_path_requested = None;
         self.search_cursor = 0;
         self.save_state_silently();
     }
+    pub(crate) fn jump_to_track_in_playlist(&mut self, playlist_index: usize, expected_path: PathBuf) {
+        let Some((track_path, playlist_name)) = self
+            .state
+            .playlists
+            .get(playlist_index)
+            .and_then(|playlist| {
+                playlist
+                    .tracks
+                    .iter()
+                    .find(|track| same_path(&track.path, &expected_path))
+                    .map(|track| (track.path.clone(), playlist.name.clone()))
+            })
+        else {
+            return;
+        };
+
+        self.select_playlist(playlist_index);
+        self.track_search_query.clear();
+        self.search_cursor = 0;
+        self.scroll_to_active_track_requested = false;
+        self.scroll_to_folder_group_requested = None;
+        if let Some(playlist) = self.state.playlists.get_mut(playlist_index) {
+            playlist.set_selected_group(None);
+        }
+        self.selected_track_index = self
+            .state
+            .playlists
+            .get(playlist_index)
+            .and_then(|playlist| {
+                playlist
+                    .tracks
+                    .iter()
+                    .position(|track| same_path(&track.path, &track_path))
+            });
+        self.scroll_to_track_path_requested = Some(track_path.clone());
+        self.status_message = format!(
+            "Found {} in {playlist_name}.",
+            display_file_name(&track_path)
+        );
+        self.save_state_silently();
+    }
+
     pub(crate) fn restore_repeat_selection_for_current_playlist(&mut self) {
         let selected_indexes = self
             .current_playlist()
