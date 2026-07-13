@@ -410,6 +410,16 @@ impl AudioOrbitApp {
         }
 
         let mut playback_changed = false;
+        let auto_switch_output_device_changed = ui
+            .checkbox(
+                &mut self.state.playback.auto_switch_output_device,
+                "Automatically switch to the new default output device",
+            )
+            .on_hover_text(
+                "Reopens audio playback on the new system default output when it changes.",
+            )
+            .changed();
+        playback_changed |= auto_switch_output_device_changed;
         playback_changed |= ui
             .checkbox(&mut self.state.playback.auto_advance, "Auto-play next")
             .changed();
@@ -470,6 +480,12 @@ impl AudioOrbitApp {
         }
         if playback_changed {
             self.save_state_silently();
+        }
+        if auto_switch_output_device_changed
+            && self.state.playback.auto_switch_output_device
+            && self.detected_output_change.is_some()
+        {
+            self.refresh_output_device();
         }
 
         let profile_index = self.state.selected_profile_index;

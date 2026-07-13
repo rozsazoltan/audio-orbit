@@ -53,6 +53,7 @@ Audio Orbit supports common desktop-player behavior:
 - repeat the current track or a selected set of tracks
 - adjust volume from the top player bar, including player-only mode
 - adjust volume with the mouse wheel over the top player bar when the pointer is over the title, waveform, or controls
+- optionally switch playback automatically when the system default output device changes
 - remember the last played local track between app launches
 - play saved internet radio streams from the Radio tab
 - favorite radio stations and filter the Radio list to favorites

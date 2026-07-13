@@ -499,6 +499,8 @@ pub struct PlaybackSettings {
     #[serde(default = "default_auto_advance")]
     pub auto_advance: bool,
     #[serde(default)]
+    pub auto_switch_output_device: bool,
+    #[serde(default)]
     pub crossfade_enabled: bool,
     #[serde(default = "default_crossfade_seconds")]
     pub crossfade_seconds: u8,
@@ -516,6 +518,7 @@ impl Default for PlaybackSettings {
     fn default() -> Self {
         Self {
             auto_advance: true,
+            auto_switch_output_device: false,
             crossfade_enabled: false,
             crossfade_seconds: default_crossfade_seconds(),
             repeat_mode: RepeatMode::default(),
@@ -851,4 +854,16 @@ fn folder_group_for_path(path: &Path, root: Option<&Path>, folder_depth: usize) 
 
 fn natural_key(input: &str) -> String {
     input.to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn playback_settings_keep_auto_output_switch_disabled_for_existing_state() {
+        let settings: PlaybackSettings = serde_json::from_str("{}").unwrap();
+
+        assert!(!settings.auto_switch_output_device);
+    }
 }
