@@ -1000,7 +1000,7 @@ impl AudioOrbitApp {
                                         index
                                     };
                                     next_track_drop_target_index = Some(to);
-                                    if ui.input(|input| input.pointer.any_released()) && Self::valid_drop_target(from, to) {
+                                    if ui.input(|input| input.pointer.any_released()) && self.valid_track_drop_target(from, to) {
                                         reorder_track = Some((from, to));
                                         self.dragging_track_index = None;
                                     }
@@ -1008,7 +1008,7 @@ impl AudioOrbitApp {
                             }
                             let track_drop_target_for_paint = next_track_drop_target_index
                                 .or(self.track_drop_target_index)
-                                .filter(|to| self.dragging_track_index.map(|from| Self::valid_drop_target(from, *to)).unwrap_or(false));
+                                .filter(|to| self.dragging_track_index.map(|from| self.valid_track_drop_target(from, *to)).unwrap_or(false));
                             if self.dragging_track_index == Some(index) && track_drop_target_for_paint.is_some() {
                                 paint_dragged_row_fade(ui, row_response.response.rect);
                             }
@@ -1174,11 +1174,13 @@ impl AudioOrbitApp {
             self.details_modal = Some(DetailsModal::Track(path.clone()));
             ui.close_menu();
         }
-        if ui.button("Move up").clicked() {
+        let can_move_up = self.can_move_track_in_current_playlist(index, -1);
+        if ui.add_enabled(can_move_up, egui::Button::new("Move up")).clicked() {
             self.move_track_in_current_playlist(index, -1);
             ui.close_menu();
         }
-        if ui.button("Move down").clicked() {
+        let can_move_down = self.can_move_track_in_current_playlist(index, 1);
+        if ui.add_enabled(can_move_down, egui::Button::new("Move down")).clicked() {
             self.move_track_in_current_playlist(index, 1);
             ui.close_menu();
         }
@@ -1238,26 +1240,31 @@ impl AudioOrbitApp {
             Some("Track is not present in another playlist."),
         );
 
-        let can_remove_from_playlist = self
-            .current_playlist()
-            .map(|playlist| playlist.kind != PlaylistKind::Folder)
-            .unwrap_or(false);
-        if ui
-            .add_enabled(can_remove_from_playlist, egui::Button::new(ui_icons::label(Icon::ListMinus, "Remove from playlist")))
+        if !missing {
+            let can_remove_from_playlist = self
+                .current_playlist()
+                .map(|playlist| playlist.kind != PlaylistKind::Folder)
+                .unwrap_or(false);
+            if ui
+                .add_enabled(can_remove_from_playlist, egui::Button::new(ui_icons::label(Icon::ListMinus, "Remove from playlist")))
+                .clicked()
+            {
+                self.remove_track_from_current_playlist(index);
+                ui.close_menu();
+            }
+            if ui
+                .button(ui_icons::label(Icon::Trash2, "Delete from disk"))
+                .clicked()
+            {
+                self.delete_track_from_disk(path);
+                ui.close_menu();
+            }
+        } else if ui
+            .button(ui_icons::label(Icon::Trash2, "Remove missing entry"))
+            .on_hover_text("Remove this unavailable item from current playlist. No disk operation is performed.")
             .clicked()
         {
-            self.remove_track_from_current_playlist(index);
-            ui.close_menu();
-        }
-        if ui
-            .add_enabled(
-                !missing,
-                egui::Button::new(ui_icons::label(Icon::Trash2, "Delete from disk")),
-            )
-            .on_disabled_hover_text("File is already missing from disk.")
-            .clicked()
-        {
-            self.delete_track_from_disk(path);
+            self.remove_missing_track_from_current_playlist(index);
             ui.close_menu();
         }
     }

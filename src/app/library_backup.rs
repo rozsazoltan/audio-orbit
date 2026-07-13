@@ -5,7 +5,6 @@ struct AppliedLibrarySyncStats {
     added: usize,
     restored: usize,
     newly_missing: usize,
-    missing_total: usize,
 }
 
 impl AppliedLibrarySyncStats {
@@ -115,45 +114,24 @@ impl AudioOrbitApp {
         true
     }
 
-    pub(crate) fn rescan_current_folder(&mut self) {
-        let playlist_index = self.state.selected_playlist_index;
-        let Some((folder, depth, name)) = self.current_playlist().and_then(|playlist| {
-            playlist
-                .source_folder
-                .clone()
-                .map(|folder| (folder, playlist.folder_depth, playlist.name.clone()))
-        }) else {
-            self.error_message = Some("This playlist was not created from a folder.".to_owned());
-            return;
-        };
-
-        if self.start_folder_scan(PendingFolderScanKind::Rescan {
-            playlist_index,
-            name: name.clone(),
-            folder: folder.clone(),
-            depth,
-        }) {
-            self.status_message = format!("Syncing {name} in background...");
-        }
-    }
-
     pub(crate) fn start_folder_scan(&mut self, kind: PendingFolderScanKind) -> bool {
         if self.pending_folder_scan_receiver.is_some() || self.pending_library_sync_receiver.is_some() {
             self.error_message = Some("A library scan is already running. Wait for it to finish before starting another scan.".to_owned());
             return false;
         }
 
-        let folder = match &kind {
-            PendingFolderScanKind::Import { folder, .. } => folder.clone(),
-            PendingFolderScanKind::Rescan { folder, .. } => folder.clone(),
-        };
+        let PendingFolderScanKind::Import { folder, .. } = &kind;
+        let folder = folder.clone();
         let (sender, receiver) = mpsc::channel();
         self.pending_folder_scan_receiver = Some(receiver);
         self.error_message = None;
 
         thread::spawn(move || {
-            let result = collect_audio_files_from_folder(&folder)
-                .map(|files| PendingFolderScanResult { kind, files })
+            let result = scan_audio_folder(&folder)
+                .map(|scan| PendingFolderScanResult {
+                    kind,
+                    files: scan.files,
+                })
                 .map_err(|error| error.to_string());
             let _ = sender.send(result);
         });
@@ -185,83 +163,61 @@ impl AudioOrbitApp {
             }
         };
 
-        match result.kind {
-            PendingFolderScanKind::Import { name, folder, depth } => {
-                if result.files.is_empty() {
-                    self.error_message = Some(format!(
-                        "No supported audio files were found under {}.",
-                        folder.display()
-                    ));
-                    self.status_message = "Folder scan finished without tracks.".to_owned();
-                    return;
-                }
-
-                let track_count = result.files.len();
-                let playlist = Playlist::from_folder(name.clone(), folder.clone(), depth, result.files);
-                self.state.playlists.push(playlist);
-                self.state.selected_playlist_index = self.state.playlists.len() - 1;
-                self.restore_repeat_selection_for_current_playlist();
-                self.selected_track_index = self.eligible_track_indexes().first().copied();
-                self.status_message = format!(
-                    "Imported {track_count} track(s) from {} as {name}.",
-                    folder.display()
-                );
-                self.error_message = None;
-                self.save_state_silently();
-            }
-            PendingFolderScanKind::Rescan { playlist_index, name, folder, depth } => {
-                let selected_path = if self.state.selected_playlist_index == playlist_index {
-                    self.selected_track_path()
-                } else {
-                    None
-                };
-                let Some(playlist) = self.state.playlists.get_mut(playlist_index) else {
-                    self.error_message = Some(format!("{name} no longer exists; sync result was ignored."));
-                    return;
-                };
-                if !playlist
-                    .source_folder
-                    .as_ref()
-                    .map(|source| same_path(source, &folder))
-                    .unwrap_or(false)
-                {
-                    self.error_message = Some(format!("{name} changed source folders; sync result was ignored."));
-                    return;
-                }
-
-                playlist.folder_depth = depth;
-                let stats = playlist.merge_tracks_from_folder_scan(&result.files);
-                self.remap_track_indexes_after_library_change(selected_path);
-                self.status_message = format!(
-                    "Synced {name}: {} available, {} added, {} restored, {} missing.",
-                    stats.present_total, stats.added, stats.restored, stats.missing_total
-                );
-                self.error_message = None;
-                self.save_state_silently();
-            }
+        let PendingFolderScanKind::Import { name, folder, depth } = result.kind;
+        if result.files.is_empty() {
+            self.error_message = Some(format!(
+                "No supported audio files were found under {}.",
+                folder.display()
+            ));
+            self.status_message = "Folder scan finished without tracks.".to_owned();
+            return;
         }
+
+        let track_count = result.files.len();
+        let playlist = Playlist::from_folder(name.clone(), folder.clone(), depth, result.files);
+        self.state.playlists.push(playlist);
+        self.state.selected_playlist_index = self.state.playlists.len() - 1;
+        self.restore_repeat_selection_for_current_playlist();
+        self.selected_track_index = self.eligible_track_indexes().first().copied();
+        self.status_message = format!(
+            "Imported {track_count} track(s) from {} as {name}.",
+            folder.display()
+        );
+        self.error_message = None;
+        self.save_state_silently();
     }
 
     pub(crate) fn start_library_sync(
         &mut self,
         trigger: LibrarySyncTrigger,
-        include_folder_scans: bool,
+        include_folder_scan: bool,
     ) -> bool {
         if self.pending_folder_scan_receiver.is_some() || self.pending_library_sync_receiver.is_some() {
             if trigger == LibrarySyncTrigger::Manual {
-                self.error_message = Some("A library scan is already running.".to_owned());
+                self.error_message = Some("A playlist scan is already running.".to_owned());
             }
             return false;
         }
 
+        let Some(playlist) = self.current_playlist() else {
+            return false;
+        };
+        let playlist_index = self.state.selected_playlist_index;
+        let playlist_name = playlist.name.clone();
+        let playlist_kind = playlist.kind.clone();
+        let source_folder = playlist.source_folder.clone();
         let mut track_paths = BTreeMap::<String, PathBuf>::new();
-        for playlist in &self.state.playlists {
-            // A full folder scan already determines availability for folder-owned
-            // entries. Check those paths separately only during startup, or when
-            // the same file is referenced by a manual playlist or Favorites.
-            if include_folder_scans && playlist.kind == PlaylistKind::Folder {
-                continue;
+        let mut folder_targets = Vec::new();
+
+        if include_folder_scan && playlist_kind == PlaylistKind::Folder {
+            if let Some(source_folder) = source_folder.clone() {
+                folder_targets.push(FolderLibrarySyncTarget {
+                    playlist_index,
+                    playlist_name: playlist_name.clone(),
+                    source_folder,
+                });
             }
+        } else {
             for track in &playlist.tracks {
                 track_paths
                     .entry(path_key(&track.path))
@@ -269,38 +225,9 @@ impl AudioOrbitApp {
             }
         }
 
-        let folder_targets = if include_folder_scans {
-            self.state
-                .playlists
-                .iter()
-                .enumerate()
-                .filter_map(|(playlist_index, playlist)| {
-                    if playlist.kind != PlaylistKind::Folder {
-                        return None;
-                    }
-                    playlist.source_folder.clone().map(|source_folder| FolderLibrarySyncTarget {
-                        playlist_index,
-                        playlist_name: playlist.name.clone(),
-                        source_folder,
-                    })
-                })
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-
         if track_paths.is_empty() && folder_targets.is_empty() {
-            self.last_library_sync_at = if trigger == LibrarySyncTrigger::Startup
-                && self.state.library.auto_sync_folder_playlists
-            {
-                Instant::now()
-                    .checked_sub(AUTO_LIBRARY_SYNC_INTERVAL)
-                    .unwrap_or_else(Instant::now)
-            } else {
-                Instant::now()
-            };
             if trigger == LibrarySyncTrigger::Manual {
-                self.status_message = "Library has no tracks or folders to sync.".to_owned();
+                self.status_message = format!("{playlist_name} has no tracks or folder to sync.");
                 self.error_message = None;
             }
             return false;
@@ -308,9 +235,8 @@ impl AudioOrbitApp {
 
         let (sender, receiver) = mpsc::channel();
         self.pending_library_sync_receiver = Some(receiver);
-        self.last_library_sync_at = Instant::now();
         if trigger == LibrarySyncTrigger::Manual {
-            self.status_message = "Syncing library in background...".to_owned();
+            self.status_message = format!("Syncing {playlist_name} in background...");
             self.error_message = None;
         }
 
@@ -325,25 +251,24 @@ impl AudioOrbitApp {
                 })
                 .collect::<BTreeMap<_, _>>();
 
-            let mut folder_cache = BTreeMap::<String, Result<Arc<Vec<PathBuf>>, String>>::new();
             let folder_results = folder_targets
                 .into_iter()
                 .map(|target| {
-                    let key = path_key(&target.source_folder);
-                    let files = folder_cache
-                        .entry(key)
-                        .or_insert_with(|| {
-                            collect_audio_files_from_folder(&target.source_folder)
-                                .map(Arc::new)
-                                .map_err(|error| error.to_string())
+                    let outcome = scan_audio_folder(&target.source_folder)
+                        .map(|scan| FolderLibrarySyncOutcome::Scanned {
+                            files: Arc::new(scan.files),
                         })
-                        .clone();
-                    FolderLibrarySyncResult { target, files }
+                        .map_err(|error| error.to_string());
+                    FolderLibrarySyncResult { target, outcome }
                 })
                 .collect();
 
             let _ = sender.send(PendingLibrarySyncResult {
                 trigger,
+                playlist_index,
+                playlist_name,
+                playlist_kind,
+                source_folder,
                 availability,
                 folder_results,
             });
@@ -351,14 +276,233 @@ impl AudioOrbitApp {
         true
     }
 
+    fn start_incremental_folder_sync(
+        &mut self,
+        changed_paths: Vec<PendingFolderWatchChange>,
+    ) -> bool {
+        if self.pending_folder_scan_receiver.is_some() || self.pending_library_sync_receiver.is_some() {
+            return false;
+        }
+
+        let Some(playlist) = self.current_playlist() else {
+            return false;
+        };
+        if playlist.kind != PlaylistKind::Folder {
+            return false;
+        }
+        let Some(source_folder) = playlist.source_folder.clone() else {
+            return false;
+        };
+        if changed_paths.is_empty() {
+            return false;
+        }
+
+        let playlist_index = self.state.selected_playlist_index;
+        let playlist_name = playlist.name.clone();
+        let playlist_kind = playlist.kind.clone();
+        let target = FolderLibrarySyncTarget {
+            playlist_index,
+            playlist_name: playlist_name.clone(),
+            source_folder: source_folder.clone(),
+        };
+        let (sender, receiver) = mpsc::channel();
+        self.pending_library_sync_receiver = Some(receiver);
+
+        thread::spawn(move || {
+            let mut present_files = BTreeMap::<String, PathBuf>::new();
+            let mut missing_roots = BTreeMap::<String, PathBuf>::new();
+            let mut errors = Vec::new();
+
+            for change in changed_paths {
+                let path = change.path;
+                if !path_is_same_or_descendant(&path, &source_folder) {
+                    continue;
+                }
+
+                match fs::symlink_metadata(&path) {
+                    Ok(metadata) => {
+                        let file_type = metadata.file_type();
+                        if is_recursive_scan_link(&path, &file_type) {
+                            continue;
+                        }
+
+                        if file_type.is_dir() && change.scan_directory_if_present {
+                            match scan_audio_folder(&path) {
+                                Ok(scan) => {
+                                    for file in scan.files {
+                                        present_files.entry(path_key(&file)).or_insert(file);
+                                    }
+                                }
+                                Err(error) => errors.push(format!("{}: {error}", path.display())),
+                            }
+                        } else if file_type.is_file() && is_supported_audio_file(&path) {
+                            present_files.entry(path_key(&path)).or_insert(path);
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        missing_roots.entry(path_key(&path)).or_insert(path);
+                    }
+                    Err(error) => errors.push(format!("{}: {error}", path.display())),
+                }
+            }
+
+            let mut compact_missing_roots = Vec::<PathBuf>::new();
+            let mut ordered_missing_roots = missing_roots.into_values().collect::<Vec<_>>();
+            ordered_missing_roots.sort_by_key(|path| path.components().count());
+            for path in ordered_missing_roots {
+                if compact_missing_roots
+                    .iter()
+                    .any(|root| path_is_same_or_descendant(&path, root))
+                {
+                    continue;
+                }
+                compact_missing_roots.push(path);
+            }
+
+            let folder_result = FolderLibrarySyncResult {
+                target,
+                outcome: Ok(FolderLibrarySyncOutcome::Incremental {
+                    present_files: Arc::new(present_files.into_values().collect()),
+                    missing_roots: Arc::new(compact_missing_roots),
+                    errors,
+                }),
+            };
+            let _ = sender.send(PendingLibrarySyncResult {
+                trigger: LibrarySyncTrigger::Automatic,
+                playlist_index,
+                playlist_name,
+                playlist_kind,
+                source_folder: Some(source_folder),
+                availability: BTreeMap::new(),
+                folder_results: vec![folder_result],
+            });
+        });
+        true
+    }
+
+    pub(crate) fn refresh_selected_folder_watcher(&mut self, context: &egui::Context) {
+        let desired_root = if self.state.library.auto_sync_selected_playlist {
+            self.current_playlist()
+                .filter(|playlist| playlist.kind == PlaylistKind::Folder)
+                .and_then(|playlist| playlist.source_folder.clone())
+        } else {
+            None
+        };
+        let desired_key = desired_root.as_ref().map(|root| path_key(root));
+
+        if self.folder_watcher_target_key == desired_key {
+            return;
+        }
+
+        self.folder_watcher = None;
+        self.pending_folder_watch_sync_at = None;
+        self.pending_folder_watch_paths.clear();
+        self.pending_folder_watch_full_rescan = false;
+        self.folder_watcher_target_key = desired_key;
+
+        let Some(root) = desired_root else {
+            return;
+        };
+
+        match folder_watcher::FolderWatcher::start(root.clone(), context.clone()) {
+            Ok(watcher) => {
+                self.folder_watcher = Some(watcher);
+            }
+            Err(error) => {
+                self.error_message = Some(format!(
+                    "Automatic folder watching could not start for {}: {error}",
+                    root.display()
+                ));
+            }
+        }
+    }
+
+    pub(crate) fn process_folder_watch_events(&mut self) {
+        let mut paths = Vec::new();
+        let mut overflow = false;
+        let mut failure = None;
+        if let Some(watcher) = &self.folder_watcher {
+            while let Some(event) = watcher.try_recv() {
+                match event {
+                    folder_watcher::FolderWatchEvent::Changes(changed_paths) => {
+                        paths.extend(changed_paths);
+                    }
+                    folder_watcher::FolderWatchEvent::Overflow => overflow = true,
+                    folder_watcher::FolderWatchEvent::Failed(error) => failure = Some(error),
+                }
+            }
+        }
+
+        for change in paths {
+            let key = path_key(&change.path);
+            self.pending_folder_watch_paths
+                .entry(key)
+                .and_modify(|pending| {
+                    pending.scan_directory_if_present |= change.scan_directory_if_present;
+                })
+                .or_insert(PendingFolderWatchChange {
+                    path: change.path,
+                    scan_directory_if_present: change.scan_directory_if_present,
+                });
+        }
+        if overflow {
+            self.pending_folder_watch_full_rescan = true;
+            self.pending_folder_watch_paths.clear();
+        }
+        if !self.pending_folder_watch_paths.is_empty() || self.pending_folder_watch_full_rescan {
+            self.pending_folder_watch_sync_at = Some(Instant::now() + FOLDER_WATCH_DEBOUNCE);
+        }
+
+        if let Some(error) = failure {
+            self.folder_watcher = None;
+            self.error_message = Some(error);
+            if let Some(root) = self
+                .current_playlist()
+                .and_then(|playlist| playlist.source_folder.clone())
+            {
+                self.pending_folder_watch_paths
+                    .entry(path_key(&root))
+                    .or_insert(PendingFolderWatchChange {
+                        path: root,
+                        scan_directory_if_present: false,
+                    });
+                self.pending_folder_watch_sync_at = Some(Instant::now() + FOLDER_WATCH_DEBOUNCE);
+            }
+        }
+    }
+
     pub(crate) fn maybe_start_auto_library_sync(&mut self) {
-        if !self.state.library.auto_sync_folder_playlists
-            || self.last_library_sync_at.elapsed() < AUTO_LIBRARY_SYNC_INTERVAL
+        let Some(run_at) = self.pending_folder_watch_sync_at else {
+            return;
+        };
+        if Instant::now() < run_at
+            || !self.state.library.auto_sync_selected_playlist
+            || self
+                .current_playlist()
+                .map(|playlist| playlist.kind != PlaylistKind::Folder)
+                .unwrap_or(true)
         {
             return;
         }
 
-        self.start_library_sync(LibrarySyncTrigger::Automatic, true);
+        if self.pending_folder_watch_full_rescan {
+            if self.start_library_sync(LibrarySyncTrigger::Automatic, true) {
+                self.pending_folder_watch_full_rescan = false;
+                self.pending_folder_watch_paths.clear();
+                self.pending_folder_watch_sync_at = None;
+            }
+            return;
+        }
+
+        let changed_paths = self
+            .pending_folder_watch_paths
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        if self.start_incremental_folder_sync(changed_paths) {
+            self.pending_folder_watch_paths.clear();
+            self.pending_folder_watch_sync_at = None;
+        }
     }
 
     pub(crate) fn process_library_sync_events(&mut self) {
@@ -371,74 +515,105 @@ impl AudioOrbitApp {
             Err(mpsc::TryRecvError::Empty) => return,
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.pending_library_sync_receiver = None;
-                self.error_message = Some("Library sync stopped before returning a result.".to_owned());
+                self.error_message = Some("Playlist sync stopped before returning a result.".to_owned());
                 return;
             }
         };
         self.pending_library_sync_receiver = None;
-        self.last_library_sync_at = Instant::now();
 
+        let PendingLibrarySyncResult {
+            trigger,
+            playlist_index,
+            playlist_name,
+            playlist_kind,
+            source_folder,
+            availability,
+            folder_results,
+        } = result;
         let selected_path = self.selected_track_path();
         let mut stats = AppliedLibrarySyncStats::default();
-        let mut synced_folder_indexes = BTreeSet::new();
         let mut errors = Vec::new();
 
-        for folder_result in result.folder_results {
-            let Some(playlist_index) = resolve_folder_sync_target(&self.state.playlists, &folder_result.target) else {
-                continue;
-            };
-
-            match folder_result.files {
-                Ok(files) => {
-                    let Some(playlist) = self.state.playlists.get_mut(playlist_index) else {
+        for folder_result in folder_results {
+            match folder_result.outcome {
+                Ok(FolderLibrarySyncOutcome::Scanned { files }) => {
+                    let Some(resolved_index) = resolve_folder_sync_target(
+                        &self.state.playlists,
+                        &folder_result.target,
+                    ) else {
+                        continue;
+                    };
+                    let Some(playlist) = self.state.playlists.get_mut(resolved_index) else {
                         continue;
                     };
                     let folder_stats = playlist.merge_tracks_from_folder_scan(files.as_ref());
                     stats.added += folder_stats.added;
                     stats.restored += folder_stats.restored;
                     stats.newly_missing += folder_stats.newly_missing;
-                    stats.missing_total += folder_stats.missing_total;
-                    synced_folder_indexes.insert(playlist_index);
+                }
+                Ok(FolderLibrarySyncOutcome::Incremental {
+                    present_files,
+                    missing_roots,
+                    errors: incremental_errors,
+                }) => {
+                    let Some(resolved_index) = resolve_folder_sync_target(
+                        &self.state.playlists,
+                        &folder_result.target,
+                    ) else {
+                        continue;
+                    };
+                    let Some(playlist) = self.state.playlists.get_mut(resolved_index) else {
+                        continue;
+                    };
+                    let folder_stats = playlist.merge_tracks_from_folder_changes(
+                        present_files.as_ref(),
+                        missing_roots.as_ref(),
+                    );
+                    stats.added += folder_stats.added;
+                    stats.restored += folder_stats.restored;
+                    stats.newly_missing += folder_stats.newly_missing;
+                    errors.extend(incremental_errors);
                 }
                 Err(error) => {
-                    errors.push(format!(
-                        "{}: {error}",
-                        folder_result.target.playlist_name
-                    ));
+                    errors.push(format!("{}: {error}", folder_result.target.playlist_name));
                 }
             }
         }
 
-        for (playlist_index, playlist) in self.state.playlists.iter_mut().enumerate() {
-            if synced_folder_indexes.contains(&playlist_index) {
-                continue;
+        if !availability.is_empty() {
+            if let Some(resolved_index) = resolve_playlist_sync_target(
+                &self.state.playlists,
+                playlist_index,
+                &playlist_name,
+                &playlist_kind,
+                source_folder.as_deref(),
+            ) {
+                if let Some(playlist) = self.state.playlists.get_mut(resolved_index) {
+                    let availability_stats = playlist.apply_track_availability(&availability);
+                    stats.restored += availability_stats.restored;
+                    stats.newly_missing += availability_stats.newly_missing;
+                }
             }
-            let availability_stats = playlist.apply_track_availability(&result.availability);
-            stats.restored += availability_stats.restored;
-            stats.newly_missing += availability_stats.newly_missing;
         }
-        stats.missing_total = self
-            .state
-            .playlists
-            .iter()
-            .flat_map(|playlist| playlist.tracks.iter())
-            .filter(|track| track.missing)
-            .count();
 
         if stats.changed() {
             self.remap_track_indexes_after_library_change(selected_path);
             self.save_state_silently();
         }
 
-        match result.trigger {
+        match trigger {
             LibrarySyncTrigger::Manual => {
-                self.status_message = format!(
-                    "Library synced: {} added, {} restored, {} newly missing, {} missing total.",
-                    stats.added, stats.restored, stats.newly_missing, stats.missing_total
-                );
+                self.status_message = if stats.changed() {
+                    format!(
+                        "Synced {}: {} added, {} restored, {} newly missing.",
+                        playlist_name, stats.added, stats.restored, stats.newly_missing
+                    )
+                } else {
+                    format!("Synced {playlist_name}. No changes.")
+                };
                 self.error_message = errors.first().map(|error| {
                     if errors.len() == 1 {
-                        format!("One folder could not be synced: {error}")
+                        format!("Folder could not be synced: {error}")
                     } else {
                         format!("{} folders could not be synced. First error: {error}", errors.len())
                     }
@@ -447,24 +622,31 @@ impl AudioOrbitApp {
             LibrarySyncTrigger::Automatic => {
                 if stats.changed() {
                     self.status_message = format!(
-                        "Library updated: {} added, {} restored, {} newly missing.",
-                        stats.added, stats.restored, stats.newly_missing
+                        "{} updated: {} added, {} restored, {} newly missing.",
+                        playlist_name, stats.added, stats.restored, stats.newly_missing
                     );
                 }
             }
             LibrarySyncTrigger::Startup => {
-                if stats.newly_missing > 0 {
+                if stats.changed() {
                     self.status_message = format!(
-                        "Library check found {} missing track(s).",
-                        stats.missing_total
+                        "{} checked: {} added, {} restored, {} newly missing.",
+                        playlist_name, stats.added, stats.restored, stats.newly_missing
                     );
                 }
-                if self.state.library.auto_sync_folder_playlists {
-                    self.last_library_sync_at = Instant::now()
-                        .checked_sub(AUTO_LIBRARY_SYNC_INTERVAL)
-                        .unwrap_or_else(Instant::now);
-                }
             }
+        }
+
+        if trigger != LibrarySyncTrigger::Manual && !errors.is_empty() {
+            self.error_message = Some(if errors.len() == 1 {
+                format!("Playlist could not be fully synced: {}", errors[0])
+            } else {
+                format!(
+                    "Playlist could not be fully synced. {} errors occurred. First error: {}",
+                    errors.len(),
+                    errors[0]
+                )
+            });
         }
     }
 
@@ -533,6 +715,11 @@ impl AudioOrbitApp {
                 ensure_state_is_valid(&mut state);
                 self.stop();
                 self.pending_library_sync_receiver = None;
+                self.folder_watcher = None;
+                self.folder_watcher_target_key = None;
+                self.pending_folder_watch_sync_at = None;
+                self.pending_folder_watch_paths.clear();
+                self.pending_folder_watch_full_rescan = false;
                 self.state = state;
                 self.show_library_panel = self.state.ui.show_library_panel;
                 self.show_profile_panel = self.state.ui.show_profile_panel;
@@ -549,6 +736,41 @@ impl AudioOrbitApp {
             }
         }
     }
+}
+
+fn resolve_playlist_sync_target(
+    playlists: &[Playlist],
+    target_index: usize,
+    target_name: &str,
+    target_kind: &PlaylistKind,
+    target_source_folder: Option<&Path>,
+) -> Option<usize> {
+    let matches_target = |playlist: &Playlist| {
+        if &playlist.kind != target_kind || playlist.name != target_name {
+            return false;
+        }
+        match (playlist.source_folder.as_deref(), target_source_folder) {
+            (Some(left), Some(right)) => same_path(left, right),
+            (None, None) => true,
+            _ => false,
+        }
+    };
+
+    if playlists
+        .get(target_index)
+        .map(|playlist| matches_target(playlist))
+        .unwrap_or(false)
+    {
+        return Some(target_index);
+    }
+
+    let mut matches = playlists
+        .iter()
+        .enumerate()
+        .filter(|(_, playlist)| matches_target(playlist))
+        .map(|(index, _)| index);
+    let index = matches.next()?;
+    matches.next().is_none().then_some(index)
 }
 
 fn resolve_folder_sync_target(

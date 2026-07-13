@@ -365,23 +365,27 @@ impl AudioOrbitApp {
         self.show_radio_add_modal = is_open;
     }
     pub(crate) fn render_library_settings_section(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Library sync");
-        ui.small("Missing files stay in playlists and appear dimmed. Folder sync adds new files and restores entries when files return.");
+        ui.heading("Playlist sync");
+        ui.small(
+            "Missing files stay visible. Automatic sync watches only selected folder playlist through Windows notifications.",
+        );
 
         let auto_sync_changed = ui
             .checkbox(
-                &mut self.state.library.auto_sync_folder_playlists,
-                "Automatically sync library",
+                &mut self.state.library.auto_sync_selected_playlist,
+                "Automatically watch selected folder playlist",
             )
-            .on_hover_text("Runs a background sync at most once every 30 seconds. File checks and folder scans never run on the UI thread.")
+            .on_hover_text(
+                "Uses Windows ReadDirectoryChangesW for selected folder playlist. No periodic folder polling runs while folder is idle. Only changed paths are reconciled after a short debounce; full selected-playlist scan is reserved for notification overflow or manual sync. Startup checks only saved track paths; files added while app was closed need manual sync.",
+            )
             .changed();
         if auto_sync_changed {
+            self.folder_watcher = None;
+            self.folder_watcher_target_key = None;
+            self.pending_folder_watch_sync_at = None;
+            self.pending_folder_watch_paths.clear();
+            self.pending_folder_watch_full_rescan = false;
             self.save_state_silently();
-            if self.state.library.auto_sync_folder_playlists {
-                self.last_library_sync_at = Instant::now()
-                    .checked_sub(AUTO_LIBRARY_SYNC_INTERVAL)
-                    .unwrap_or_else(Instant::now);
-            }
         }
 
         let scan_idle = self.pending_folder_scan_receiver.is_none()
@@ -389,15 +393,15 @@ impl AudioOrbitApp {
         if ui
             .add_enabled(
                 scan_idle,
-                egui::Button::new(ui_icons::label(Icon::RefreshCw, "Sync library now")),
+                egui::Button::new(ui_icons::label(Icon::RefreshCw, "Sync selected playlist now")),
             )
-            .on_hover_text("Check every saved track and scan every folder playlist once.")
+            .on_hover_text("Check only selected playlist. Folder playlists scan their source folder once.")
             .clicked()
         {
             self.start_library_sync(LibrarySyncTrigger::Manual, true);
         }
         if !scan_idle {
-            ui.small("Library scan running in background.");
+            ui.small("Playlist scan running in background.");
         }
     }
 

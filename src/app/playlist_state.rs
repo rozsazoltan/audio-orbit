@@ -20,6 +20,11 @@ impl AudioOrbitApp {
         self.collapsed_groups.clear();
         self.scroll_to_track_path_requested = None;
         self.search_cursor = 0;
+        self.folder_watcher = None;
+        self.folder_watcher_target_key = None;
+        self.pending_folder_watch_sync_at = None;
+        self.pending_folder_watch_paths.clear();
+        self.pending_folder_watch_full_rescan = false;
         self.save_state_silently();
     }
     pub(crate) fn jump_to_track_in_playlist(&mut self, playlist_index: usize, expected_path: PathBuf) {
@@ -572,6 +577,54 @@ impl AudioOrbitApp {
         };
 
         self.selected_track_index = next_valid_track_index(track_index, remaining_len);
+        self.save_state_silently();
+    }
+    pub(crate) fn remove_missing_track_from_current_playlist(&mut self, track_index: usize) {
+        let Some(path) = self
+            .current_playlist()
+            .and_then(|playlist| playlist.tracks.get(track_index))
+            .filter(|track| track.missing)
+            .map(|track| track.path.clone())
+        else {
+            self.error_message = Some("Track is no longer marked as missing.".to_owned());
+            return;
+        };
+
+        if self
+            .active_track_path
+            .as_ref()
+            .map(|active| same_path(active, &path))
+            .unwrap_or(false)
+        {
+            self.stop();
+        }
+
+        let Some(remaining_len) = self.current_playlist_mut().map(|playlist| {
+            playlist.tracks.remove(track_index);
+            playlist
+                .repeat_selection
+                .retain(|selected| !same_path(selected, &path));
+            playlist.set_selected_group(playlist.selected_group.clone());
+            playlist.tracks.len()
+        }) else {
+            return;
+        };
+
+        self.selected_track_index = next_valid_track_index(track_index, remaining_len);
+        self.active_track_index = self
+            .active_playlist_index
+            .zip(self.active_track_path.as_ref())
+            .and_then(|(playlist_index, active_path)| {
+                self.state.playlists.get(playlist_index).and_then(|playlist| {
+                    playlist
+                        .tracks
+                        .iter()
+                        .position(|track| same_path(&track.path, active_path))
+                })
+            });
+        self.restore_repeat_selection_for_current_playlist();
+        self.status_message = format!("Removed missing entry {}.", display_file_name(&path));
+        self.error_message = None;
         self.save_state_silently();
     }
     pub(crate) fn delete_track_from_disk(&mut self, path: PathBuf) {
