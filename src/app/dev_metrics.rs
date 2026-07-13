@@ -368,6 +368,9 @@ impl AudioOrbitApp {
         if self.pending_folder_scan_receiver.is_some() {
             jobs.push("folder scan".to_owned());
         }
+        if self.pending_library_sync_receiver.is_some() {
+            jobs.push("playlist sync".to_owned());
+        }
         if self.pending_track_switch.is_some() {
             jobs.push("crossfade switch".to_owned());
         }

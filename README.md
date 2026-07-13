@@ -33,7 +33,7 @@ Audio Orbit plays local music files from manual playlists or scanner-owned folde
 
 Folder playlists are created from a selected directory. You choose how many folder levels should be used for grouping, and Audio Orbit scans supported audio files under that folder.
 
-Folder playlists are scanner-owned. You do not manually add individual tracks to them; instead, you add files to the folder and rescan. Manual playlists and Favorites can receive individual tracks.
+Folder playlists are scanner-owned. You do not manually add individual tracks to them; instead, add files to the folder and sync the playlist. Missing files remain visible as dimmed entries, while files that return are restored automatically on the next sync. Missing entries can be removed from any playlist through the track context menu without touching the disk. Manual playlists and Favorites receive the same missing-file status without losing their saved ordering.
 
 ### Internet radio
 
@@ -54,6 +54,8 @@ Audio Orbit supports common desktop-player behavior:
 - adjust volume from the top player bar, including player-only mode
 - adjust volume with the mouse wheel over the top player bar when the pointer is over the title, waveform, or controls
 - optionally switch playback automatically when the system default output device changes
+- retain missing playlist entries as dimmed rows and skip them during playback
+- optionally watch selected folder playlist through native Windows change notifications without periodic polling
 - remember the last played local track between app launches
 - play saved internet radio streams from the Radio tab
 - favorite radio stations and filter the Radio list to favorites
@@ -84,6 +86,7 @@ Backups are ZIP files containing the full app state:
 - silence skip settings
 - internet radio station list
 - update settings
+- library synchronization settings
 - UI layout settings
 
 Audio files themselves are not embedded in the backup. The backup stores library and playlist state, not your music collection.
@@ -142,6 +145,10 @@ Artist B / Album A
 
 Folder groups can be collapsed or expanded in the track list. When a folder playlist only has one group, Audio Orbit hides the redundant folder group headers.
 
+Use **Sync playlist** to update only the selected playlist. Folder playlists scan their source folder for added, restored, or missing files; manual playlists and Favorites check only their saved track paths. Deleted or unavailable files stay in place as dimmed rows, preserving Favorites order, manual playlist order, and folder context. Use **Remove missing entry** from a missing track's context menu to remove only that saved item without attempting another disk deletion.
+
+Enable **Settings > Playlist sync > Automatically watch selected folder playlist** for background synchronization. Audio Orbit uses `ReadDirectoryChangesW` for selected folder playlist root and waits in kernel state while folder is idle. No periodic folder polling, timestamp walk, or full-library scan runs in background. Windows reports changed relative paths; Audio Orbit debounces bursts, checks only those paths, and scans only a newly added or renamed subtree when required. Startup checks only saved track paths, avoiding a recursive folder walk. A full selected-playlist scan is reserved for manual sync or rare notification-buffer overflow. Files added while Audio Orbit was closed appear after manual sync; changes made while it is running arrive through Windows notifications. Manual playlists and Favorites remain available through **Sync selected playlist now**.
+
 ### Play music
 
 Use the center track list to browse tracks. Double-click a track to start it immediately.
@@ -174,7 +181,7 @@ Local track waveforms mark long quiet sections that silence skipping will bypass
 
 ### Manage Favorites
 
-Use the heart button next to a track to add or remove it from Favorites. Newly favorited tracks appear at the top. Favorites remembers when each track was added, so the **Added** sort restores newest-first favorite order after A-Z or Z-A sorting. Manual drag-and-drop ordering is saved with the rest of the app state. Favorites is a built-in playlist and cannot be deleted.
+Use the heart button next to a track to add or remove it from Favorites. Newly favorited tracks appear at the top. Favorites remembers when each track was added, so the **Added** sort restores newest-first favorite order after A-Z or Z-A sorting. Manual drag-and-drop ordering is saved with the rest of the app state. In folder playlists, tracks can only be reordered inside their existing folder group; moving a track across folder boundaries is blocked. Favorites is a built-in playlist and cannot be deleted.
 
 ### Export and import backups
 
@@ -212,6 +219,8 @@ Audio Orbit is a local music player, not a system-wide Windows audio processor. 
 The orbit effect is headphone-friendly stereo processing, not true HRTF-based 3D surround virtualization.
 
 Support for audio formats depends on the bundled Rust audio decoding stack. Common formats such as MP3, WAV, FLAC, OGG, OPUS, M4A, MP4, and AAC are intended to work, but every possible codec/container combination cannot be guaranteed without an FFmpeg backend.
+
+Automatic synchronization is scoped to selected folder playlist. Windows wakes Audio Orbit only after matching file or directory changes and supplies changed paths. Short debounce coalesces bursty add, remove, and rename events before incremental reconciliation. Existing trees are not walked for ordinary file changes; only newly added or renamed directories are scanned. Rare notification-buffer overflow falls back to one full selected-playlist scan. Startup checks saved track paths without walking the folder tree. Idle folders are never polled. Recursive scans do not follow symbolic links or Windows reparse points.
 
 ## Contributing
 

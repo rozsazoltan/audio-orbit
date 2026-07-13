@@ -158,6 +158,29 @@ impl AudioOrbitApp {
     pub(crate) fn valid_drop_target(from: usize, to: usize) -> bool {
         from != to && from + 1 != to
     }
+    pub(crate) fn valid_track_drop_target(&self, from: usize, to: usize) -> bool {
+        self.current_playlist()
+            .map(|playlist| valid_track_drop_target_for_playlist(playlist, from, to))
+            .unwrap_or(false)
+    }
+    pub(crate) fn can_move_track_in_current_playlist(&self, index: usize, delta: isize) -> bool {
+        let Some(playlist) = self.current_playlist() else {
+            return false;
+        };
+        if index >= playlist.tracks.len() {
+            return false;
+        }
+        let target = if delta < 0 {
+            index.checked_sub(1)
+        } else {
+            index.checked_add(1).filter(|target| *target < playlist.tracks.len())
+        };
+        let Some(target) = target else {
+            return false;
+        };
+        playlist.kind != PlaylistKind::Folder
+            || playlist.tracks[index].group == playlist.tracks[target].group
+    }
     pub(crate) fn restore_track_selection_after_reorder(&mut self, selected_path: Option<PathBuf>) {
         if let Some(selected_path) = selected_path {
             if let Some(index) = self
@@ -226,22 +249,19 @@ impl AudioOrbitApp {
     }
 
     pub(crate) fn move_track_in_current_playlist(&mut self, index: usize, delta: isize) {
+        if !self.can_move_track_in_current_playlist(index, delta) {
+            return;
+        }
         self.persist_repeat_selection_for_current_playlist();
         let selected_path = self.selected_track_path();
         let Some(track_count) = self.current_playlist().map(|playlist| playlist.tracks.len()) else {
             return;
         };
-        if index >= track_count {
-            return;
-        }
         let to = if delta < 0 {
             index.saturating_sub(1)
         } else {
             (index + 1).min(track_count - 1)
         };
-        if index == to {
-            return;
-        }
         self.push_playlist_order_undo();
         let Some(playlist) = self.current_playlist_mut() else {
             return;
@@ -252,14 +272,11 @@ impl AudioOrbitApp {
         self.save_state_silently();
     }
     pub(crate) fn move_track_to_index_in_current_playlist(&mut self, from: usize, to: usize) {
-        self.persist_repeat_selection_for_current_playlist();
-        let selected_path = self.selected_track_path();
-        let Some(track_count) = self.current_playlist().map(|playlist| playlist.tracks.len()) else {
-            return;
-        };
-        if from >= track_count || to > track_count {
+        if !self.valid_track_drop_target(from, to) {
             return;
         }
+        self.persist_repeat_selection_for_current_playlist();
+        let selected_path = self.selected_track_path();
         self.push_playlist_order_undo();
         let Some(playlist) = self.current_playlist_mut() else {
             return;
@@ -406,5 +423,60 @@ impl AudioOrbitApp {
         self.radio_selection_was_user_set = self.state.selected_radio_index.is_some();
         self.status_message = "Moved radio station.".to_owned();
         self.save_state_silently();
+    }
+}
+
+fn folder_group_drop_bounds(playlist: &Playlist, from: usize) -> Option<(usize, usize)> {
+    let group = playlist.tracks.get(from)?.group.as_str();
+    let start = playlist
+        .tracks
+        .iter()
+        .position(|track| track.group == group)?;
+    let end_exclusive = playlist
+        .tracks
+        .iter()
+        .rposition(|track| track.group == group)?
+        .saturating_add(1);
+    Some((start, end_exclusive))
+}
+
+fn valid_track_drop_target_for_playlist(playlist: &Playlist, from: usize, to: usize) -> bool {
+    if from == to || from.saturating_add(1) == to {
+        return false;
+    }
+    if from >= playlist.tracks.len() || to > playlist.tracks.len() {
+        return false;
+    }
+    if playlist.kind != PlaylistKind::Folder {
+        return true;
+    }
+
+    folder_group_drop_bounds(playlist, from)
+        .map(|(start, end_exclusive)| (start..=end_exclusive).contains(&to))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn folder_track_drop_stays_inside_source_group() {
+        let root = PathBuf::from("C:/Music");
+        let playlist = Playlist::from_folder(
+            "Folder",
+            root.clone(),
+            1,
+            vec![
+                root.join("Artist A").join("One.mp3"),
+                root.join("Artist A").join("Two.mp3"),
+                root.join("Artist B").join("One.mp3"),
+            ],
+        );
+
+        assert!(valid_track_drop_target_for_playlist(&playlist, 0, 2));
+        assert!(valid_track_drop_target_for_playlist(&playlist, 1, 0));
+        assert!(!valid_track_drop_target_for_playlist(&playlist, 0, 3));
+        assert!(!valid_track_drop_target_for_playlist(&playlist, 2, 0));
     }
 }

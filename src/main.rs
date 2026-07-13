@@ -4,6 +4,7 @@ mod audio_player;
 mod config;
 mod dsp;
 mod icon;
+mod folder_watcher;
 mod media_keys;
 mod single_instance;
 mod spectrum_waveform;
@@ -17,9 +18,10 @@ use crate::app::dev_metrics::{DevMetricsNativeWindowHandle, DevMetricsPanelState
 use crate::{
     audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo, PreparedPlayback, RadioVisualizerFrame},
     config::{
-        app_data_dir, app_version_label, collect_audio_files_from_folder, default_backup_file_name, display_file_name, export_state_zip,
-        import_state_zip, load_state, same_path, save_state, LastPlayedTrack, PlaybackSession, Playlist, PlaylistKind, RadioStation, RepeatMode, SavedState,
-        Track, WindowGeometry, FAVORITES_PLAYLIST_NAME,
+        app_data_dir, app_version_label, default_backup_file_name, display_file_name, export_state_zip,
+        import_state_zip, is_recursive_scan_link, is_supported_audio_file, load_state, path_is_same_or_descendant,
+        path_key, same_path, save_state, scan_audio_folder, LastPlayedTrack,
+        PlaybackSession, Playlist, PlaylistKind, RadioStation, RepeatMode, SavedState, Track, WindowGeometry, FAVORITES_PLAYLIST_NAME,
     },
     dsp::{DspSettings, OrbitMode},
 };
@@ -32,7 +34,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::Command,
-    sync::mpsc,
+    sync::{mpsc, Arc},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -52,6 +54,7 @@ const PLAYBACK_REPAINT_INTERVAL: Duration = Duration::from_millis(250);
 const BACKGROUND_WORK_REPAINT_INTERVAL: Duration = Duration::from_millis(160);
 const STATUS_REPAINT_INTERVAL: Duration = Duration::from_millis(500);
 const IDLE_REPAINT_INTERVAL: Duration = Duration::from_millis(1000);
+const FOLDER_WATCH_DEBOUNCE: Duration = Duration::from_millis(900);
 const SEEK_PREPARE_DEBOUNCE: Duration = Duration::from_millis(700);
 const FAST_SEEK_COALESCE_INTERVAL: Duration = Duration::from_millis(140);
 
@@ -223,12 +226,6 @@ enum PendingFolderScanKind {
         folder: PathBuf,
         depth: usize,
     },
-    Rescan {
-        playlist_index: usize,
-        name: String,
-        folder: PathBuf,
-        depth: usize,
-    },
 }
 
 #[derive(Clone, Debug)]
@@ -236,6 +233,56 @@ struct PendingFolderScanResult {
     kind: PendingFolderScanKind,
     files: Vec<PathBuf>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LibrarySyncTrigger {
+    Startup,
+    Manual,
+    Automatic,
+}
+
+#[derive(Clone, Debug)]
+struct PendingFolderWatchChange {
+    path: PathBuf,
+    scan_directory_if_present: bool,
+}
+
+#[derive(Clone, Debug)]
+struct FolderLibrarySyncTarget {
+    playlist_index: usize,
+    playlist_name: String,
+    source_folder: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+enum FolderLibrarySyncOutcome {
+    Scanned {
+        files: Arc<Vec<PathBuf>>,
+    },
+    Incremental {
+        present_files: Arc<Vec<PathBuf>>,
+        missing_roots: Arc<Vec<PathBuf>>,
+        errors: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct FolderLibrarySyncResult {
+    target: FolderLibrarySyncTarget,
+    outcome: Result<FolderLibrarySyncOutcome, String>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingLibrarySyncResult {
+    trigger: LibrarySyncTrigger,
+    playlist_index: usize,
+    playlist_name: String,
+    playlist_kind: PlaylistKind,
+    source_folder: Option<PathBuf>,
+    availability: BTreeMap<String, bool>,
+    folder_results: Vec<FolderLibrarySyncResult>,
+}
+
 
 #[derive(Clone, Debug)]
 enum DetailsModal {
@@ -334,6 +381,12 @@ struct AudioOrbitApp {
     last_fast_seek_started_at: Option<Instant>,
     silence_analysis_cache: BTreeMap<PathBuf, SilenceAnalysisCacheEntry>,
     pending_folder_scan_receiver: Option<mpsc::Receiver<Result<PendingFolderScanResult, String>>>,
+    pending_library_sync_receiver: Option<mpsc::Receiver<PendingLibrarySyncResult>>,
+    folder_watcher: Option<folder_watcher::FolderWatcher>,
+    folder_watcher_target_key: Option<String>,
+    pending_folder_watch_sync_at: Option<Instant>,
+    pending_folder_watch_paths: BTreeMap<String, PendingFolderWatchChange>,
+    pending_folder_watch_full_rescan: bool,
     pending_profile_apply_at: Option<Instant>,
     profile_apply_applied_until: Option<Instant>,
     waveform_drag_position_seconds: Option<f32>,
@@ -881,6 +934,7 @@ fn ensure_state_is_valid(state: &mut SavedState) {
             playlist.kind = PlaylistKind::Folder;
         }
         playlist.ensure_favorite_added_sequences();
+        playlist.ensure_folder_group_contiguity();
         playlist.set_selected_group(playlist.selected_group.clone());
         let track_paths: Vec<PathBuf> = playlist.tracks.iter().map(|track| track.path.clone()).collect();
         playlist

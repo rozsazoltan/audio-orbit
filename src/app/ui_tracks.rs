@@ -793,10 +793,20 @@ impl AudioOrbitApp {
                                 .map(|active| same_path(active, &track.path))
                                 .unwrap_or(false);
                             let favorite = self.is_favorite(&track.path);
-                            let metadata = if self.player_only_mode {
+                            let missing = track.missing;
+                            let track_metadata = if self.player_only_mode {
                                 format_track_metadata_player_only(&track)
                             } else {
                                 format_track_metadata_compact(&track)
+                            };
+                            let metadata = if missing {
+                                if track_metadata.is_empty() {
+                                    "Missing".to_owned()
+                                } else {
+                                    format!("Missing · {track_metadata}")
+                                }
+                            } else {
+                                track_metadata
                             };
                             let title = if is_active {
                                 format!("{} {}", ui_icons::icon(Icon::Play), track.title)
@@ -815,6 +825,7 @@ impl AudioOrbitApp {
                                     is_selected,
                                     is_active,
                                     favorite,
+                                    missing,
                                     repeat_selection_mode,
                                     self.selected_track_indexes.contains(&index),
                                 );
@@ -845,9 +856,15 @@ impl AudioOrbitApp {
                                     }
 
                                     let heart = if favorite {
-                                        egui::RichText::new("♥").color(egui::Color32::from_rgb(230, 70, 95)).size(15.0)
+                                        let color = egui::Color32::from_rgb(230, 70, 95);
+                                        egui::RichText::new("♥")
+                                            .color(if missing { color.linear_multiply(0.42) } else { color })
+                                            .size(15.0)
                                     } else {
-                                        egui::RichText::new("♡").size(15.0)
+                                        let color = ui.visuals().widgets.inactive.fg_stroke.color;
+                                        egui::RichText::new("♡")
+                                            .color(if missing { color.linear_multiply(0.42) } else { color })
+                                            .size(15.0)
                                     };
                                     if ui
                                         .add_sized(egui::vec2(28.0, 24.0), egui::Button::new(heart))
@@ -864,24 +881,35 @@ impl AudioOrbitApp {
                                     );
 
                                     if is_selected {
-                                        ui.painter().rect_filled(body_rect, 5.0, ui.visuals().selection.bg_fill);
+                                        let fill = ui.visuals().selection.bg_fill;
+                                        ui.painter().rect_filled(
+                                            body_rect,
+                                            5.0,
+                                            if missing { fill.linear_multiply(0.42) } else { fill },
+                                        );
                                     }
 
                                     let body_padding = 8.0;
-                                    let text_color = if is_selected {
+                                    let mut text_color = if is_selected {
                                         ui.visuals().selection.stroke.color
                                     } else if is_active {
                                         ui.visuals().selection.bg_fill
                                     } else {
                                         ui.visuals().widgets.inactive.fg_stroke.color
                                     };
+                                    if missing {
+                                        text_color = text_color.linear_multiply(0.42);
+                                    }
                                     let title_font = egui::FontId::proportional(14.0);
                                     let metadata_font = egui::FontId::proportional(12.0);
-                                    let metadata_color = if is_active || row_hovered {
+                                    let mut metadata_color = if is_active || row_hovered {
                                         ui.visuals().widgets.inactive.fg_stroke.color
                                     } else {
                                         ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.50)
                                     };
+                                    if missing {
+                                        metadata_color = metadata_color.linear_multiply(0.42);
+                                    }
                                     let metadata_width = if metadata.is_empty() {
                                         0.0
                                     } else {
@@ -919,6 +947,11 @@ impl AudioOrbitApp {
                                         );
                                     }
 
+                                    let response = if missing {
+                                        response.on_hover_text(format!("File not found: {}", path.display()))
+                                    } else {
+                                        response
+                                    };
                                     if response.clicked() {
                                         self.selected_track_index = Some(index);
                                     }
@@ -967,7 +1000,7 @@ impl AudioOrbitApp {
                                         index
                                     };
                                     next_track_drop_target_index = Some(to);
-                                    if ui.input(|input| input.pointer.any_released()) && Self::valid_drop_target(from, to) {
+                                    if ui.input(|input| input.pointer.any_released()) && self.valid_track_drop_target(from, to) {
                                         reorder_track = Some((from, to));
                                         self.dragging_track_index = None;
                                     }
@@ -975,7 +1008,7 @@ impl AudioOrbitApp {
                             }
                             let track_drop_target_for_paint = next_track_drop_target_index
                                 .or(self.track_drop_target_index)
-                                .filter(|to| self.dragging_track_index.map(|from| Self::valid_drop_target(from, *to)).unwrap_or(false));
+                                .filter(|to| self.dragging_track_index.map(|from| self.valid_track_drop_target(from, *to)).unwrap_or(false));
                             if self.dragging_track_index == Some(index) && track_drop_target_for_paint.is_some() {
                                 paint_dragged_row_fade(ui, row_response.response.rect);
                             }
@@ -1120,7 +1153,19 @@ impl AudioOrbitApp {
         index: usize,
         path: PathBuf,
     ) {
-        if ui.button(ui_icons::label(Icon::Play, "Play now")).clicked() {
+        let missing = self
+            .current_playlist()
+            .and_then(|playlist| playlist.tracks.get(index))
+            .map(|track| track.missing)
+            .unwrap_or(true);
+
+        let play_response = ui.button(ui_icons::label(Icon::Play, "Play now"));
+        let play_response = if missing {
+            play_response.on_hover_text("Checks whether file has returned before playback.")
+        } else {
+            play_response
+        };
+        if play_response.clicked() {
             self.selected_track_index = Some(index);
             self.play_path(path.clone(), Some(index), 0.0);
             ui.close_menu();
@@ -1129,15 +1174,24 @@ impl AudioOrbitApp {
             self.details_modal = Some(DetailsModal::Track(path.clone()));
             ui.close_menu();
         }
-        if ui.button("Move up").clicked() {
+        let can_move_up = self.can_move_track_in_current_playlist(index, -1);
+        if ui.add_enabled(can_move_up, egui::Button::new("Move up")).clicked() {
             self.move_track_in_current_playlist(index, -1);
             ui.close_menu();
         }
-        if ui.button("Move down").clicked() {
+        let can_move_down = self.can_move_track_in_current_playlist(index, 1);
+        if ui.add_enabled(can_move_down, egui::Button::new("Move down")).clicked() {
             self.move_track_in_current_playlist(index, 1);
             ui.close_menu();
         }
-        if ui.button(ui_icons::label(Icon::ExternalLink, "Show in File Explorer")).clicked() {
+        if ui
+            .add_enabled(
+                !missing,
+                egui::Button::new(ui_icons::label(Icon::ExternalLink, "Show in File Explorer")),
+            )
+            .on_disabled_hover_text("File is missing.")
+            .clicked()
+        {
             self.reveal_track_in_file_manager(path.clone());
             ui.close_menu();
         }
@@ -1186,19 +1240,31 @@ impl AudioOrbitApp {
             Some("Track is not present in another playlist."),
         );
 
-        let can_remove_from_playlist = self
-            .current_playlist()
-            .map(|playlist| playlist.kind != PlaylistKind::Folder)
-            .unwrap_or(false);
-        if ui
-            .add_enabled(can_remove_from_playlist, egui::Button::new(ui_icons::label(Icon::ListMinus, "Remove from playlist")))
+        if !missing {
+            let can_remove_from_playlist = self
+                .current_playlist()
+                .map(|playlist| playlist.kind != PlaylistKind::Folder)
+                .unwrap_or(false);
+            if ui
+                .add_enabled(can_remove_from_playlist, egui::Button::new(ui_icons::label(Icon::ListMinus, "Remove from playlist")))
+                .clicked()
+            {
+                self.remove_track_from_current_playlist(index);
+                ui.close_menu();
+            }
+            if ui
+                .button(ui_icons::label(Icon::Trash2, "Delete from disk"))
+                .clicked()
+            {
+                self.delete_track_from_disk(path);
+                ui.close_menu();
+            }
+        } else if ui
+            .button(ui_icons::label(Icon::Trash2, "Remove missing entry"))
+            .on_hover_text("Remove this unavailable item from current playlist. No disk operation is performed.")
             .clicked()
         {
-            self.remove_track_from_current_playlist(index);
-            ui.close_menu();
-        }
-        if ui.button(ui_icons::label(Icon::Trash2, "Delete from disk")).clicked() {
-            self.delete_track_from_disk(path);
+            self.remove_missing_track_from_current_playlist(index);
             ui.close_menu();
         }
     }
@@ -1212,6 +1278,7 @@ fn paint_track_row_fast_scroll(
     is_selected: bool,
     is_active: bool,
     favorite: bool,
+    missing: bool,
     repeat_selection_mode: bool,
     repeat_selected: bool,
 ) -> egui::Rect {
@@ -1229,16 +1296,22 @@ fn paint_track_row_fast_scroll(
     let body_height = 24.0;
     let mut left = rect.left();
 
-    let text_color = if is_selected {
+    let mut text_color = if is_selected {
         ui.visuals().selection.stroke.color
     } else if is_active {
         ui.visuals().selection.bg_fill
     } else {
         ui.visuals().widgets.inactive.fg_stroke.color
     };
+    if missing {
+        text_color = text_color.linear_multiply(0.42);
+    }
     let title_font = egui::FontId::proportional(14.0);
     let metadata_font = egui::FontId::proportional(12.0);
-    let metadata_color = ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.50);
+    let mut metadata_color = ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.50);
+    if missing {
+        metadata_color = metadata_color.linear_multiply(0.42);
+    }
 
     if repeat_selection_mode {
         let checkbox_side = ui.spacing().interact_size.y.min(TRACK_ROW_HEIGHT).max(18.0);
@@ -1258,11 +1331,14 @@ fn paint_track_row_fast_scroll(
     }
 
     let heart = if favorite { "♥" } else { "♡" };
-    let heart_color = if favorite {
+    let mut heart_color = if favorite {
         egui::Color32::from_rgb(230, 70, 95)
     } else {
         ui.visuals().widgets.inactive.fg_stroke.color
     };
+    if missing {
+        heart_color = heart_color.linear_multiply(0.42);
+    }
     let heart_rect = egui::Rect::from_min_size(
         egui::pos2(left, rect.center().y - button_size.y * 0.5),
         button_size,
@@ -1290,7 +1366,12 @@ fn paint_track_row_fast_scroll(
     );
 
     if is_selected {
-        ui.painter().rect_filled(body_rect, 5.0, ui.visuals().selection.bg_fill);
+        let fill = ui.visuals().selection.bg_fill;
+        ui.painter().rect_filled(
+            body_rect,
+            5.0,
+            if missing { fill.linear_multiply(0.42) } else { fill },
+        );
     }
 
     let body_padding = 8.0;

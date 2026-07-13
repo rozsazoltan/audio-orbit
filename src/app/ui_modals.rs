@@ -60,6 +60,11 @@ impl AudioOrbitApp {
         ui.add_space(8.0);
 
         Self::render_modal_section(ui, |ui| {
+            self.render_library_settings_section(ui);
+        });
+        ui.add_space(8.0);
+
+        Self::render_modal_section(ui, |ui| {
             self.render_playback_settings_section(ui);
         });
         ui.add_space(8.0);
@@ -185,6 +190,7 @@ impl AudioOrbitApp {
                                         if let Some(track) = self.find_track_by_path(&path).cloned() {
                                             detail_row(ui, "Title", &track.title);
                                             detail_row(ui, "File", &track.path.display().to_string());
+                                            detail_row(ui, "Availability", if track.missing { "Missing" } else { "Available" });
                                             detail_row(ui, "Folder", &display_parent(&track.path));
                                             detail_row(ui, "Group", &track.group);
                                             detail_row(ui, "Duration", &track.metadata.duration_seconds.map(format_duration).unwrap_or_else(|| "Unknown".to_owned()));
@@ -358,6 +364,47 @@ impl AudioOrbitApp {
 
         self.show_radio_add_modal = is_open;
     }
+    pub(crate) fn render_library_settings_section(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Playlist sync");
+        ui.small(
+            "Missing files stay visible. Automatic sync watches only selected folder playlist through Windows notifications.",
+        );
+
+        let auto_sync_changed = ui
+            .checkbox(
+                &mut self.state.library.auto_sync_selected_playlist,
+                "Automatically watch selected folder playlist",
+            )
+            .on_hover_text(
+                "Uses Windows ReadDirectoryChangesW for selected folder playlist. No periodic folder polling runs while folder is idle. Only changed paths are reconciled after a short debounce; full selected-playlist scan is reserved for notification overflow or manual sync. Startup checks only saved track paths; files added while app was closed need manual sync.",
+            )
+            .changed();
+        if auto_sync_changed {
+            self.folder_watcher = None;
+            self.folder_watcher_target_key = None;
+            self.pending_folder_watch_sync_at = None;
+            self.pending_folder_watch_paths.clear();
+            self.pending_folder_watch_full_rescan = false;
+            self.save_state_silently();
+        }
+
+        let scan_idle = self.pending_folder_scan_receiver.is_none()
+            && self.pending_library_sync_receiver.is_none();
+        if ui
+            .add_enabled(
+                scan_idle,
+                egui::Button::new(ui_icons::label(Icon::RefreshCw, "Sync selected playlist now")),
+            )
+            .on_hover_text("Check only selected playlist. Folder playlists scan their source folder once.")
+            .clicked()
+        {
+            self.start_library_sync(LibrarySyncTrigger::Manual, true);
+        }
+        if !scan_idle {
+            ui.small("Playlist scan running in background.");
+        }
+    }
+
     pub(crate) fn render_recording_settings_section(&mut self, ui: &mut egui::Ui) {
         ui.heading("Recording");
         ui.small("Internet radio recordings are saved from the original stream bytes before volume, orbit, silence skip, or any other playback processing.");

@@ -237,6 +237,34 @@ impl AudioOrbitApp {
             self.silence_analysis_cache.remove(&oldest_key);
         }
     }
+    fn ensure_track_available_for_playback(&mut self, path: &Path) -> bool {
+        let is_present = fs::metadata(path)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false);
+        let mut changed = false;
+
+        for playlist in &mut self.state.playlists {
+            for track in &mut playlist.tracks {
+                if !same_path(&track.path, path) {
+                    continue;
+                }
+                let missing = !is_present;
+                if track.missing != missing {
+                    track.missing = missing;
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            self.save_state_silently();
+        }
+        if !is_present {
+            self.error_message = Some(format!("File not found: {}", path.display()));
+        }
+        is_present
+    }
+
     pub(crate) fn prepare_track_playback(
         &mut self,
         path: PathBuf,
@@ -247,6 +275,9 @@ impl AudioOrbitApp {
     ) {
         if self.player.is_none() {
             self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+            return;
+        }
+        if !self.ensure_track_available_for_playback(&path) {
             return;
         }
 
@@ -562,7 +593,9 @@ impl AudioOrbitApp {
 
         let current_index = self.active_track_index.or(self.selected_track_index);
         let next_index = if self.state.playback.repeat_mode == RepeatMode::Track {
-            current_index.unwrap_or(indexes[0])
+            current_index
+                .filter(|index| indexes.contains(index))
+                .unwrap_or(indexes[0])
         } else if self.state.playback.shuffle_enabled {
             self.random_sequence_index(&indexes, current_index)?
         } else {
@@ -601,7 +634,9 @@ impl AudioOrbitApp {
 
         let current_index = self.active_track_index.or(self.selected_track_index);
         let previous_index = if self.state.playback.repeat_mode == RepeatMode::Track {
-            current_index.unwrap_or(indexes[0])
+            current_index
+                .filter(|index| indexes.contains(index))
+                .unwrap_or(indexes[0])
         } else {
             let current_position = current_index.and_then(|index| indexes.iter().position(|candidate| *candidate == index));
             let previous_position = current_position
