@@ -1,5 +1,44 @@
 use crate::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutputDeviceChangeAction {
+    None,
+    ClearPending,
+    Notify,
+    Refresh,
+}
+
+fn output_device_change_action(
+    last_known_output: &str,
+    detected_output: Option<&str>,
+    current_output: &str,
+    auto_switch_output_device: bool,
+) -> OutputDeviceChangeAction {
+    if current_output == last_known_output {
+        return if detected_output.is_some() {
+            OutputDeviceChangeAction::ClearPending
+        } else {
+            OutputDeviceChangeAction::None
+        };
+    }
+
+    if detected_output == Some(current_output) {
+        return OutputDeviceChangeAction::None;
+    }
+
+    if auto_switch_output_device {
+        OutputDeviceChangeAction::Refresh
+    } else {
+        OutputDeviceChangeAction::Notify
+    }
+}
+
+fn output_device_change_message(output_name: &str) -> String {
+    format!(
+        "Output device changed to {output_name}. Refresh output to continue on the new device."
+    )
+}
+
 impl AudioOrbitApp {
     pub(crate) fn add_profile(&mut self) {
         let settings = self.current_settings();
@@ -1027,29 +1066,66 @@ impl AudioOrbitApp {
     }
     pub(crate) fn refresh_output_device(&mut self) {
         let resume_path = self.active_track_path.clone();
-        let resume_position = self.player.as_ref().map(AudioPlayer::playback_position_seconds).unwrap_or(0.0);
+        let resume_position = self.displayed_playback_position_seconds();
         let resume_index = self.active_track_index;
-
-        if let Some(player) = &mut self.player {
-            player.stop();
-        }
+        let resume_radio_index = self.active_radio_index;
+        let was_active = self
+            .player
+            .as_ref()
+            .map(|player| player.is_playing() || player.is_paused())
+            .unwrap_or(false);
+        let was_paused = self
+            .player
+            .as_ref()
+            .map(AudioPlayer::is_paused)
+            .unwrap_or(false);
+        let was_radio_recording = self
+            .player
+            .as_ref()
+            .map(AudioPlayer::is_radio_recording)
+            .unwrap_or(false);
 
         match AudioPlayer::new() {
             Ok(mut player) => {
                 player.set_volume_percent(self.effective_volume_percent());
                 let output_name = player.output_device_name().to_owned();
+                if let Some(previous_player) = &mut self.player {
+                    previous_player.stop();
+                }
                 self.player = Some(player);
                 self.detected_output_change = None;
                 self.last_known_output_name = output_name.clone();
                 self.status_message = format!("Output refreshed: {output_name}.");
                 self.error_message = None;
 
-                if let Some(path) = resume_path {
-                    self.play_path(path, resume_index, resume_position);
+                if was_active {
+                    if let Some(radio_index) = resume_radio_index {
+                        self.play_radio_station(radio_index);
+                        if was_radio_recording
+                            && self
+                                .player
+                                .as_ref()
+                                .map(AudioPlayer::is_playing)
+                                .unwrap_or(false)
+                        {
+                            self.toggle_radio_recording();
+                        }
+                    } else if let Some(path) = resume_path {
+                        self.play_path(path, resume_index, resume_position);
+                    }
+
+                    if was_paused
+                        && self
+                            .player
+                            .as_ref()
+                            .map(AudioPlayer::is_playing)
+                            .unwrap_or(false)
+                    {
+                        self.pause_or_resume();
+                    }
                 }
             }
             Err(error) => {
-                self.player = None;
                 self.error_message = Some(error.to_string());
                 self.status_message = "Could not refresh output device.".to_owned();
             }
@@ -1212,11 +1288,84 @@ impl AudioOrbitApp {
         self.last_output_check = Instant::now();
         let current_output = current_default_output_device_name();
 
-        if current_output != self.last_known_output_name {
-            self.detected_output_change = Some(current_output.clone());
-            self.status_message = format!(
-                "Output device changed to {current_output}. Refresh output to continue on the new device."
-            );
+        match output_device_change_action(
+            &self.last_known_output_name,
+            self.detected_output_change.as_deref(),
+            &current_output,
+            self.state.playback.auto_switch_output_device,
+        ) {
+            OutputDeviceChangeAction::None => {}
+            OutputDeviceChangeAction::ClearPending => {
+                if let Some(detected_output) = self.detected_output_change.take() {
+                    let pending_message = output_device_change_message(&detected_output);
+                    if self.status_message == pending_message {
+                        self.status_message.clear();
+                    }
+                }
+            }
+            OutputDeviceChangeAction::Notify => {
+                self.detected_output_change = Some(current_output.clone());
+                self.status_message = output_device_change_message(&current_output);
+            }
+            OutputDeviceChangeAction::Refresh => {
+                self.detected_output_change = Some(current_output);
+                self.refresh_output_device();
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignores_unchanged_output_without_pending_change() {
+        assert_eq!(
+            output_device_change_action("Speakers", None, "Speakers", false),
+            OutputDeviceChangeAction::None
+        );
+    }
+
+    #[test]
+    fn clears_pending_change_when_output_returns_to_active_device() {
+        assert_eq!(
+            output_device_change_action(
+                "Speakers",
+                Some("Headphones"),
+                "Speakers",
+                false,
+            ),
+            OutputDeviceChangeAction::ClearPending
+        );
+    }
+
+    #[test]
+    fn does_not_repeat_action_for_same_detected_output() {
+        assert_eq!(
+            output_device_change_action(
+                "Speakers",
+                Some("Headphones"),
+                "Headphones",
+                true,
+            ),
+            OutputDeviceChangeAction::None
+        );
+    }
+
+    #[test]
+    fn notifies_when_auto_switch_is_disabled() {
+        assert_eq!(
+            output_device_change_action("Speakers", None, "Headphones", false),
+            OutputDeviceChangeAction::Notify
+        );
+    }
+
+    #[test]
+    fn refreshes_when_auto_switch_is_enabled() {
+        assert_eq!(
+            output_device_change_action("Speakers", None, "Headphones", true),
+            OutputDeviceChangeAction::Refresh
+        );
     }
 }
