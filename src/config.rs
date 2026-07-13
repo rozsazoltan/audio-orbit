@@ -5,6 +5,7 @@ use lofty::file::AudioFile;
 use lucide_icons::Icon;
 use serde::{Deserialize, Serialize};
 use std::{
+    cmp::Reverse,
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::{Read, Write},
@@ -140,6 +141,8 @@ pub struct Track {
     pub waveform: Vec<f32>,
     #[serde(default)]
     pub waveform_brightness: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favorite_added_sequence: Option<u64>,
 }
 
 impl Track {
@@ -166,6 +169,7 @@ impl Track {
             metadata,
             waveform: Vec::new(),
             waveform_brightness: Vec::new(),
+            favorite_added_sequence: None,
         }
     }
 
@@ -318,25 +322,43 @@ impl Playlist {
         self.kind.accepts_manual_tracks()
     }
 
-    pub fn add_files(&mut self, files: Vec<PathBuf>) {
+    pub fn add_files(&mut self, files: Vec<PathBuf>) -> Vec<PathBuf> {
         if !self.accepts_manual_tracks() {
-            return;
+            return Vec::new();
         }
 
         let root = self.source_folder.clone();
         let folder_depth = self.folder_depth;
+        let mut added_paths = Vec::new();
         for path in files {
-            self.add_track_path(path, root.as_deref(), folder_depth);
+            if self.add_track_path(path.clone(), root.as_deref(), folder_depth) {
+                added_paths.push(path);
+            }
         }
-        self.sort_tracks();
+        added_paths
     }
 
     pub fn add_track_path(&mut self, path: PathBuf, root: Option<&Path>, folder_depth: usize) -> bool {
         if self.tracks.iter().any(|track| same_path(&track.path, &path)) {
             return false;
         }
-        self.tracks.push(Track::from_path(path, root, folder_depth));
-        self.sort_tracks();
+
+        let mut track = Track::from_path(path, root, folder_depth);
+        if self.kind == PlaylistKind::Favorites {
+            self.ensure_favorite_added_sequences();
+            track.favorite_added_sequence = Some(
+                self.tracks
+                    .iter()
+                    .filter_map(|track| track.favorite_added_sequence)
+                    .max()
+                    .unwrap_or(0)
+                    .saturating_add(1),
+            );
+            self.tracks.insert(0, track);
+        } else {
+            self.tracks.push(track);
+            self.sort_tracks();
+        }
         true
     }
 
@@ -394,6 +416,49 @@ impl Playlist {
         if !self.tracks.iter().any(|track| track.group == selected_group) {
             self.selected_group = None;
         }
+    }
+
+    pub fn ensure_favorite_added_sequences(&mut self) {
+        if self.kind != PlaylistKind::Favorites {
+            for track in &mut self.tracks {
+                track.favorite_added_sequence = None;
+            }
+            return;
+        }
+
+        let known_sequences = self
+            .tracks
+            .iter()
+            .filter_map(|track| track.favorite_added_sequence)
+            .collect::<Vec<_>>();
+        if known_sequences.is_empty() {
+            let track_count = self.tracks.len() as u64;
+            for (index, track) in self.tracks.iter_mut().enumerate() {
+                track.favorite_added_sequence = Some(track_count.saturating_sub(index as u64));
+            }
+            return;
+        }
+
+        let mut next_unknown_sequence = known_sequences
+            .into_iter()
+            .min()
+            .unwrap_or(1)
+            .saturating_sub(1);
+        for track in &mut self.tracks {
+            if track.favorite_added_sequence.is_none() {
+                track.favorite_added_sequence = Some(next_unknown_sequence);
+                next_unknown_sequence = next_unknown_sequence.saturating_sub(1);
+            }
+        }
+    }
+
+    pub fn sort_favorites_by_added(&mut self) {
+        if self.kind != PlaylistKind::Favorites {
+            return;
+        }
+
+        self.ensure_favorite_added_sequences();
+        self.tracks.sort_by_key(|track| Reverse(track.favorite_added_sequence.unwrap_or(0)));
     }
 
     pub fn sort_tracks(&mut self) {
@@ -860,10 +925,107 @@ fn natural_key(input: &str) -> String {
 mod tests {
     use super::*;
 
+    fn track_paths(playlist: &Playlist) -> Vec<String> {
+        playlist
+            .tracks
+            .iter()
+            .map(|track| track.path.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn owned_paths(paths: &[&PathBuf]) -> Vec<String> {
+        paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }
+
     #[test]
     fn playback_settings_keep_auto_output_switch_disabled_for_existing_state() {
         let settings: PlaybackSettings = serde_json::from_str("{}").unwrap();
 
         assert!(!settings.auto_switch_output_device);
+    }
+
+    #[test]
+    fn favorites_insert_new_tracks_at_top_and_restore_added_order() {
+        let alpha = PathBuf::from("C:/Music/Alpha.mp3");
+        let beta = PathBuf::from("C:/Music/Beta.mp3");
+        let charlie = PathBuf::from("C:/Music/Charlie.mp3");
+        let mut favorites = Playlist::favorites();
+
+        assert!(favorites.add_track_path(alpha.clone(), None, 0));
+        assert!(favorites.add_track_path(beta.clone(), None, 0));
+        assert_eq!(track_paths(&favorites), owned_paths(&[&beta, &alpha]));
+
+        favorites.sort_tracks();
+        assert_eq!(track_paths(&favorites), owned_paths(&[&alpha, &beta]));
+
+        assert!(favorites.add_track_path(charlie.clone(), None, 0));
+        assert_eq!(track_paths(&favorites), owned_paths(&[&charlie, &alpha, &beta]));
+        assert!(!favorites.add_track_path(alpha.clone(), None, 0));
+
+        favorites.sort_favorites_by_added();
+        assert_eq!(
+            track_paths(&favorites),
+            owned_paths(&[&charlie, &beta, &alpha])
+        );
+    }
+
+    #[test]
+    fn favorites_keep_manual_order_across_serialization() {
+        let alpha = PathBuf::from("C:/Music/Alpha.mp3");
+        let beta = PathBuf::from("C:/Music/Beta.mp3");
+        let mut favorites = Playlist::favorites();
+        favorites.add_track_path(alpha.clone(), None, 0);
+        favorites.add_track_path(beta.clone(), None, 0);
+        favorites.tracks.swap(0, 1);
+
+        let serialized = serde_json::to_string(&favorites).unwrap();
+        let mut restored: Playlist = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(track_paths(&restored), owned_paths(&[&alpha, &beta]));
+        restored.sort_favorites_by_added();
+        assert_eq!(track_paths(&restored), owned_paths(&[&beta, &alpha]));
+    }
+
+    #[test]
+    fn favorites_migrate_missing_added_sequence_without_reordering_tracks() {
+        let alpha = PathBuf::from("C:/Music/Alpha.mp3");
+        let beta = PathBuf::from("C:/Music/Beta.mp3");
+        let mut favorites = Playlist::favorites();
+        favorites.tracks = vec![
+            Track::from_path(beta.clone(), None, 0),
+            Track::from_path(alpha.clone(), None, 0),
+        ];
+
+        let serialized = serde_json::to_string(&favorites).unwrap();
+        let mut restored: Playlist = serde_json::from_str(&serialized).unwrap();
+        restored.ensure_favorite_added_sequences();
+
+        assert_eq!(track_paths(&restored), owned_paths(&[&beta, &alpha]));
+        assert_eq!(
+            restored
+                .tracks
+                .iter()
+                .map(|track| track.favorite_added_sequence)
+                .collect::<Vec<_>>(),
+            vec![Some(2), Some(1)]
+        );
+    }
+
+    #[test]
+    fn non_favorite_playlists_do_not_persist_favorite_sequences() {
+        let mut playlist = Playlist::new("Manual");
+        let mut track = Track::from_path(PathBuf::from("C:/Music/Alpha.mp3"), None, 0);
+        track.favorite_added_sequence = Some(42);
+        playlist.tracks.push(track);
+
+        playlist.ensure_favorite_added_sequences();
+
+        assert_eq!(playlist.tracks[0].favorite_added_sequence, None);
+        assert!(!serde_json::to_string(&playlist)
+            .unwrap()
+            .contains("favorite_added_sequence"));
     }
 }

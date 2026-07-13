@@ -174,7 +174,7 @@ Local track waveforms mark long quiet sections that silence skipping will bypass
 
 ### Manage Favorites
 
-Use the heart button next to a track to add or remove it from Favorites. Favorites is a built-in playlist and cannot be deleted.
+Use the heart button next to a track to add or remove it from Favorites. Newly favorited tracks appear at the top. Favorites remembers when each track was added, so the **Added** sort restores newest-first favorite order after A-Z or Z-A sorting. Manual drag-and-drop ordering is saved with the rest of the app state. Favorites is a built-in playlist and cannot be deleted.
 
 ### Export and import backups
 

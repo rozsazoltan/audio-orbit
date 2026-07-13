@@ -48,6 +48,7 @@ impl AudioOrbitApp {
         };
 
         let playlist_name = playlist.name.clone();
+        let is_favorites = playlist.kind == PlaylistKind::Favorites;
         let selected_playlist_label = format!("{} {}", playlist.kind.icon(), playlist_name);
         let selected_group_label = playlist.selected_group.clone().unwrap_or_default();
         let folder_group_count = playlist.folder_groups().len();
@@ -122,6 +123,14 @@ impl AudioOrbitApp {
                 }
                 if ui.small_button("A-Z").on_hover_text("Sort current playlist A to Z").clicked() {
                     self.sort_current_playlist_by_name(true);
+                }
+                if is_favorites
+                    && ui
+                        .small_button("Added")
+                        .on_hover_text("Sort Favorites by when tracks were added, newest first")
+                        .clicked()
+                {
+                    self.sort_current_favorites_by_added();
                 }
 
                 let has_active_source = self.active_track_path.is_some() || self.active_radio_index.is_some();

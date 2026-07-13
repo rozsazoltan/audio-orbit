@@ -879,6 +879,7 @@ fn ensure_state_is_valid(state: &mut SavedState) {
         } else if playlist.source_folder.is_some() {
             playlist.kind = PlaylistKind::Folder;
         }
+        playlist.ensure_favorite_added_sequences();
         playlist.set_selected_group(playlist.selected_group.clone());
         let track_paths: Vec<PathBuf> = playlist.tracks.iter().map(|track| track.path.clone()).collect();
         playlist
