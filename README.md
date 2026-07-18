@@ -19,6 +19,7 @@
   - [Use repeat modes](#use-repeat-modes)
   - [Search tracks](#search-tracks)
   - [Manage Favorites](#manage-favorites)
+  - [Manage playlist files and multi-select tracks](#manage-playlist-files-and-multi-select-tracks)
   - [Export and import backups](#export-and-import-backups)
 - [Window behavior](#window-behavior)
 - [Data location](#data-location)
@@ -34,6 +35,8 @@ Audio Orbit plays local music files from manual playlists or scanner-owned folde
 Folder playlists are created from a selected directory. You choose how many folder levels should be used for grouping, and Audio Orbit scans supported audio files under that folder.
 
 Folder playlists are scanner-owned. You do not manually add individual tracks to them; instead, add files to the folder and sync the playlist. Missing files remain visible as dimmed entries, while files that return are restored automatically on the next sync. Missing entries can be removed from any playlist through the track context menu without touching the disk. Manual playlists and Favorites receive the same missing-file status without losing their saved ordering.
+
+Any playlist can be exported by copying its available audio files into a chosen folder. Original files stay in place. Filename collisions are resolved with numeric suffixes instead of overwriting existing files.
 
 ### Internet radio
 
@@ -59,6 +62,7 @@ Audio Orbit supports common desktop-player behavior:
 - remember the last played local track between app launches
 - play saved internet radio streams from the Radio tab
 - favorite radio stations and filter the Radio list to favorites
+- select multiple local tracks with Ctrl-click or Shift-click, then copy, add, or delete them together
 - show a live radio visualizer with elapsed listening time
 - record the original internet radio stream bytes to timestamped files
 - remember the window size and position between app launches
@@ -182,6 +186,16 @@ Local track waveforms mark long quiet sections that silence skipping will bypass
 ### Manage Favorites
 
 Use the heart button next to a track to add or remove it from Favorites. Newly favorited tracks appear at the top. Favorites remembers when each track was added, so the **Added** sort restores newest-first favorite order after A-Z or Z-A sorting. Manual drag-and-drop ordering is saved with the rest of the app state. In folder playlists, tracks can only be reordered inside their existing folder group; moving a track across folder boundaries is blocked. Favorites is a built-in playlist and cannot be deleted.
+
+### Manage playlist files and multi-select tracks
+
+Use **Export playlist...** in the Library panel to copy every available file from the current playlist into a chosen folder. Export never moves source files and never overwrites an existing destination file; duplicate names receive a numeric suffix.
+
+Use Ctrl-click to add or remove individual tracks from the current selection. Use Shift-click to select a visible range. Right-click any selected row to copy the selected files into a folder, add all selected tracks to an existing manual playlist, or permanently delete the selected files.
+
+The final **Add to playlist** submenu item is **New**. It asks for a playlist name, creates a manual playlist, and adds the selected track or tracks.
+
+Use **Delete all files...** to permanently delete every file referenced by the current playlist. Multi-track deletion and whole-playlist deletion require typing `DELETE` in a confirmation modal. Successfully deleted files are removed from every playlist that references them. These actions delete files from disk and cannot be undone.
 
 ### Export and import backups
 
