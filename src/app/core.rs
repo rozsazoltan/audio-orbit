@@ -18,6 +18,8 @@ impl AudioOrbitApp {
                     state,
                     selected_track_index: None,
                     selected_track_indexes: BTreeSet::new(),
+                    multi_selected_track_indexes: BTreeSet::new(),
+                    track_selection_anchor_index: None,
                     active_track_index: None,
                     active_playlist_index: None,
                     active_track_path: None,
@@ -37,6 +39,7 @@ impl AudioOrbitApp {
                     silence_analysis_cache: BTreeMap::new(),
                     pending_folder_scan_receiver: None,
                     pending_library_sync_receiver: None,
+                    pending_track_file_operation_receiver: None,
                     folder_watcher: None,
                     folder_watcher_target_key: None,
                     pending_folder_watch_sync_at: None,
@@ -48,6 +51,11 @@ impl AudioOrbitApp {
                     suppress_window_geometry_save_until: None,
                     show_folder_import_modal: false,
                     show_radio_add_modal: false,
+                    show_new_playlist_modal: false,
+                    pending_new_playlist_name: String::new(),
+                    pending_new_playlist_tracks: Vec::new(),
+                    pending_track_delete_confirmation: None,
+                    pending_track_delete_confirmation_text: String::new(),
                     active_panel_modal: None,
                     panel_modal_history: Vec::new(),
                     details_modal: None,
@@ -112,6 +120,8 @@ impl AudioOrbitApp {
                 state,
                 selected_track_index: None,
                 selected_track_indexes: BTreeSet::new(),
+                multi_selected_track_indexes: BTreeSet::new(),
+                track_selection_anchor_index: None,
                 active_track_index: None,
                 active_playlist_index: None,
                 active_track_path: None,
@@ -131,6 +141,7 @@ impl AudioOrbitApp {
                 silence_analysis_cache: BTreeMap::new(),
                 pending_folder_scan_receiver: None,
                 pending_library_sync_receiver: None,
+                pending_track_file_operation_receiver: None,
                 folder_watcher: None,
                 folder_watcher_target_key: None,
                 pending_folder_watch_sync_at: None,
@@ -142,6 +153,11 @@ impl AudioOrbitApp {
                 suppress_window_geometry_save_until: None,
                 show_folder_import_modal: false,
                 show_radio_add_modal: false,
+                show_new_playlist_modal: false,
+                pending_new_playlist_name: String::new(),
+                pending_new_playlist_tracks: Vec::new(),
+                pending_track_delete_confirmation: None,
+                pending_track_delete_confirmation_text: String::new(),
                 active_panel_modal: None,
                 panel_modal_history: Vec::new(),
                 details_modal: None,
@@ -317,6 +333,13 @@ impl AudioOrbitApp {
             self.show_folder_import_modal = false;
         } else if self.show_radio_add_modal {
             self.show_radio_add_modal = false;
+        } else if self.show_new_playlist_modal {
+            self.show_new_playlist_modal = false;
+            self.pending_new_playlist_name.clear();
+            self.pending_new_playlist_tracks.clear();
+        } else if self.pending_track_delete_confirmation.is_some() {
+            self.pending_track_delete_confirmation = None;
+            self.pending_track_delete_confirmation_text.clear();
         } else if self.details_modal.is_some() {
             self.details_modal = None;
         } else if self.show_track_search {

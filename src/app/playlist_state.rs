@@ -16,6 +16,7 @@ impl AudioOrbitApp {
         self.remember_current_playlist_scroll_offset(self.state.ui.playlist_scroll_offset_y);
         self.state.selected_playlist_index = index;
         self.restore_repeat_selection_for_current_playlist();
+        self.clear_multi_track_selection();
         self.selected_track_index = self.eligible_track_indexes().first().copied();
         self.collapsed_groups.clear();
         self.scroll_to_track_path_requested = None;
@@ -61,6 +62,7 @@ impl AudioOrbitApp {
                     .iter()
                     .position(|track| same_path(&track.path, &track_path))
             });
+        self.clear_multi_track_selection();
         self.scroll_to_track_path_requested = Some(track_path.clone());
         self.status_message = format!(
             "Found {} in {playlist_name}.",
@@ -198,6 +200,106 @@ impl AudioOrbitApp {
         let playlist = self.current_playlist()?;
         let index = self.selected_track_index?;
         playlist.tracks.get(index).map(|track| track.path.clone())
+    }
+    pub(crate) fn clear_multi_track_selection(&mut self) {
+        self.multi_selected_track_indexes.clear();
+        self.track_selection_anchor_index = None;
+    }
+    pub(crate) fn select_only_track_for_action(&mut self, index: usize) {
+        let is_valid = self
+            .current_playlist()
+            .map(|playlist| index < playlist.tracks.len())
+            .unwrap_or(false);
+        if !is_valid {
+            return;
+        }
+
+        self.multi_selected_track_indexes.clear();
+        self.multi_selected_track_indexes.insert(index);
+        self.track_selection_anchor_index = Some(index);
+        self.selected_track_index = Some(index);
+    }
+    pub(crate) fn select_track_from_pointer(&mut self, index: usize, modifiers: egui::Modifiers) {
+        let is_valid = self
+            .current_playlist()
+            .map(|playlist| index < playlist.tracks.len())
+            .unwrap_or(false);
+        if !is_valid {
+            return;
+        }
+
+        let additive = modifiers.ctrl || modifiers.command;
+        if modifiers.shift {
+            let visible_indexes = self.visible_track_indexes();
+            let anchor = self.track_selection_anchor_index.unwrap_or(index);
+            let anchor_position = visible_indexes.iter().position(|candidate| *candidate == anchor);
+            let target_position = visible_indexes.iter().position(|candidate| *candidate == index);
+
+            if let (Some(anchor_position), Some(target_position)) = (anchor_position, target_position) {
+                if !additive {
+                    self.multi_selected_track_indexes.clear();
+                }
+                let start = anchor_position.min(target_position);
+                let end = anchor_position.max(target_position);
+                self.multi_selected_track_indexes
+                    .extend(visible_indexes[start..=end].iter().copied());
+            } else {
+                self.multi_selected_track_indexes.clear();
+                self.multi_selected_track_indexes.insert(index);
+                self.track_selection_anchor_index = Some(index);
+            }
+            self.selected_track_index = Some(index);
+            return;
+        }
+
+        if additive {
+            if !self.multi_selected_track_indexes.insert(index) {
+                self.multi_selected_track_indexes.remove(&index);
+            }
+            self.selected_track_index = self
+                .multi_selected_track_indexes
+                .iter()
+                .next_back()
+                .copied();
+            self.track_selection_anchor_index = Some(index);
+            return;
+        }
+
+        self.select_only_track_for_action(index);
+    }
+    pub(crate) fn ensure_track_selected_for_context(&mut self, index: usize) {
+        if !self.multi_selected_track_indexes.contains(&index) {
+            self.select_only_track_for_action(index);
+        } else {
+            self.selected_track_index = Some(index);
+        }
+    }
+    pub(crate) fn action_track_indexes_for_context(&self, index: usize) -> Vec<usize> {
+        let Some(playlist) = self.current_playlist() else {
+            return Vec::new();
+        };
+
+        if self.multi_selected_track_indexes.contains(&index) {
+            self.multi_selected_track_indexes
+                .iter()
+                .copied()
+                .filter(|candidate| *candidate < playlist.tracks.len())
+                .collect()
+        } else if index < playlist.tracks.len() {
+            vec![index]
+        } else {
+            Vec::new()
+        }
+    }
+    pub(crate) fn action_track_paths_for_context(&self, index: usize) -> Vec<PathBuf> {
+        let Some(playlist) = self.current_playlist() else {
+            return Vec::new();
+        };
+
+        self.action_track_indexes_for_context(index)
+            .into_iter()
+            .filter_map(|track_index| playlist.tracks.get(track_index).map(|track| track.path.clone()))
+            .collect()
     }
     pub(crate) fn remember_last_played_track(&mut self, index: Option<usize>, path: &Path) {
         let Some(track_index) = index else {
@@ -510,6 +612,7 @@ impl AudioOrbitApp {
         }
 
         if favorites_is_selected {
+            self.clear_multi_track_selection();
             let favorites = &self.state.playlists[favorites_index];
             self.selected_track_index = selected_path
                 .as_ref()
@@ -533,7 +636,7 @@ impl AudioOrbitApp {
 
         self.save_state_silently();
     }
-    pub(crate) fn add_track_to_playlist(&mut self, path: PathBuf, playlist_index: usize) {
+    pub(crate) fn add_tracks_to_playlist(&mut self, paths: Vec<PathBuf>, playlist_index: usize) {
         let Some(playlist) = self.state.playlists.get_mut(playlist_index) else {
             return;
         };
@@ -544,14 +647,20 @@ impl AudioOrbitApp {
         }
 
         let playlist_name = playlist.name.clone();
-        let added = playlist.add_track_path(path, None, 0);
-        self.status_message = if added {
+        let requested = paths.len();
+        let added_count = paths
+            .into_iter()
+            .filter(|path| playlist.add_track_path(path.clone(), None, 0))
+            .count();
+        self.status_message = if added_count == 0 {
+            format!("Selected track(s) are already in {playlist_name}.")
+        } else if requested == 1 {
             format!("Added track to {playlist_name}.")
         } else {
-            format!("Track is already in {playlist_name}.")
+            format!("Added {added_count} of {requested} selected track(s) to {playlist_name}.")
         };
 
-        if added && self.active_playlist_index == Some(playlist_index) {
+        if added_count > 0 && self.active_playlist_index == Some(playlist_index) {
             self.active_track_index = self.active_track_path.as_ref().and_then(|active_path| {
                 self.state.playlists[playlist_index]
                     .tracks
@@ -577,6 +686,7 @@ impl AudioOrbitApp {
         };
 
         self.selected_track_index = next_valid_track_index(track_index, remaining_len);
+        self.clear_multi_track_selection();
         self.save_state_silently();
     }
     pub(crate) fn remove_missing_track_from_current_playlist(&mut self, track_index: usize) {
@@ -611,6 +721,7 @@ impl AudioOrbitApp {
         };
 
         self.selected_track_index = next_valid_track_index(track_index, remaining_len);
+        self.clear_multi_track_selection();
         self.active_track_index = self
             .active_playlist_index
             .zip(self.active_track_path.as_ref())
@@ -638,6 +749,7 @@ impl AudioOrbitApp {
                     playlist.tracks.retain(|track| !same_path(&track.path, &path));
                 }
                 self.selected_track_index = self.eligible_track_indexes().first().copied();
+                self.clear_multi_track_selection();
                 self.status_message = format!("Deleted {} from disk.", display_file_name(&path));
                 self.error_message = None;
                 self.save_state_silently();

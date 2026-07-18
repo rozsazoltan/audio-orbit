@@ -44,6 +44,7 @@ impl AudioOrbitApp {
         } else {
             added_paths.first()
         };
+        self.clear_multi_track_selection();
         self.selected_track_index = selected_path.and_then(|path| {
             self.current_playlist()
                 .and_then(|playlist| playlist.tracks.iter().position(|track| same_path(&track.path, path)))
@@ -115,8 +116,11 @@ impl AudioOrbitApp {
     }
 
     pub(crate) fn start_folder_scan(&mut self, kind: PendingFolderScanKind) -> bool {
-        if self.pending_folder_scan_receiver.is_some() || self.pending_library_sync_receiver.is_some() {
-            self.error_message = Some("A library scan is already running. Wait for it to finish before starting another scan.".to_owned());
+        if self.pending_folder_scan_receiver.is_some()
+            || self.pending_library_sync_receiver.is_some()
+            || self.pending_track_file_operation_receiver.is_some()
+        {
+            self.error_message = Some("Wait for current library or track file operation to finish before scanning another folder.".to_owned());
             return false;
         }
 
@@ -178,6 +182,7 @@ impl AudioOrbitApp {
         self.state.playlists.push(playlist);
         self.state.selected_playlist_index = self.state.playlists.len() - 1;
         self.restore_repeat_selection_for_current_playlist();
+        self.clear_multi_track_selection();
         self.selected_track_index = self.eligible_track_indexes().first().copied();
         self.status_message = format!(
             "Imported {track_count} track(s) from {} as {name}.",
@@ -192,9 +197,12 @@ impl AudioOrbitApp {
         trigger: LibrarySyncTrigger,
         include_folder_scan: bool,
     ) -> bool {
-        if self.pending_folder_scan_receiver.is_some() || self.pending_library_sync_receiver.is_some() {
+        if self.pending_folder_scan_receiver.is_some()
+            || self.pending_library_sync_receiver.is_some()
+            || self.pending_track_file_operation_receiver.is_some()
+        {
             if trigger == LibrarySyncTrigger::Manual {
-                self.error_message = Some("A playlist scan is already running.".to_owned());
+                self.error_message = Some("Wait for current library or track file operation to finish before syncing.".to_owned());
             }
             return false;
         }
@@ -651,6 +659,7 @@ impl AudioOrbitApp {
     }
 
     fn remap_track_indexes_after_library_change(&mut self, selected_path: Option<PathBuf>) {
+        self.clear_multi_track_selection();
         if let Some(path) = selected_path {
             self.selected_track_index = self
                 .current_playlist()
@@ -725,6 +734,7 @@ impl AudioOrbitApp {
                 self.show_profile_panel = self.state.ui.show_profile_panel;
                 self.player_only_mode = self.state.ui.player_only_mode;
                 self.restore_repeat_selection_for_current_playlist();
+                self.clear_multi_track_selection();
                 self.selected_track_index = self.eligible_track_indexes().first().copied();
                 self.status_message = format!("Imported app backup from {}.", path.display());
                 self.error_message = None;

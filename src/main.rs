@@ -290,6 +290,31 @@ enum DetailsModal {
     Radio(usize),
 }
 
+#[derive(Clone, Debug)]
+struct PendingTrackDeleteConfirmation {
+    paths: Vec<PathBuf>,
+    title: String,
+    description: String,
+}
+
+#[derive(Clone, Debug)]
+enum TrackFileOperationResult {
+    Copy {
+        destination: PathBuf,
+        requested: usize,
+        copied: usize,
+        skipped_missing: usize,
+        errors: Vec<String>,
+    },
+    Delete {
+        requested: usize,
+        deleted: usize,
+        already_missing: usize,
+        removed_paths: Vec<PathBuf>,
+        errors: Vec<String>,
+    },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MainContentTab {
     Music,
@@ -363,6 +388,8 @@ struct AudioOrbitApp {
     state: SavedState,
     selected_track_index: Option<usize>,
     selected_track_indexes: BTreeSet<usize>,
+    multi_selected_track_indexes: BTreeSet<usize>,
+    track_selection_anchor_index: Option<usize>,
     active_track_index: Option<usize>,
     active_playlist_index: Option<usize>,
     active_track_path: Option<PathBuf>,
@@ -382,6 +409,7 @@ struct AudioOrbitApp {
     silence_analysis_cache: BTreeMap<PathBuf, SilenceAnalysisCacheEntry>,
     pending_folder_scan_receiver: Option<mpsc::Receiver<Result<PendingFolderScanResult, String>>>,
     pending_library_sync_receiver: Option<mpsc::Receiver<PendingLibrarySyncResult>>,
+    pending_track_file_operation_receiver: Option<mpsc::Receiver<TrackFileOperationResult>>,
     folder_watcher: Option<folder_watcher::FolderWatcher>,
     folder_watcher_target_key: Option<String>,
     pending_folder_watch_sync_at: Option<Instant>,
@@ -393,6 +421,11 @@ struct AudioOrbitApp {
     suppress_window_geometry_save_until: Option<Instant>,
     show_folder_import_modal: bool,
     show_radio_add_modal: bool,
+    show_new_playlist_modal: bool,
+    pending_new_playlist_name: String,
+    pending_new_playlist_tracks: Vec<PathBuf>,
+    pending_track_delete_confirmation: Option<PendingTrackDeleteConfirmation>,
+    pending_track_delete_confirmation_text: String,
     active_panel_modal: Option<AppPanelModal>,
     panel_modal_history: Vec<AppPanelModal>,
     details_modal: Option<DetailsModal>,

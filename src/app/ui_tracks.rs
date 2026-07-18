@@ -20,6 +20,7 @@ enum PlaylistSubmenuKind {
 #[derive(Clone, Debug)]
 enum PlaylistSubmenuAction {
     Add { playlist_index: usize },
+    New,
     Search {
         playlist_index: usize,
         track_path: PathBuf,
@@ -35,6 +36,7 @@ struct PlaylistSubmenuEntry {
 #[derive(Clone, Debug)]
 struct PlaylistSubmenuState {
     owner_path: PathBuf,
+    action_paths: Vec<PathBuf>,
     kind: PlaylistSubmenuKind,
     popup_rect: egui::Rect,
     entries: Vec<PlaylistSubmenuEntry>,
@@ -71,6 +73,7 @@ fn menu_style(ui: &mut egui::Ui) {
 fn render_playlist_submenu(
     ui: &mut egui::Ui,
     owner_path: &Path,
+    action_paths: &[PathBuf],
     kind: PlaylistSubmenuKind,
     trigger_label: String,
     entries: Vec<(String, PlaylistSubmenuAction)>,
@@ -124,6 +127,7 @@ fn render_playlist_submenu(
 
         state = Some(PlaylistSubmenuState {
             owner_path: owner_path.to_path_buf(),
+            action_paths: action_paths.to_vec(),
             kind,
             popup_rect: preserve_popup.0,
             entries: preserve_popup.1,
@@ -425,7 +429,7 @@ impl AudioOrbitApp {
                 let can_jump = !visible_indexes.is_empty() && !self.track_search_query.trim().is_empty();
                 if search_icon_text_button(ui, can_jump, Icon::ArrowDown, "Next").clicked() {
                     let next = visible_indexes[self.search_cursor % visible_indexes.len()];
-                    self.selected_track_index = Some(next);
+                    self.select_only_track_for_action(next);
                     self.search_cursor = (self.search_cursor + 1) % visible_indexes.len().max(1);
                 }
 
@@ -462,6 +466,14 @@ impl AudioOrbitApp {
                 egui::TextStyle::Small.resolve(ui.style()),
                 ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.78),
             );
+        }
+
+        if self.multi_selected_track_indexes.len() > 1 {
+            ui.add_space(4.0);
+            ui.small(format!(
+                "{} tracks selected. Right-click selection to copy, add to playlist, or delete.",
+                self.multi_selected_track_indexes.len()
+            ));
         }
 
         ui.add_space(4.0);
@@ -786,7 +798,11 @@ impl AudioOrbitApp {
                             else {
                                 continue;
                             };
-                            let is_selected = self.selected_track_index == Some(index);
+                            let is_selected = if self.multi_selected_track_indexes.is_empty() {
+                                self.selected_track_index == Some(index)
+                            } else {
+                                self.multi_selected_track_indexes.contains(&index)
+                            };
                             let is_active = self
                                 .active_track_path
                                 .as_ref()
@@ -838,6 +854,8 @@ impl AudioOrbitApp {
                             }
 
                             let row_hovered = next_row_pointer_hovered(ui, row_width, TRACK_ROW_HEIGHT);
+                            let mut body_clicked = false;
+                            let mut body_double_clicked = false;
                             let row_response = ui.allocate_ui_with_layout(
                                 egui::vec2(row_width, TRACK_ROW_HEIGHT),
                                 egui::Layout::left_to_right(egui::Align::Center),
@@ -952,17 +970,17 @@ impl AudioOrbitApp {
                                     } else {
                                         response
                                     };
-                                    if response.clicked() {
-                                        self.selected_track_index = Some(index);
-                                    }
                                     if response.double_clicked() {
-                                        self.selected_track_index = Some(index);
+                                        body_double_clicked = true;
+                                        self.select_only_track_for_action(index);
                                         self.play_path(path.clone(), Some(index), 0.0);
-                                    }
-                                    if response.secondary_clicked() {
-                                        self.selected_track_index = Some(index);
+                                    } else if response.clicked() {
+                                        body_clicked = true;
+                                        let modifiers = ui.input(|input| input.modifiers);
+                                        self.select_track_from_pointer(index, modifiers);
                                     }
                                     response.context_menu(|ui| {
+                                        self.ensure_track_selected_for_context(index);
                                         self.render_track_row_context_menu(ui, index, path.clone());
                                     });
                                 },
@@ -974,12 +992,12 @@ impl AudioOrbitApp {
                                 ui.make_persistent_id(("track_context", index)),
                                 egui::Sense::click_and_drag(),
                             );
-                            if context_response.clicked() {
-                                self.selected_track_index = Some(index);
-                            }
-                            if context_response.double_clicked() {
-                                self.selected_track_index = Some(index);
+                            if !body_double_clicked && context_response.double_clicked() {
+                                self.select_only_track_for_action(index);
                                 self.play_path(path.clone(), Some(index), 0.0);
+                            } else if !body_clicked && context_response.clicked() {
+                                let modifiers = ui.input(|input| input.modifiers);
+                                self.select_track_from_pointer(index, modifiers);
                             }
                             if context_response.drag_started() {
                                 self.dragging_track_index = Some(index);
@@ -1016,9 +1034,10 @@ impl AudioOrbitApp {
                                 paint_list_edge_separator(ui, row_response.response.rect, row_width, false);
                             }
                             if row_response.response.secondary_clicked() || context_response.secondary_clicked() {
-                                self.selected_track_index = Some(index);
+                                self.ensure_track_selected_for_context(index);
                             }
                             context_response.context_menu(|ui| {
+                                self.ensure_track_selected_for_context(index);
                                 self.render_track_row_context_menu(ui, index, path.clone());
                             });
                             if has_separator_after {
@@ -1115,7 +1134,10 @@ impl AudioOrbitApp {
         store_playlist_submenu_state(context, None);
         match action {
             PlaylistSubmenuAction::Add { playlist_index } => {
-                self.add_track_to_playlist(state.owner_path, playlist_index);
+                self.add_tracks_to_playlist(state.action_paths, playlist_index);
+            }
+            PlaylistSubmenuAction::New => {
+                self.open_new_playlist_modal(state.action_paths);
             }
             PlaylistSubmenuAction::Search {
                 playlist_index,
@@ -1158,6 +1180,14 @@ impl AudioOrbitApp {
             .and_then(|playlist| playlist.tracks.get(index))
             .map(|track| track.missing)
             .unwrap_or(true);
+        let action_paths = self.action_track_paths_for_context(index);
+        let selected_count = action_paths.len();
+        let file_operation_idle = self.track_file_operations_idle();
+
+        if selected_count > 1 {
+            ui.small(format!("{selected_count} tracks selected"));
+            ui.separator();
+        }
 
         let play_response = ui.button(ui_icons::label(Icon::Play, "Play now"));
         let play_response = if missing {
@@ -1166,7 +1196,7 @@ impl AudioOrbitApp {
             play_response
         };
         if play_response.clicked() {
-            self.selected_track_index = Some(index);
+            self.select_only_track_for_action(index);
             self.play_path(path.clone(), Some(index), 0.0);
             ui.close_menu();
         }
@@ -1174,12 +1204,12 @@ impl AudioOrbitApp {
             self.details_modal = Some(DetailsModal::Track(path.clone()));
             ui.close_menu();
         }
-        let can_move_up = self.can_move_track_in_current_playlist(index, -1);
+        let can_move_up = selected_count <= 1 && self.can_move_track_in_current_playlist(index, -1);
         if ui.add_enabled(can_move_up, egui::Button::new("Move up")).clicked() {
             self.move_track_in_current_playlist(index, -1);
             ui.close_menu();
         }
-        let can_move_down = self.can_move_track_in_current_playlist(index, 1);
+        let can_move_down = selected_count <= 1 && self.can_move_track_in_current_playlist(index, 1);
         if ui.add_enabled(can_move_down, egui::Button::new("Move down")).clicked() {
             self.move_track_in_current_playlist(index, 1);
             ui.close_menu();
@@ -1196,7 +1226,7 @@ impl AudioOrbitApp {
             ui.close_menu();
         }
 
-        let add_targets = self
+        let mut add_targets = self
             .state
             .playlists
             .iter()
@@ -1209,9 +1239,11 @@ impl AudioOrbitApp {
                 )
             })
             .collect::<Vec<_>>();
+        add_targets.push(("New".to_owned(), PlaylistSubmenuAction::New));
         render_playlist_submenu(
             ui,
             &path,
+            &action_paths,
             PlaylistSubmenuKind::Add,
             ui_icons::label(Icon::ListPlus, "Add to playlist"),
             add_targets,
@@ -1231,16 +1263,47 @@ impl AudioOrbitApp {
                 )
             })
             .collect::<Vec<_>>();
+        let search_action_paths = vec![path.clone()];
         render_playlist_submenu(
             ui,
             &path,
+            &search_action_paths,
             PlaylistSubmenuKind::Search,
             ui_icons::label(Icon::Search, "Search in playlist"),
             playlist_matches,
             Some("Track is not present in another playlist."),
         );
 
-        if !missing {
+        let copy_label = if selected_count > 1 {
+            "Copy selected to folder..."
+        } else {
+            "Copy to folder..."
+        };
+        if ui
+            .add_enabled(
+                selected_count > 0 && file_operation_idle,
+                egui::Button::new(ui_icons::label(Icon::FolderOpen, copy_label)),
+            )
+            .on_disabled_hover_text("Another track file operation is running.")
+            .clicked()
+        {
+            self.copy_track_selection_to_folder(index);
+            ui.close_menu();
+        }
+
+        if selected_count > 1 {
+            if ui
+                .add_enabled(
+                    file_operation_idle,
+                    egui::Button::new(ui_icons::label(Icon::Trash2, "Delete selected from disk...")),
+                )
+                .on_disabled_hover_text("Another track file operation is running.")
+                .clicked()
+            {
+                self.request_delete_track_selection(index);
+                ui.close_menu();
+            }
+        } else if !missing {
             let can_remove_from_playlist = self
                 .current_playlist()
                 .map(|playlist| playlist.kind != PlaylistKind::Folder)
@@ -1253,7 +1316,11 @@ impl AudioOrbitApp {
                 ui.close_menu();
             }
             if ui
-                .button(ui_icons::label(Icon::Trash2, "Delete from disk"))
+                .add_enabled(
+                    file_operation_idle,
+                    egui::Button::new(ui_icons::label(Icon::Trash2, "Delete from disk")),
+                )
+                .on_disabled_hover_text("Another track file operation is running.")
                 .clicked()
             {
                 self.delete_track_from_disk(path);

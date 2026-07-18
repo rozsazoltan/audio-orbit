@@ -7,6 +7,7 @@ impl AudioOrbitApp {
         self.state.playlists.push(Playlist::new(format!("Playlist {number}")));
         self.state.selected_playlist_index = self.state.playlists.len() - 1;
         self.restore_repeat_selection_for_current_playlist();
+        self.clear_multi_track_selection();
         self.selected_track_index = None;
         self.status_message = "Created a new playlist.".to_owned();
         self.save_state_silently();
@@ -40,6 +41,7 @@ impl AudioOrbitApp {
         }
         self.state.selected_playlist_index = removed_index.saturating_sub(1).min(self.state.playlists.len() - 1);
         self.restore_repeat_selection_for_current_playlist();
+        self.clear_multi_track_selection();
         self.selected_track_index = self.eligible_track_indexes().first().copied();
         self.status_message = if removed_playing_playlist {
             "Removed playlist and stopped its active playback.".to_owned()
@@ -126,6 +128,7 @@ impl AudioOrbitApp {
                         .into_iter()
                         .filter(|index| self.current_playlist().map(|playlist| *index < playlist.tracks.len()).unwrap_or(false))
                         .collect();
+                    self.clear_multi_track_selection();
                     self.active_playlist_index = active_playlist_index;
                     self.active_track_index = active_track_index;
                     self.active_track_path = active_track_path;
@@ -182,6 +185,7 @@ impl AudioOrbitApp {
             || playlist.tracks[index].group == playlist.tracks[target].group
     }
     pub(crate) fn restore_track_selection_after_reorder(&mut self, selected_path: Option<PathBuf>) {
+        self.clear_multi_track_selection();
         if let Some(selected_path) = selected_path {
             if let Some(index) = self
                 .current_playlist()
