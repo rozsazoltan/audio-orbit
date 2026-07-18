@@ -389,7 +389,8 @@ impl AudioOrbitApp {
         }
 
         let scan_idle = self.pending_folder_scan_receiver.is_none()
-            && self.pending_library_sync_receiver.is_none();
+            && self.pending_library_sync_receiver.is_none()
+            && self.pending_track_file_operation_receiver.is_none();
         if ui
             .add_enabled(
                 scan_idle,

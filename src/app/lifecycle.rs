@@ -78,6 +78,7 @@ impl AudioOrbitApp {
             || self.pending_seek_prepare.is_some()
             || self.pending_folder_scan_receiver.is_some()
             || self.pending_library_sync_receiver.is_some()
+            || self.pending_track_file_operation_receiver.is_some()
             || self.pending_folder_watch_sync_at.is_some()
             || self.update_check_receiver.is_some()
             || self.update_install_receiver.is_some()
@@ -115,6 +116,7 @@ impl eframe::App for AudioOrbitApp {
         self.process_folder_watch_events();
         self.process_folder_scan_events();
         self.process_library_sync_events();
+        self.process_track_file_operation_events();
         self.maybe_start_auto_library_sync();
         self.process_pending_fast_seek();
         self.process_pending_seek_prepare();
@@ -190,6 +192,14 @@ impl eframe::App for AudioOrbitApp {
 
         if self.show_radio_add_modal {
             self.render_radio_add_modal(context);
+        }
+
+        if self.show_new_playlist_modal {
+            self.render_new_playlist_modal(context);
+        }
+
+        if self.pending_track_delete_confirmation.is_some() {
+            self.render_track_delete_confirmation_modal(context);
         }
 
         if self.details_modal.is_some() {

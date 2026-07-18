@@ -113,6 +113,34 @@ impl AudioOrbitApp {
         ui.separator();
         self.render_current_playlist_controls(ui);
 
+        let current_track_count = self
+            .current_playlist()
+            .map(|playlist| playlist.tracks.len())
+            .unwrap_or(0);
+        let file_operation_idle = self.track_file_operations_idle();
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    current_track_count > 0 && file_operation_idle,
+                    egui::Button::new(ui_icons::label(Icon::Archive, "Export playlist...")),
+                )
+                .on_hover_text("Copy every playlist file into a chosen folder. Original files stay unchanged; duplicate names receive a numeric suffix.")
+                .clicked()
+            {
+                self.export_current_playlist_to_folder();
+            }
+            if ui
+                .add_enabled(
+                    current_track_count > 0 && file_operation_idle,
+                    egui::Button::new(ui_icons::label(Icon::Trash2, "Delete all files...")),
+                )
+                .on_hover_text("Permanently delete every file referenced by current playlist after typed confirmation.")
+                .clicked()
+            {
+                self.request_delete_current_playlist_files();
+            }
+        });
+
         ui.separator();
         ui.horizontal(|ui| {
             let can_add_files = self.current_playlist().map(|playlist| playlist.accepts_manual_tracks()).unwrap_or(false);
@@ -126,7 +154,8 @@ impl AudioOrbitApp {
 
         ui.horizontal_wrapped(|ui| {
             let scan_idle = self.pending_folder_scan_receiver.is_none()
-                && self.pending_library_sync_receiver.is_none();
+                && self.pending_library_sync_receiver.is_none()
+                && self.pending_track_file_operation_receiver.is_none();
             if ui
                 .add_enabled(
                     scan_idle,
@@ -198,7 +227,49 @@ impl AudioOrbitApp {
             }
         }
     }
+    pub(crate) fn render_player_only_playlist_context_menu(&mut self, ui: &mut egui::Ui) {
+        let current_track_count = self
+            .current_playlist()
+            .map(|playlist| playlist.tracks.len())
+            .unwrap_or(0);
+        let can_modify_files = current_track_count > 0 && self.track_file_operations_idle();
+
+        if ui
+            .add_enabled(
+                can_modify_files,
+                egui::Button::new(ui_icons::label(Icon::Archive, "Export playlist...")),
+            )
+            .clicked()
+        {
+            ui.close_menu();
+            self.export_current_playlist_to_folder();
+        }
+
+        if ui
+            .add_enabled(
+                can_modify_files,
+                egui::Button::new(ui_icons::label(
+                    Icon::Trash2,
+                    "Delete all playlist files...",
+                )),
+            )
+            .clicked()
+        {
+            ui.close_menu();
+            self.request_delete_current_playlist_files();
+        }
+    }
+
     pub(crate) fn render_main_content_panel(&mut self, ui: &mut egui::Ui) {
+        let player_only_background =
+            (self.player_only_mode && self.active_tab == MainContentTab::Music).then(|| {
+                ui.interact(
+                    ui.max_rect(),
+                    ui.id().with("player_only_playlist_background"),
+                    egui::Sense::click(),
+                )
+            });
+
         ui.horizontal(|ui| {
             if ui.selectable_label(self.active_tab == MainContentTab::Music, ui_icons::label(Icon::Music, "Music")).clicked() {
                 self.active_tab = MainContentTab::Music;
@@ -214,6 +285,10 @@ impl AudioOrbitApp {
         match self.active_tab {
             MainContentTab::Music => self.render_track_panel(ui),
             MainContentTab::Radio => self.render_radio_panel(ui),
+        }
+
+        if let Some(response) = player_only_background {
+            response.context_menu(|ui| self.render_player_only_playlist_context_menu(ui));
         }
     }
 }

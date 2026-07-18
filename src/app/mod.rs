@@ -12,6 +12,7 @@ mod library_backup;
 mod lifecycle;
 mod ordering;
 mod playback;
+mod playlist_files;
 mod playlist_state;
 mod radio;
 mod ui_folder_import;

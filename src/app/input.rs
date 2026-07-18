@@ -5,6 +5,8 @@ impl AudioOrbitApp {
         let has_blocking_modal = self.show_folder_import_modal
             || self.active_panel_modal.is_some()
             || self.show_radio_add_modal
+            || self.show_new_playlist_modal
+            || self.pending_track_delete_confirmation.is_some()
             || self.details_modal.is_some();
         let undo_order = context.input(|input| {
             input.key_pressed(egui::Key::Z) && (input.modifiers.ctrl || input.modifiers.command)
