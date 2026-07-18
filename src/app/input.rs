@@ -2,12 +2,30 @@ use crate::*;
 
 impl AudioOrbitApp {
     pub(crate) fn process_keyboard_shortcuts(&mut self, context: &egui::Context) {
-        let has_blocking_modal = self.show_folder_import_modal
-            || self.active_panel_modal.is_some()
+        let has_non_panel_blocking_modal = self.show_folder_import_modal
             || self.show_radio_add_modal
             || self.show_new_playlist_modal
             || self.pending_track_delete_confirmation.is_some()
             || self.details_modal.is_some();
+        let panel_shortcut = context.input(|input| {
+            if input.key_pressed(egui::Key::F1) {
+                Some(AppPanelModal::About)
+            } else if input.key_pressed(egui::Key::F2) {
+                Some(AppPanelModal::Updates)
+            } else if input.key_pressed(egui::Key::F3) {
+                Some(AppPanelModal::Settings)
+            } else {
+                None
+            }
+        });
+        if !has_non_panel_blocking_modal {
+            if let Some(panel) = panel_shortcut {
+                self.open_panel_modal_from_shortcut(panel);
+                return;
+            }
+        }
+
+        let has_blocking_modal = has_non_panel_blocking_modal || self.active_panel_modal.is_some();
         let undo_order = context.input(|input| {
             input.key_pressed(egui::Key::Z) && (input.modifiers.ctrl || input.modifiers.command)
         });

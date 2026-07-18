@@ -15,6 +15,7 @@
 - [Usage](#usage)
   - [Create a folder playlist](#create-a-folder-playlist)
   - [Play music](#play-music)
+  - [Use keyboard shortcuts](#use-keyboard-shortcuts)
   - [Play internet radio](#play-internet-radio)
   - [Use repeat modes](#use-repeat-modes)
   - [Search tracks](#search-tracks)
@@ -158,6 +159,10 @@ Enable **Settings > Playlist sync > Automatically watch selected folder playlist
 Use the center track list to browse tracks. Double-click a track to start it immediately.
 
 The top player bar keeps the current title left-aligned and truncates long titles so track names never overlap the technical details or controls. Local track metadata stays separated from the title, and player-only mode shows a reduced metadata set with just duration.
+
+### Use keyboard shortcuts
+
+Press **F1** to open About, **F2** to open Updates, and **F3** to open Settings. These panel shortcuts work in both full-layout and player-only mode. Pressing another panel shortcut replaces the currently open panel instead of adding it to panel navigation history.
 
 ### Play internet radio
 
