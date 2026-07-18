@@ -117,6 +117,16 @@ impl AudioOrbitApp {
             .current_playlist()
             .map(|playlist| playlist.tracks.len())
             .unwrap_or(0);
+        let current_available_track_count = self
+            .current_playlist()
+            .map(|playlist| {
+                playlist
+                    .tracks
+                    .iter()
+                    .filter(|track| !track.missing && track.path.is_file())
+                    .count()
+            })
+            .unwrap_or(0);
         let file_operation_idle = self.track_file_operations_idle();
         ui.horizontal_wrapped(|ui| {
             if ui
@@ -138,6 +148,16 @@ impl AudioOrbitApp {
                 .clicked()
             {
                 self.request_delete_current_playlist_files();
+            }
+            if ui
+                .add_enabled(
+                    current_available_track_count >= 2 && !self.dj_mix_is_running(),
+                    egui::Button::new(ui_icons::label(Icon::Music, "DJ mix...")),
+                )
+                .on_hover_text("Build one beat-aligned MP3 mix from current playlist without loading full tracks into memory.")
+                .clicked()
+            {
+                self.open_dj_mix_builder_for_current_playlist();
             }
         });
 
@@ -232,6 +252,16 @@ impl AudioOrbitApp {
             .current_playlist()
             .map(|playlist| playlist.tracks.len())
             .unwrap_or(0);
+        let current_available_track_count = self
+            .current_playlist()
+            .map(|playlist| {
+                playlist
+                    .tracks
+                    .iter()
+                    .filter(|track| !track.missing && track.path.is_file())
+                    .count()
+            })
+            .unwrap_or(0);
         let can_modify_files = current_track_count > 0 && self.track_file_operations_idle();
 
         if ui
@@ -257,6 +287,17 @@ impl AudioOrbitApp {
         {
             ui.close_menu();
             self.request_delete_current_playlist_files();
+        }
+
+        if ui
+            .add_enabled(
+                current_available_track_count >= 2 && !self.dj_mix_is_running(),
+                egui::Button::new(ui_icons::label(Icon::Music, "Create DJ mix...")),
+            )
+            .clicked()
+        {
+            ui.close_menu();
+            self.open_dj_mix_builder_for_current_playlist();
         }
     }
 

@@ -21,6 +21,7 @@
   - [Search tracks](#search-tracks)
   - [Manage Favorites](#manage-favorites)
   - [Manage playlist files and multi-select tracks](#manage-playlist-files-and-multi-select-tracks)
+  - [Build a DJ mix](#build-a-dj-mix)
   - [Export and import backups](#export-and-import-backups)
 - [Window behavior](#window-behavior)
 - [Data location](#data-location)
@@ -63,7 +64,8 @@ Audio Orbit supports common desktop-player behavior:
 - remember the last played local track between app launches
 - play saved internet radio streams from the Radio tab
 - favorite radio stations and filter the Radio list to favorites
-- select multiple local tracks with Ctrl-click or Shift-click, then copy, add, or delete them together
+- select multiple local tracks with Ctrl-click or Shift-click, then copy, add, delete, or mix them together
+- export a low-memory DJ-style MP3 mix with BPM analysis, classic pitch sync, beat-aligned crossfades, bass swap, and loudness leveling
 - show a live radio visualizer with elapsed listening time
 - record the original internet radio stream bytes to timestamped files
 - remember the window size and position between app launches
@@ -202,6 +204,14 @@ The final **Add to playlist** submenu item is **New**. It asks for a playlist na
 
 Use **Delete all files...** to permanently delete every file referenced by the current playlist. Multi-track deletion and whole-playlist deletion require typing `DELETE` in a confirmation modal. Successfully deleted files are removed from every playlist that references them. These actions delete files from disk and cannot be undone.
 
+### Build a DJ mix
+
+Use **DJ mix...** in Library panel to mix current playlist, or select at least two tracks and choose **Create DJ mix...** from track context menu. Same command appears in player-only Music view empty-area context menu.
+
+DJ Mix Builder supports manual ordering or BPM-based smart ordering, 8/16/32-beat transitions, optional loudness leveling, optional bass swap, and 192/256/320 kbps MP3 export. Export runs in background with progress and cancellation. Audio is decoded and encoded as stream; only transition buffers stay in memory. Track analysis is cached in `.audio-orbit-data/dj-analysis-cache.json` and reused while source file size and modification time stay unchanged.
+
+Classic pitch sync changes playback speed and pitch together by maximum ±4%, matching traditional pitch-controlled DJ playback while keeping CPU use low. Analysis and rendering use one below-normal-priority worker on Windows. Automatic BPM and beat detection can need manual track ordering for difficult intros or irregular music. Builder does not perform key-lock/time-stretch, harmonic key matching, stem separation, or manual beat-grid editing.
+
 ### Export and import backups
 
 Open **Settings**, then use **Backup and data**.
@@ -250,6 +260,8 @@ Automatic synchronization is scoped to selected folder playlist. Windows wakes A
 
 Copyright (C) 2020–present [Zoltán Rózsa](https://github.com/rozsazoltan)
 
+
+DJ Mix Builder encodes MP3 output with the pure-Rust `shine-rs` encoder, distributed under LGPL-2.0. Audio Orbit remains licensed under AGPL-3.0-or-later.
 
 Audio Orbit renders local and live radio waveform bars through a RustFFT-backed amplitude analysis path. The visual design intentionally follows AIMP-like progress bars: neutral gray for the upcoming waveform, blue for the played region, and yellow markers for silence-skip sections. The analyzer still uses spectral information internally to shape a stable loudness envelope, but the UI does not draw colored bass/mid/treble stacks.
 

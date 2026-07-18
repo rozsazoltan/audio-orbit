@@ -1182,6 +1182,7 @@ impl AudioOrbitApp {
             .unwrap_or(true);
         let action_paths = self.action_track_paths_for_context(index);
         let selected_count = action_paths.len();
+        let available_dj_track_count = action_paths.iter().filter(|path| path.is_file()).count();
         let file_operation_idle = self.track_file_operations_idle();
 
         if selected_count > 1 {
@@ -1273,6 +1274,18 @@ impl AudioOrbitApp {
             playlist_matches,
             Some("Track is not present in another playlist."),
         );
+
+        if ui
+            .add_enabled(
+                available_dj_track_count >= 2 && !self.dj_mix_is_running(),
+                egui::Button::new(ui_icons::label(Icon::Music, "Create DJ mix...")),
+            )
+            .on_disabled_hover_text("Select at least two available tracks, or wait for current DJ mix export.")
+            .clicked()
+        {
+            self.open_dj_mix_builder_for_selection(index);
+            ui.close_menu();
+        }
 
         let copy_label = if selected_count > 1 {
             "Copy selected to folder..."

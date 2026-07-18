@@ -2,6 +2,7 @@
 
 mod audio_player;
 mod config;
+mod dj_mix;
 mod dsp;
 mod icon;
 mod folder_watcher;
@@ -34,7 +35,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::Command,
-    sync::{mpsc, Arc},
+    sync::{atomic::AtomicBool, mpsc, Arc},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -315,6 +316,57 @@ enum TrackFileOperationResult {
     },
 }
 
+#[derive(Clone, Debug)]
+struct DjMixTrack {
+    path: PathBuf,
+    title: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DjMixOptions {
+    smart_order: bool,
+    normalize_loudness: bool,
+    bass_swap: bool,
+    transition_beats: u32,
+    bitrate_kbps: u32,
+}
+
+impl Default for DjMixOptions {
+    fn default() -> Self {
+        Self {
+            smart_order: true,
+            normalize_loudness: true,
+            bass_swap: true,
+            transition_beats: 16,
+            bitrate_kbps: 256,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DjMixModalState {
+    tracks: Vec<DjMixTrack>,
+    options: DjMixOptions,
+    stage: String,
+    progress: f32,
+    output_path: Option<PathBuf>,
+    completed: bool,
+}
+
+#[derive(Clone, Debug)]
+enum DjMixEvent {
+    Progress {
+        stage: String,
+        progress: f32,
+    },
+    Completed {
+        output_path: PathBuf,
+        track_count: usize,
+    },
+    Cancelled,
+    Failed(String),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MainContentTab {
     Music,
@@ -410,6 +462,8 @@ struct AudioOrbitApp {
     pending_folder_scan_receiver: Option<mpsc::Receiver<Result<PendingFolderScanResult, String>>>,
     pending_library_sync_receiver: Option<mpsc::Receiver<PendingLibrarySyncResult>>,
     pending_track_file_operation_receiver: Option<mpsc::Receiver<TrackFileOperationResult>>,
+    dj_mix_event_receiver: Option<mpsc::Receiver<DjMixEvent>>,
+    dj_mix_cancel_flag: Option<Arc<AtomicBool>>,
     folder_watcher: Option<folder_watcher::FolderWatcher>,
     folder_watcher_target_key: Option<String>,
     pending_folder_watch_sync_at: Option<Instant>,
@@ -426,6 +480,7 @@ struct AudioOrbitApp {
     pending_new_playlist_tracks: Vec<PathBuf>,
     pending_track_delete_confirmation: Option<PendingTrackDeleteConfirmation>,
     pending_track_delete_confirmation_text: String,
+    dj_mix_modal: Option<DjMixModalState>,
     active_panel_modal: Option<AppPanelModal>,
     panel_modal_history: Vec<AppPanelModal>,
     details_modal: Option<DetailsModal>,

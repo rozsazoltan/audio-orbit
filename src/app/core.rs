@@ -40,6 +40,8 @@ impl AudioOrbitApp {
                     pending_folder_scan_receiver: None,
                     pending_library_sync_receiver: None,
                     pending_track_file_operation_receiver: None,
+                    dj_mix_event_receiver: None,
+                    dj_mix_cancel_flag: None,
                     folder_watcher: None,
                     folder_watcher_target_key: None,
                     pending_folder_watch_sync_at: None,
@@ -56,6 +58,7 @@ impl AudioOrbitApp {
                     pending_new_playlist_tracks: Vec::new(),
                     pending_track_delete_confirmation: None,
                     pending_track_delete_confirmation_text: String::new(),
+                    dj_mix_modal: None,
                     active_panel_modal: None,
                     panel_modal_history: Vec::new(),
                     details_modal: None,
@@ -142,6 +145,8 @@ impl AudioOrbitApp {
                 pending_folder_scan_receiver: None,
                 pending_library_sync_receiver: None,
                 pending_track_file_operation_receiver: None,
+                dj_mix_event_receiver: None,
+                dj_mix_cancel_flag: None,
                 folder_watcher: None,
                 folder_watcher_target_key: None,
                 pending_folder_watch_sync_at: None,
@@ -158,6 +163,7 @@ impl AudioOrbitApp {
                 pending_new_playlist_tracks: Vec::new(),
                 pending_track_delete_confirmation: None,
                 pending_track_delete_confirmation_text: String::new(),
+                dj_mix_modal: None,
                 active_panel_modal: None,
                 panel_modal_history: Vec::new(),
                 details_modal: None,
@@ -331,7 +337,13 @@ impl AudioOrbitApp {
             return;
         }
 
-        if self.active_panel_modal.is_some() {
+        if self.dj_mix_modal.is_some() {
+            if self.dj_mix_is_running() {
+                self.cancel_dj_mix_export();
+            } else {
+                self.dj_mix_modal = None;
+            }
+        } else if self.active_panel_modal.is_some() {
             self.close_panel_modal();
         } else if self.show_folder_import_modal {
             self.show_folder_import_modal = false;

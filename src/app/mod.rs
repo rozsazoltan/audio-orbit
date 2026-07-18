@@ -7,6 +7,7 @@
 #[cfg(debug_assertions)]
 pub(crate) mod dev_metrics;
 mod core;
+mod dj_mix;
 mod input;
 mod library_backup;
 mod lifecycle;

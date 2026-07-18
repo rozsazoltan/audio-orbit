@@ -6,6 +6,7 @@ impl AudioOrbitApp {
             || self.show_radio_add_modal
             || self.show_new_playlist_modal
             || self.pending_track_delete_confirmation.is_some()
+            || self.dj_mix_modal.is_some()
             || self.details_modal.is_some();
         let panel_shortcut = context.input(|input| {
             if input.key_pressed(egui::Key::F1) {

@@ -2,6 +2,9 @@ use crate::*;
 
 impl Drop for AudioOrbitApp {
     fn drop(&mut self) {
+        if let Some(cancel) = &self.dj_mix_cancel_flag {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.persist_playback_session();
         self.persist_repeat_selection_for_current_playlist();
         if let Some(player) = &mut self.player {
@@ -79,6 +82,7 @@ impl AudioOrbitApp {
             || self.pending_folder_scan_receiver.is_some()
             || self.pending_library_sync_receiver.is_some()
             || self.pending_track_file_operation_receiver.is_some()
+            || self.dj_mix_event_receiver.is_some()
             || self.pending_folder_watch_sync_at.is_some()
             || self.update_check_receiver.is_some()
             || self.update_install_receiver.is_some()
@@ -117,6 +121,7 @@ impl eframe::App for AudioOrbitApp {
         self.process_folder_scan_events();
         self.process_library_sync_events();
         self.process_track_file_operation_events();
+        self.process_dj_mix_events();
         self.maybe_start_auto_library_sync();
         self.process_pending_fast_seek();
         self.process_pending_seek_prepare();
@@ -200,6 +205,10 @@ impl eframe::App for AudioOrbitApp {
 
         if self.pending_track_delete_confirmation.is_some() {
             self.render_track_delete_confirmation_modal(context);
+        }
+
+        if self.dj_mix_modal.is_some() {
+            self.render_dj_mix_modal(context);
         }
 
         if self.details_modal.is_some() {
