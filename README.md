@@ -189,7 +189,7 @@ Use the heart button next to a track to add or remove it from Favorites. Newly f
 
 ### Manage playlist files and multi-select tracks
 
-Use **Export playlist...** in the Library panel to copy every available file from the current playlist into a chosen folder. Export never moves source files and never overwrites an existing destination file; duplicate names receive a numeric suffix.
+Use **Export playlist...** in the Library panel to copy every available file from the current playlist into a chosen folder. Export never moves source files and never overwrites an existing destination file; duplicate names receive a numeric suffix. In player-only mode, right-click an empty area of the Music view to access playlist export and whole-playlist file deletion.
 
 Use Ctrl-click to add or remove individual tracks from the current selection. Use Shift-click to select a visible range. Right-click any selected row to copy the selected files into a folder, add all selected tracks to an existing manual playlist, or permanently delete the selected files.
 

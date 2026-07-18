@@ -175,23 +175,27 @@ impl AudioOrbitApp {
                         ui.add_space(10.0);
 
                         let can_create = !self.pending_new_playlist_name.trim().is_empty();
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .add_enabled(
-                                    can_create,
-                                    egui::Button::new(ui_icons::label(
-                                        Icon::Plus,
-                                        "Create playlist",
-                                    )),
-                                )
-                                .clicked()
-                            {
-                                create = true;
-                            }
-                            if ui.button("Cancel").clicked() {
-                                close = true;
-                            }
-                        });
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(form_width, ui.spacing().interact_size.y),
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if ui
+                                    .add_enabled(
+                                        can_create,
+                                        egui::Button::new(ui_icons::label(
+                                            Icon::Plus,
+                                            "Create playlist",
+                                        )),
+                                    )
+                                    .clicked()
+                                {
+                                    create = true;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    close = true;
+                                }
+                            },
+                        );
 
                         if response.lost_focus()
                             && context.input(|input| input.key_pressed(egui::Key::Enter))
