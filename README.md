@@ -196,9 +196,9 @@ Use the heart button next to a track to add or remove it from Favorites. Newly f
 
 ### Manage playlist files and multi-select tracks
 
-Use **Export playlist...** in the Library panel to copy every available file from the current playlist into a chosen folder. Export never moves source files and never overwrites an existing destination file; duplicate names receive a numeric suffix. In player-only mode, right-click an empty area of the Music view to access playlist export and whole-playlist file deletion.
+Use **Export playlist...** in the Library panel to copy every available file from the current playlist into a chosen folder. Export never moves source files and never overwrites an existing destination file; duplicate names receive a numeric suffix. In full-layout or player-only mode, right-click an empty area of the Music view to access playlist export, whole-playlist file deletion, and DJ mix creation.
 
-Use Ctrl-click to add or remove individual tracks from the current selection. Use Shift-click to select a visible range. Right-click any selected row to copy the selected files into a folder, add all selected tracks to an existing manual playlist, or permanently delete the selected files.
+Use Ctrl-click to add or remove individual tracks from the current selection. Use Shift-click to select a visible range. Press Escape to clear the track selection when no menu, search, or modal needs to close first. Right-click any selected row to copy the selected files into a folder, add all selected tracks to an existing manual playlist, or permanently delete the selected files.
 
 The final **Add to playlist** submenu item is **New**. It asks for a playlist name, creates a manual playlist, and adds the selected track or tracks.
 
@@ -206,7 +206,7 @@ Use **Delete all files...** to permanently delete every file referenced by the c
 
 ### Build a DJ mix
 
-Use **DJ mix...** in Library panel to mix current playlist, or select at least two tracks and choose **Create DJ mix...** from track context menu. Same command appears in player-only Music view empty-area context menu.
+Use **DJ mix...** in Library panel to mix current playlist, or select at least two tracks and choose **Create DJ mix...** from track context menu. Same command appears in full-layout and player-only Music view empty-area context menus.
 
 DJ Mix Builder supports manual ordering or BPM-based smart ordering, 8/16/32-beat transitions, optional loudness leveling, optional bass swap, and 192/256/320 kbps MP3 export. Export runs in background with progress and cancellation. Audio is decoded and encoded as stream; only transition buffers stay in memory. Track analysis is cached in `.audio-orbit-data/dj-analysis-cache.json` and reused while source file size and modification time stay unchanged.
 

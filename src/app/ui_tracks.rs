@@ -301,6 +301,14 @@ impl AudioOrbitApp {
             return;
         };
 
+        let playlist_background = (!self.player_only_mode).then(|| {
+            ui.interact(
+                ui.max_rect(),
+                ui.id().with("playlist_background_context_menu"),
+                egui::Sense::click(),
+            )
+        });
+
         let playlist_name = playlist.name.clone();
         let is_favorites = playlist.kind == PlaylistKind::Favorites;
         let selected_playlist_label = format!("{} {}", playlist.kind.icon(), playlist_name);
@@ -488,6 +496,9 @@ impl AudioOrbitApp {
                     ui.label("No tracks in this view. Add files or import a music folder.");
                 }
             });
+            if let Some(response) = playlist_background {
+                response.context_menu(|ui| self.render_player_only_playlist_context_menu(ui));
+            }
             return;
         }
 
@@ -1096,6 +1107,9 @@ impl AudioOrbitApp {
         if let Some((from, to)) = reorder_track {
             self.track_drop_target_index = None;
             self.move_track_to_index_in_current_playlist(from, to);
+        }
+        if let Some(response) = playlist_background {
+            response.context_menu(|ui| self.render_player_only_playlist_context_menu(ui));
         }
     }
     fn process_playlist_submenu_input(&mut self, context: &egui::Context) {

@@ -337,6 +337,10 @@ impl AudioOrbitApp {
             return;
         }
 
+        if context.memory(|memory| memory.any_popup_open()) {
+            return;
+        }
+
         if self.dj_mix_modal.is_some() {
             if self.dj_mix_is_running() {
                 self.cancel_dj_mix_export();
@@ -362,6 +366,11 @@ impl AudioOrbitApp {
             self.close_track_search();
         } else if self.show_radio_search {
             self.close_radio_search();
+        } else if self.selected_track_index.is_some()
+            || !self.multi_selected_track_indexes.is_empty()
+        {
+            self.clear_multi_track_selection();
+            self.selected_track_index = None;
         }
     }
     pub(crate) fn save_state_silently(&mut self) {

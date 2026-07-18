@@ -236,7 +236,8 @@ impl AudioOrbitApp {
         let outer_padding = Self::modal_outer_padding(screen_rect);
         let footer_height = self.modal_info_footer_reserved_height();
         let content_size = Self::modal_content_size(screen_rect, outer_padding, footer_height);
-        let scroll_height = (content_size.y - 220.0).max(140.0);
+        let body_scroll_height = (content_size.y - 96.0).max(120.0);
+        let track_scroll_height = (content_size.y * 0.38).clamp(120.0, 360.0);
         let mut close_requested = false;
         let mut start_requested = false;
         let mut cancel_requested = false;
@@ -267,154 +268,165 @@ impl AudioOrbitApp {
                         .inner_margin(egui::Margin::symmetric(outer_padding.x as i8, 10))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            Self::render_modal_section(ui, |ui| {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.add_enabled_ui(!running, |ui| {
-                                        ui.checkbox(&mut modal.options.smart_order, "Smart BPM order");
-                                        ui.checkbox(&mut modal.options.normalize_loudness, "Loudness leveling");
-                                        ui.checkbox(&mut modal.options.bass_swap, "Bass swap");
-                                    });
-                                });
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("Transition:");
-                                    for beats in [8, 16, 32] {
-                                        ui.add_enabled_ui(!running, |ui| {
-                                            ui.selectable_value(
-                                                &mut modal.options.transition_beats,
-                                                beats,
-                                                format!("{beats} beats"),
-                                            );
-                                        });
-                                    }
-                                    ui.separator();
-                                    ui.label("MP3:");
-                                    for bitrate in [192, 256, 320] {
-                                        ui.add_enabled_ui(!running, |ui| {
-                                            ui.selectable_value(
-                                                &mut modal.options.bitrate_kbps,
-                                                bitrate,
-                                                format!("{bitrate} kbps"),
-                                            );
-                                        });
-                                    }
-                                });
-                                ui.small("Classic pitch sync changes speed and pitch by at most ±4%. Smart order keeps BPM gaps small. Full tracks never load into RAM.");
-                            });
-
-                            ui.add_space(8.0);
-                            Self::render_modal_section(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.heading(format!("Tracks ({})", modal.tracks.len()));
-                                    if modal.options.smart_order {
-                                        ui.small("Export order optimized after BPM analysis");
-                                    } else {
-                                        ui.small("Manual order");
-                                    }
-                                });
-                                egui::ScrollArea::vertical()
-                                    .id_salt("dj_mix_tracks")
-                                    .max_height(scroll_height)
-                                    .auto_shrink([false, false])
-                                    .show(ui, |ui| {
-                                        let mut move_action = None;
-                                        let mut remove_index = None;
-                                        for index in 0..modal.tracks.len() {
-                                            let title = modal.tracks[index].title.clone();
-                                            let path = modal.tracks[index].path.clone();
-                                            ui.horizontal(|ui| {
-                                                ui.label(format!("{}.", index + 1));
-                                                ui.vertical(|ui| {
-                                                    ui.label(ellipsize_chars(&title, 72));
-                                                    ui.small(ellipsize_chars(&path.display().to_string(), 96));
-                                                });
-                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                    if ui
-                                                        .add_enabled(!running && modal.tracks.len() > 2, egui::Button::new(ui_icons::icon(Icon::X)))
-                                                        .on_hover_text("Remove from mix")
-                                                        .clicked()
-                                                    {
-                                                        remove_index = Some(index);
-                                                    }
-                                                    if ui
-                                                        .add_enabled(!running && index + 1 < modal.tracks.len(), egui::Button::new(ui_icons::icon(Icon::ArrowDown)))
-                                                        .on_hover_text("Move down")
-                                                        .clicked()
-                                                    {
-                                                        move_action = Some((index, index + 1));
-                                                    }
-                                                    if ui
-                                                        .add_enabled(!running && index > 0, egui::Button::new(ui_icons::icon(Icon::ArrowUp)))
-                                                        .on_hover_text("Move up")
-                                                        .clicked()
-                                                    {
-                                                        move_action = Some((index, index - 1));
-                                                    }
-                                                });
+                            egui::ScrollArea::vertical()
+                                .id_salt("dj_mix_modal_body")
+                                .max_height(body_scroll_height)
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    Self::render_modal_section(ui, |ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.add_enabled_ui(!running, |ui| {
+                                                ui.checkbox(&mut modal.options.smart_order, "Smart BPM order");
+                                                ui.checkbox(&mut modal.options.normalize_loudness, "Loudness leveling");
+                                                ui.checkbox(&mut modal.options.bass_swap, "Bass swap");
                                             });
-                                            if index + 1 < modal.tracks.len() {
-                                                ui.separator();
+                                        });
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label("Transition:");
+                                            for beats in [8, 16, 32] {
+                                                ui.add_enabled_ui(!running, |ui| {
+                                                    ui.selectable_value(
+                                                        &mut modal.options.transition_beats,
+                                                        beats,
+                                                        format!("{beats} beats"),
+                                                    );
+                                                });
                                             }
-                                        }
-                                        if let Some((from, to)) = move_action {
-                                            modal.tracks.swap(from, to);
-                                            modal.options.smart_order = false;
-                                        }
-                                        if let Some(index) = remove_index {
-                                            modal.tracks.remove(index);
-                                        }
+                                            ui.separator();
+                                            ui.label("MP3:");
+                                            for bitrate in [192, 256, 320] {
+                                                ui.add_enabled_ui(!running, |ui| {
+                                                    ui.selectable_value(
+                                                        &mut modal.options.bitrate_kbps,
+                                                        bitrate,
+                                                        format!("{bitrate} kbps"),
+                                                    );
+                                                });
+                                            }
+                                        });
+                                        ui.small("Classic pitch sync changes speed and pitch by at most ±4%. Smart order keeps BPM gaps small. Full tracks never load into RAM.");
                                     });
-                            });
 
-                            ui.add_space(8.0);
-                            Self::render_modal_section(ui, |ui| {
-                                ui.label(&modal.stage);
-                                ui.add(
-                                    egui::ProgressBar::new(modal.progress)
-                                        .animate(running)
-                                        .show_percentage(),
-                                );
-                                ui.horizontal_wrapped(|ui| {
-                                    if running {
-                                        if ui.button(ui_icons::label(Icon::X, "Cancel export")).clicked() {
-                                            cancel_requested = true;
+                                    ui.add_space(8.0);
+                                    Self::render_modal_section(ui, |ui| {
+                                        ui.label(&modal.stage);
+                                        ui.add(
+                                            egui::ProgressBar::new(modal.progress)
+                                                .animate(running)
+                                                .show_percentage(),
+                                        );
+                                        ui.small("Choose options, then click Export DJ mix... and select the output MP3 file.");
+                                        if modal.tracks.len() < 2 {
+                                            ui.small("Choose at least two available tracks.");
                                         }
-                                    } else if modal.completed {
-                                        if let Some(path) = modal.output_path.clone() {
-                                            if ui.button(ui_icons::label(Icon::FolderOpen, "Show MP3")).clicked() {
-                                                reveal_path = Some(path);
+                                        ui.horizontal_wrapped(|ui| {
+                                            if running {
+                                                if ui.button(ui_icons::label(Icon::X, "Cancel export")).clicked() {
+                                                    cancel_requested = true;
+                                                }
+                                            } else if modal.completed {
+                                                if let Some(path) = modal.output_path.clone() {
+                                                    if ui.button(ui_icons::label(Icon::FolderOpen, "Show MP3")).clicked() {
+                                                        reveal_path = Some(path);
+                                                    }
+                                                }
+                                                if ui
+                                                    .add_enabled(
+                                                        modal.tracks.len() >= 2,
+                                                        egui::Button::new(ui_icons::label(
+                                                            Icon::Music,
+                                                            "Export another...",
+                                                        )),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    start_requested = true;
+                                                }
+                                                if ui.button("Close").clicked() {
+                                                    close_requested = true;
+                                                }
+                                            } else {
+                                                if ui
+                                                    .add_enabled(
+                                                        modal.tracks.len() >= 2,
+                                                        egui::Button::new(ui_icons::label(Icon::Music, "Export DJ mix...")),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    start_requested = true;
+                                                }
+                                                if ui.button("Close").clicked() {
+                                                    close_requested = true;
+                                                }
                                             }
-                                        }
-                                        if ui
-                                            .add_enabled(
-                                                modal.tracks.len() >= 2,
-                                                egui::Button::new(ui_icons::label(
-                                                    Icon::Music,
-                                                    "Export another...",
-                                                )),
-                                            )
-                                            .clicked()
-                                        {
-                                            start_requested = true;
-                                        }
-                                        if ui.button("Close").clicked() {
-                                            close_requested = true;
-                                        }
-                                    } else {
-                                        if ui
-                                            .add_enabled(
-                                                modal.tracks.len() >= 2,
-                                                egui::Button::new(ui_icons::label(Icon::Music, "Export DJ mix...")),
-                                            )
-                                            .clicked()
-                                        {
-                                            start_requested = true;
-                                        }
-                                        if ui.button("Close").clicked() {
-                                            close_requested = true;
-                                        }
-                                    }
+                                        });
+                                    });
+
+                                    ui.add_space(8.0);
+                                    Self::render_modal_section(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.heading(format!("Tracks ({})", modal.tracks.len()));
+                                            if modal.options.smart_order {
+                                                ui.small("Export order optimized after BPM analysis");
+                                            } else {
+                                                ui.small("Manual order");
+                                            }
+                                        });
+                                        egui::ScrollArea::vertical()
+                                            .id_salt("dj_mix_tracks")
+                                            .max_height(track_scroll_height)
+                                            .auto_shrink([false, false])
+                                            .show(ui, |ui| {
+                                                let mut move_action = None;
+                                                let mut remove_index = None;
+                                                for index in 0..modal.tracks.len() {
+                                                    let title = modal.tracks[index].title.clone();
+                                                    let path = modal.tracks[index].path.clone();
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(format!("{}.", index + 1));
+                                                        ui.vertical(|ui| {
+                                                            ui.label(ellipsize_chars(&title, 72));
+                                                            ui.small(ellipsize_chars(&path.display().to_string(), 96));
+                                                        });
+                                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                            if ui
+                                                                .add_enabled(!running && modal.tracks.len() > 2, egui::Button::new(ui_icons::icon(Icon::X)))
+                                                                .on_hover_text("Remove from mix")
+                                                                .clicked()
+                                                            {
+                                                                remove_index = Some(index);
+                                                            }
+                                                            if ui
+                                                                .add_enabled(!running && index + 1 < modal.tracks.len(), egui::Button::new(ui_icons::icon(Icon::ArrowDown)))
+                                                                .on_hover_text("Move down")
+                                                                .clicked()
+                                                            {
+                                                                move_action = Some((index, index + 1));
+                                                            }
+                                                            if ui
+                                                                .add_enabled(!running && index > 0, egui::Button::new(ui_icons::icon(Icon::ArrowUp)))
+                                                                .on_hover_text("Move up")
+                                                                .clicked()
+                                                            {
+                                                                move_action = Some((index, index - 1));
+                                                            }
+                                                        });
+                                                    });
+                                                    if index + 1 < modal.tracks.len() {
+                                                        ui.separator();
+                                                    }
+                                                }
+                                                if let Some((from, to)) = move_action {
+                                                    modal.tracks.swap(from, to);
+                                                    modal.options.smart_order = false;
+                                                }
+                                                if let Some(index) = remove_index {
+                                                    modal.tracks.remove(index);
+                                                }
+                                            });
+                                    });
                                 });
-                            });
                         });
                 });
             });
