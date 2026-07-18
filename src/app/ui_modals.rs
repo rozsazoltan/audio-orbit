@@ -732,6 +732,9 @@ impl AudioOrbitApp {
         ui.add_space(10.0);
         ui.heading("Keyboard shortcuts");
         ui.small("AIMP-style in-app controls are available while no text field is focused.");
+        ui.label("F1 — Open About panel");
+        ui.label("F2 — Open Updates panel");
+        ui.label("F3 — Open Settings panel");
         ui.label("Space — Play / pause");
         ui.label("Enter — Play selected track");
         ui.label("S — Stop");

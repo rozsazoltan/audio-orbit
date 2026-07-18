@@ -304,6 +304,10 @@ impl AudioOrbitApp {
         }
         self.active_panel_modal = Some(panel);
     }
+    pub(crate) fn open_panel_modal_from_shortcut(&mut self, panel: AppPanelModal) {
+        self.panel_modal_history.clear();
+        self.active_panel_modal = Some(panel);
+    }
     pub(crate) fn close_panel_modal(&mut self) {
         self.active_panel_modal = self.panel_modal_history.pop();
     }
