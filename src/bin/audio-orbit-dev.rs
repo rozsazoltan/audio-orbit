@@ -129,7 +129,7 @@ fn stop_child(child: &mut Option<Child>) {
 fn app_executable_path(root: &Path) -> PathBuf {
     let target_dir = env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("target"));
+        .unwrap_or_else(|| root.join(".cache").join("cargo-target"));
 
     let exe_name = if cfg!(windows) {
         "audio-orbit.exe"

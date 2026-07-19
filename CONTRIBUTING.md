@@ -118,3 +118,9 @@ Before merging, check:
 ## License
 
 By contributing, you agree that your contribution is licensed under the GNU Affero General Public License v3.0 or later.
+
+
+## Build cache
+
+Cargo build artifacts are stored under `.cache/cargo-target` to keep the repository root clean.
+
