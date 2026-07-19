@@ -88,7 +88,11 @@ fn start_app(root: &Path) -> Option<Child> {
         return None;
     }
 
+    let app_data_dir = root.join(".cache").join("app-data");
+    println!("app data: {}", app_data_dir.display());
+
     match Command::new(&exe)
+        .env("AUDIO_ORBIT_APP_DATA_DIR", &app_data_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -198,6 +202,7 @@ fn should_ignore(path: &Path) -> bool {
         matches!(
             value.to_str(),
             Some("target")
+                | Some(".cache")
                 | Some(".git")
                 | Some(".audio-orbit-data")
                 | Some(".audio-orbit-dll")

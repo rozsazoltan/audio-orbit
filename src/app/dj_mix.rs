@@ -291,7 +291,7 @@ impl AudioOrbitApp {
                         outer_padding.x,
                         Icon::Music,
                         "DJ Mix Builder",
-                        "Build one deterministic MP3 mix from selected tracks. Keep simple crossfades or use Smart DJ for phrase-aligned section selection, pitch-preserving tempo sync, filtered equal-power blends, and bass swaps.",
+                        "Build one deterministic MP3 mix from selected tracks. Keep simple crossfades or use Smart DJ for phrase-aligned section selection, pitch-preserving tempo sync, beat repeats, loop tightening, filter sweeps, echoes, risers, impacts, and adaptive seamless or high-impact transitions.",
                     ) {
                         if running {
                             cancel_requested = true;
@@ -328,7 +328,7 @@ impl AudioOrbitApp {
                                         });
                                         ui.small(match modal.options.style {
                                             DjMixStyle::Crossfade => "Simple equal-power overlap. No tempo change, loop roll, echo, or filter performance.",
-                                            DjMixStyle::SmartDj => "Deterministic offline DJ engine: pairwise BPM sync up to ±6%, pitch-preserving stretch, useful section selection, 8/16/32-bar phrase alignment, restrained filtering, and optional bass swap.",
+                                            DjMixStyle::SmartDj => "Deterministic offline performance-DJ engine: phrase selection, pitch-preserving BPM sync, beat-repeat loops, stutter builds, filter automation, echo throws, synthetic risers and impacts, optional bass swap, and adaptive seamless or high-impact drops.",
                                         });
                                         ui.add_space(6.0);
                                         ui.horizontal_wrapped(|ui| {

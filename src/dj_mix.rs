@@ -23,7 +23,7 @@ use std::{
 
 const ENGINE_SCHEMA_VERSION: u32 = 2;
 const ANALYZER_VERSION: &str = "audio-orbit-envelope-ebur128-v2";
-const ENGINE_VERSION: &str = "human-dj-v2-wsola";
+const ENGINE_VERSION: &str = "performance-dj-v3-wsola";
 const OUTPUT_SAMPLE_RATE: u32 = 44_100;
 const OUTPUT_CHANNELS: u16 = 2;
 const ANALYSIS_RATE_HZ: usize = 100;
@@ -505,7 +505,7 @@ fn render_planned_mix(
                 writer,
                 cancel,
             )?,
-            DjMixStyle::SmartDj => write_bass_swap_transition(
+            DjMixStyle::SmartDj => write_performance_transition(
                 &current_audio[body_len..],
                 &next_audio[..overlap],
                 current,
@@ -585,9 +585,9 @@ fn decode_section(
         };
         output.push(frame);
     }
-    if output.len() < OUTPUT_SAMPLE_RATE as usize * 4 {
+    if output.is_empty() {
         return Err(anyhow!(
-            "Selected section is too short or unavailable: {}",
+            "Selected section is unavailable: {}",
             path.display()
         ));
     }
@@ -653,7 +653,7 @@ fn write_crossfade_transition(
     Ok(())
 }
 
-fn write_bass_swap_transition(
+fn write_performance_transition(
     outgoing: &[[f32; 2]],
     incoming: &[[f32; 2]],
     current: &PlannedTrack,
@@ -663,41 +663,65 @@ fn write_bass_swap_transition(
     cancel: &AtomicBool,
 ) -> Result<()> {
     let frames = outgoing.len().min(incoming.len());
+    if frames == 0 {
+        return Ok(());
+    }
+
     let peak_scale = transition_peak_scale(
         &outgoing[..frames],
         &incoming[..frames],
         current.gain,
         next.gain,
     );
+    let bpm = ((current.analysis.bpm + next.analysis.bpm) * 0.5).clamp(MIN_BPM, MAX_BPM);
+    let beat_frames = ((60.0 / bpm) * OUTPUT_SAMPLE_RATE as f32).round().max(1.0) as usize;
+    let loop_frames = beat_frames
+        .min(frames)
+        .max((OUTPUT_SAMPLE_RATE / 8) as usize);
+    let strong_change = transition_should_hit_hard(current, next);
     let mut outgoing_low = LowPassStereo::new(180.0);
     let mut incoming_low = LowPassStereo::new(180.0);
-    let mut outgoing_sweep = LowPassStereo::new(160.0);
-    let mut incoming_sweep = LowPassStereo::new(600.0);
+    let mut outgoing_sweep = LowPassStereo::new(18_000.0);
+    let mut incoming_sweep = LowPassStereo::new(350.0);
+    let mut delay = StereoDelay::new((beat_frames / 2).max(1), 0.38);
+    let mut noise_state = transition_seed(current, next);
 
     for index in 0..frames {
         if index % (OUTPUT_SAMPLE_RATE as usize / 2) == 0 {
             ensure_not_cancelled(cancel)?;
         }
         let progress = normalized_progress(index, frames);
-        if index % 64 == 0 {
-            outgoing_sweep.set_cutoff(160.0 + progress.powi(2) * 3_000.0);
-            incoming_sweep.set_cutoff(500.0 + progress.powi(2) * 17_000.0);
-        }
-        let mut out = multiply_frame(outgoing[index], current.gain * peak_scale);
-        let mut input = multiply_frame(incoming[index], next.gain * peak_scale);
+        let phrase_progress = (progress * 4.0).fract();
+        let repeat_divisor = if progress < 0.55 {
+            1
+        } else if progress < 0.78 {
+            2
+        } else {
+            4
+        };
+        let repeat_len = (loop_frames / repeat_divisor).max(64);
+        let loop_start = frames.saturating_sub(loop_frames);
+        let loop_index = loop_start + ((index.saturating_sub(loop_start)) % repeat_len);
+        let source_index = if index >= loop_start {
+            loop_index.min(frames - 1)
+        } else {
+            index
+        };
 
-        let out_high_amount = ((progress - 0.55) / 0.45).clamp(0.0, 1.0) * 0.55;
-        let out_low_sweep = outgoing_sweep.process(out);
-        out = [
-            out[0] - out_low_sweep[0] * out_high_amount,
-            out[1] - out_low_sweep[1] * out_high_amount,
-        ];
-        let in_filter_amount = (1.0 - progress / 0.45).clamp(0.0, 1.0) * 0.60;
-        let filtered_input = incoming_sweep.process(input);
-        input = [
-            input[0] * (1.0 - in_filter_amount) + filtered_input[0] * in_filter_amount,
-            input[1] * (1.0 - in_filter_amount) + filtered_input[1] * in_filter_amount,
-        ];
+        if index % 64 == 0 {
+            outgoing_sweep.set_cutoff(18_000.0 - progress.powf(1.7) * 17_200.0);
+            incoming_sweep.set_cutoff(300.0 + progress.powf(1.8) * 17_700.0);
+        }
+
+        let mut out = multiply_frame(outgoing[source_index], current.gain * peak_scale);
+        let mut input = multiply_frame(incoming[index], next.gain * peak_scale);
+        let filtered_out = outgoing_sweep.process(out);
+        let filtered_in = incoming_sweep.process(input);
+        let out_filter_mix = (progress * 1.15).clamp(0.0, 0.92);
+        let in_filter_mix = ((1.0 - progress) * 1.1).clamp(0.0, 0.88);
+        out = mix_frame(out, filtered_out, out_filter_mix);
+        input = mix_frame(input, filtered_in, in_filter_mix);
+
         if bass_swap {
             apply_bass_swap(
                 &mut out,
@@ -708,14 +732,115 @@ fn write_bass_swap_transition(
             );
         }
 
+        let delayed = delay.process(out);
+        let echo_mix = ((progress - 0.35) / 0.65).clamp(0.0, 0.46);
+        out = [
+            out[0] + delayed[0] * echo_mix,
+            out[1] + delayed[1] * echo_mix,
+        ];
+
         let out_fade = ((1.0 - progress) * std::f32::consts::FRAC_PI_2).sin();
         let in_fade = (progress * std::f32::consts::FRAC_PI_2).sin();
-        writer.write_frame([
+        let mut mixed = [
             out[0] * out_fade + input[0] * in_fade,
             out[1] * out_fade + input[1] * in_fade,
-        ])?;
+        ];
+
+        let riser = transition_noise(&mut noise_state)
+            * progress.powf(2.3)
+            * (1.0 - phrase_progress * 0.35)
+            * if strong_change { 0.10 } else { 0.045 };
+        mixed[0] += riser;
+        mixed[1] -= riser * 0.82;
+
+        if strong_change {
+            let hit_window = ((progress - 0.78) / 0.22).clamp(0.0, 1.0);
+            let pulse = (std::f32::consts::TAU * 48.0 * index as f32 / OUTPUT_SAMPLE_RATE as f32)
+                .sin()
+                * (1.0 - hit_window)
+                * if progress >= 0.78 { 0.18 } else { 0.0 };
+            mixed[0] += pulse;
+            mixed[1] += pulse;
+            if progress > 0.94 {
+                let duck = ((progress - 0.94) / 0.06).clamp(0.0, 1.0);
+                mixed[0] *= 0.55 + duck * 0.45;
+                mixed[1] *= 0.55 + duck * 0.45;
+            }
+        }
+
+        writer.write_frame(limit_frame(mixed))?;
     }
     Ok(())
+}
+
+fn transition_should_hit_hard(current: &PlannedTrack, next: &PlannedTrack) -> bool {
+    let current_energy = current
+        .analysis
+        .energy_curve
+        .iter()
+        .copied()
+        .fold(0.0, f32::max);
+    let next_energy = next
+        .analysis
+        .energy_curve
+        .iter()
+        .copied()
+        .fold(0.0, f32::max);
+    let energy_jump = (next_energy - current_energy).abs();
+    let bpm_jump = (next.analysis.bpm - current.analysis.bpm).abs();
+    energy_jump > 0.22 || bpm_jump > 12.0
+}
+
+fn transition_seed(current: &PlannedTrack, next: &PlannedTrack) -> u32 {
+    current
+        .track
+        .title
+        .bytes()
+        .chain(next.track.title.bytes())
+        .fold(0x9E37_79B9, |state, byte| {
+            state.rotate_left(5) ^ byte as u32
+        })
+}
+
+fn transition_noise(state: &mut u32) -> f32 {
+    *state ^= *state << 13;
+    *state ^= *state >> 17;
+    *state ^= *state << 5;
+    (*state as f32 / u32::MAX as f32) * 2.0 - 1.0
+}
+
+fn mix_frame(dry: [f32; 2], wet: [f32; 2], amount: f32) -> [f32; 2] {
+    let amount = amount.clamp(0.0, 1.0);
+    [
+        dry[0] * (1.0 - amount) + wet[0] * amount,
+        dry[1] * (1.0 - amount) + wet[1] * amount,
+    ]
+}
+
+struct StereoDelay {
+    buffer: Vec<[f32; 2]>,
+    cursor: usize,
+    feedback: f32,
+}
+
+impl StereoDelay {
+    fn new(frames: usize, feedback: f32) -> Self {
+        Self {
+            buffer: vec![[0.0, 0.0]; frames.max(1)],
+            cursor: 0,
+            feedback: feedback.clamp(0.0, 0.92),
+        }
+    }
+
+    fn process(&mut self, input: [f32; 2]) -> [f32; 2] {
+        let delayed = self.buffer[self.cursor];
+        self.buffer[self.cursor] = [
+            input[0] + delayed[0] * self.feedback,
+            input[1] + delayed[1] * self.feedback,
+        ];
+        self.cursor = (self.cursor + 1) % self.buffer.len();
+        delayed
+    }
 }
 
 fn apply_bass_swap(

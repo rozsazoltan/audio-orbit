@@ -20,7 +20,7 @@ Install configured tools and repository hooks:
 mise run setup
 ```
 
-This installs all tools pinned in `mise.toml` and installs repository Git hooks through hk.
+This installs all tools pinned in `mise.toml`. It installs repository Git hooks through hk when `.git` worktree exists; source ZIPs skip hook installation without failing.
 
 DJ tempo stretching uses built-in pure-Rust WSOLA implementation, so local builds need no Clang, LLVM, `libclang`, C++ compiler, or `LIBCLANG_PATH` setup.
 
@@ -40,9 +40,9 @@ mise run ci              # hooks plus full tests used by GitHub Actions
 Git hooks use `hk`:
 
 - `pre-commit` fixes Rust, TOML, and Pkl formatting; validates TOML, mise, and hk/Pkl config; checks merge markers and private keys
-- `pre-push` runs one locked Clippy pass for application binaries when Rust or Cargo inputs changed
+- `pre-push` runs one locked Clippy pass for application binaries on Windows when Rust or Cargo inputs changed; Linux/WSL source worktrees skip compilation
 - `mise run hooks:pre-commit` checks the full pre-commit hook against all tracked files
-- `mise run hooks:pre-push` runs the fast pre-push Clippy gate against all tracked Rust inputs
+- `mise run hooks:pre-push` runs the fast Windows Clippy gate, or skips compilation on Linux/WSL
 - `mise run hooks:check` aliases the full pre-commit check
 - `mise run hooks:fix` applies supported pre-commit fixes across all tracked files
 - `mise run ci` runs both hooks, nextest, and doctests exactly as Windows GitHub Actions does
@@ -50,6 +50,8 @@ Git hooks use `hk`:
 `HK_MISE=1` is used when installing hooks, so generated hook commands execute through `mise` even when shell activation is unavailable. Do not install both global and repository-local hk hooks, because Git can execute both.
 
 For WSL → Windows sync workflows, edit files in WSL, let Mutagen sync them into Windows checkout, then run dev watcher from Windows checkout, for example `D:\github\rozsazoltan\audio-orbit`:
+
+Mutagen excludes root `/.cache/` and `/target/` directories. Session configuration is locked when session is created, so rerunning `scripts/setup-mutagen-wsl-dev.ps1` recreates existing named session and applies current ignores. `-KeepExistingSession` preserves old session configuration and should only be used when its ignores are already correct.
 
 ```powershell
 .\scripts\dev.ps1
@@ -61,7 +63,7 @@ You can also run same watcher directly:
 cargo dev
 ```
 
-`cargo dev` is project-local Cargo alias running built-in `audio-orbit-dev` helper. It does not require `cargo-watch`. Helper uses polling-friendly file watching for Mutagen/WSL sync workflows, watches `src`, `Cargo.toml`, `Cargo.lock`, `assets`, and `build.rs`, ignores `target` and portable app data folders, rebuilds `audio-orbit`, and restarts desktop app after synced file changes.
+`cargo dev` is project-local Cargo alias running built-in `audio-orbit-dev` helper. Development state uses `.cache/app-data`, so moving Cargo artifacts between `target` and `.cache/cargo-target` does not reset settings, playlists, metadata, or waveforms. It does not require `cargo-watch`. Helper uses polling-friendly file watching for Mutagen/WSL sync workflows, watches `src`, `Cargo.toml`, `Cargo.lock`, `assets`, and `build.rs`, ignores `target` and portable app data folders, rebuilds `audio-orbit`, and restarts desktop app after synced file changes.
 
 ## Project structure
 
@@ -122,5 +124,5 @@ By contributing, you agree that your contribution is licensed under the GNU Affe
 
 ## Build cache
 
-Cargo build artifacts are stored under `.cache/cargo-target` to keep the repository root clean.
+Cargo build artifacts are stored under `.cache/cargo-target` to keep the repository root clean. Development app state is stored separately under `.cache/app-data`. These directories are local to machine running Cargo or application and are excluded from Mutagen synchronization. Linux/WSL pre-push does not compile Windows-only application.
 

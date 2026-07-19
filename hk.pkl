@@ -33,7 +33,7 @@ local preCommitSteps = new Mapping<String, Step> {
 local prePushSteps = new Mapping<String, Step> {
   ["clippy"] {
     glob = rustInputs
-    check = "cargo clippy --locked --bins -- -D warnings"
+    check = "mise run clippy:pre-push"
     exclusive = true
   }
 }

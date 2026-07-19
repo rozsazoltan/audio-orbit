@@ -9,18 +9,34 @@ rust = { version = "stable", components = ["rustfmt", "clippy"] }
 CARGO_INCREMENTAL = "0"
 CARGO_TARGET_DIR = ".cache/cargo-target"
 CARGO_TERM_COLOR = "always"
+AUDIO_ORBIT_APP_DATA_DIR = ".cache/app-data"
 
 [tasks.setup]
-description = "Install configured tools and repository Git hooks"
+description = "Install configured tools and Git hooks when a Git worktree exists"
 run = [
   "mise install",
   { task = "hooks:install" },
 ]
 
 [tasks."hooks:install"]
-description = "Install repository Git hooks through hk and mise"
+description = "Install repository Git hooks through hk and mise when a Git worktree exists"
+dir = "{{config_root}}"
 env = { HK_MISE = "1" }
-run = "hk install"
+run = """
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  hk install
+else
+  echo 'Skipping Git hook installation: no .git worktree found.'
+fi
+"""
+run_windows = """
+git rev-parse --is-inside-work-tree >NUL 2>&1
+if errorlevel 1 (
+  echo Skipping Git hook installation: no .git worktree found.
+  exit /b 0
+)
+hk install
+"""
 
 [tasks."hooks:pre-commit"]
 description = "Run the repository pre-commit hook against all tracked files"
@@ -69,6 +85,11 @@ run = "cargo check --locked --all-targets"
 [tasks.clippy]
 description = "Run Clippy against locked application binaries"
 run = "cargo clippy --locked --bins -- -D warnings"
+
+[tasks."clippy:pre-push"]
+description = "Run the Windows-only Clippy pre-push gate"
+run = "echo 'Skipping Clippy pre-push gate: Audio Orbit development builds are Windows-only.'"
+run_windows = "cargo clippy --locked --bins -- -D warnings"
 
 [tasks.test]
 description = "Run Rust tests with cargo-nextest"

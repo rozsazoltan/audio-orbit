@@ -212,7 +212,7 @@ Use **DJ mix...** in Library panel to mix current playlist, or select at least t
 DJ Mix Builder offers two engines:
 
 - **Crossfade** keeps original playback speed and joins selected sections with a simple equal-power overlap.
-- **Smart DJ** analyzes BPM, beat phase, downbeat phase, silence, energy, EBU R128 loudness, sample peak, and true peak. It selects phrase-aligned sections, applies pitch-preserving tempo sync through the built-in deterministic WSOLA engine, then renders equal-power transitions with restrained filtering and optional bass swap.
+- **Smart DJ** analyzes BPM, beat phase, downbeat phase, silence, energy, EBU R128 loudness, sample peak, and true peak. It selects phrase-aligned sections, applies pitch-preserving tempo sync through the built-in deterministic WSOLA engine, then performs beat-repeat loops, progressively tighter stutters, filter sweeps, echo throws, synthetic risers and impacts, optional bass swaps, and adaptive seamless or high-impact transitions. Short usable sections are looped and transformed instead of rejected.
 
 Requested transition length is treated as a target. When selected sections cannot fit the full overlap, Audio Orbit shortens the transition automatically and reserves middle-track audio for both incoming and outgoing transitions. If no overlap remains, export continues with a clean cut instead of failing.
 
@@ -267,11 +267,19 @@ Only one Audio Orbit instance can run at a time. If the app is already open and 
 
 ## Data location
 
-Audio Orbit stores app data next to the executable:
+Release builds store portable app data next to the executable:
 
 ```text
 .audio-orbit-data/state.json
 ```
+
+Development runs use a stable project-local path so changing Cargo build directories does not hide settings, playlists, cached metadata, or waveforms:
+
+```text
+.cache/app-data/state.json
+```
+
+On first development start after this change, Audio Orbit migrates state and existing DJ analysis cache from previous `target/debug/.audio-orbit-data` and `.cache/cargo-target/debug/.audio-orbit-data` locations.
 
 
 ## Known limitations
@@ -302,4 +310,4 @@ Audio Orbit renders local and live radio waveform bars through a RustFFT-backed 
 
 ## Development runner
 
-Use `cargo dev` from the repository root. The repository contains both `.cargo/config.toml` and `.cargo/config` so Cargo uses the built-in polling dev runner instead of requiring the external `cargo-watch` subcommand. On Windows, `scripts/dev.ps1` runs the same project-local runner directly with `cargo run --bin audio-orbit-dev --`.
+Use `cargo dev` from the repository root. Development state stays in `.cache/app-data`, independent from executable build location. Mutagen workflows exclude root `/.cache/` and `/target/`, so Windows build artifacts and development state remain local to Windows mirror. The repository contains `.cargo/config.toml`, so Cargo uses the built-in polling dev runner instead of requiring the external `cargo-watch` subcommand. On Windows, `scripts/dev.ps1` runs the same project-local runner directly with `cargo run --bin audio-orbit-dev --`.

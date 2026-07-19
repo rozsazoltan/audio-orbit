@@ -889,7 +889,7 @@ impl AudioOrbitApp {
         });
 
         if let Some(path) = app_data_dir() {
-            ui.small(format!("Portable data folder: {}", path.display()));
+            ui.small(format!("Data folder: {}", path.display()));
         }
     }
     pub(crate) fn render_about_section_inner(&mut self, ui: &mut egui::Ui, show_title: bool) {
@@ -905,7 +905,7 @@ impl AudioOrbitApp {
         );
         ui.add(
             egui::Label::new(
-                "This app stores its portable state next to the executable in .audio-orbit-data.",
+                "Release builds store portable state next to the executable. Development runs use a stable project-local data folder.",
             )
             .wrap(),
         );

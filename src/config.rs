@@ -1041,7 +1041,33 @@ impl Default for SavedState {
     }
 }
 
+const APP_DATA_DIR_ENV: &str = "AUDIO_ORBIT_APP_DATA_DIR";
+
 pub fn app_data_dir() -> Option<PathBuf> {
+    resolve_app_data_dir(
+        std::env::var_os(APP_DATA_DIR_ENV).map(PathBuf::from),
+        std::env::current_dir().ok(),
+        std::env::current_exe().ok(),
+    )
+}
+
+fn resolve_app_data_dir(
+    override_dir: Option<PathBuf>,
+    current_dir: Option<PathBuf>,
+    current_exe: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(path) = override_dir.filter(|path| !path.as_os_str().is_empty()) {
+        return Some(if path.is_absolute() {
+            path
+        } else {
+            current_dir?.join(path)
+        });
+    }
+
+    current_exe.and_then(|path| path.parent().map(|parent| parent.join(".audio-orbit-data")))
+}
+
+fn portable_app_data_dir() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join(".audio-orbit-data")))
@@ -1051,9 +1077,75 @@ pub fn state_path() -> Option<PathBuf> {
     app_data_dir().map(|dir| dir.join("state.json"))
 }
 
-fn legacy_state_path() -> Option<PathBuf> {
-    ProjectDirs::from("dev", "AudioOrbit", "Audio Orbit")
+fn legacy_state_paths(primary_path: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if cfg!(debug_assertions) {
+        if let Ok(root) = std::env::current_dir() {
+            push_unique_state_path(
+                &mut paths,
+                primary_path,
+                root.join("target")
+                    .join("debug")
+                    .join(".audio-orbit-data")
+                    .join("state.json"),
+            );
+            push_unique_state_path(
+                &mut paths,
+                primary_path,
+                root.join(".cache")
+                    .join("cargo-target")
+                    .join("debug")
+                    .join(".audio-orbit-data")
+                    .join("state.json"),
+            );
+            push_unique_state_path(
+                &mut paths,
+                primary_path,
+                root.join(".audio-orbit-data").join("state.json"),
+            );
+        }
+    }
+
+    if let Some(path) = portable_app_data_dir().map(|directory| directory.join("state.json")) {
+        push_unique_state_path(&mut paths, primary_path, path);
+    }
+
+    if let Some(path) = ProjectDirs::from("dev", "AudioOrbit", "Audio Orbit")
         .map(|dirs| dirs.data_local_dir().join("state.json"))
+    {
+        push_unique_state_path(&mut paths, primary_path, path);
+    }
+
+    paths
+}
+
+fn push_unique_state_path(paths: &mut Vec<PathBuf>, primary_path: &Path, candidate: PathBuf) {
+    if candidate != primary_path && !paths.contains(&candidate) {
+        paths.push(candidate);
+    }
+}
+
+fn read_state_from_path(path: &Path) -> Option<SavedState> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| serde_json::from_str(&contents).ok())
+}
+
+fn migrate_companion_data(legacy_state_path: &Path, new_state_path: &Path) {
+    let Some(legacy_directory) = legacy_state_path.parent() else {
+        return;
+    };
+    let Some(new_directory) = new_state_path.parent() else {
+        return;
+    };
+
+    let legacy_cache = legacy_directory.join("dj-analysis-cache.json");
+    let new_cache = new_directory.join("dj-analysis-cache.json");
+    if legacy_cache.is_file() && !new_cache.exists() {
+        let _ = fs::create_dir_all(new_directory);
+        let _ = fs::copy(legacy_cache, new_cache);
+    }
 }
 
 pub fn load_state() -> SavedState {
@@ -1061,14 +1153,14 @@ pub fn load_state() -> SavedState {
         return SavedState::default();
     };
 
-    if let Ok(contents) = fs::read_to_string(&path) {
-        return serde_json::from_str(&contents).unwrap_or_default();
+    if let Some(state) = read_state_from_path(&path) {
+        return state;
     }
 
-    if let Some(legacy_path) = legacy_state_path() {
-        if let Ok(contents) = fs::read_to_string(&legacy_path) {
-            let state = serde_json::from_str(&contents).unwrap_or_default();
+    for legacy_path in legacy_state_paths(&path) {
+        if let Some(state) = read_state_from_path(&legacy_path) {
             let _ = write_state_to_path(&state, &path);
+            migrate_companion_data(&legacy_path, &path);
             return state;
         }
     }
@@ -1389,6 +1481,36 @@ mod tests {
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn app_data_override_resolves_relative_to_working_directory() {
+        let resolved = resolve_app_data_dir(
+            Some(PathBuf::from(".cache/app-data")),
+            Some(PathBuf::from("C:/Projects/audio-orbit")),
+            Some(PathBuf::from(
+                "C:/Projects/audio-orbit/target/debug/audio-orbit.exe",
+            )),
+        );
+
+        assert_eq!(
+            resolved,
+            Some(PathBuf::from("C:/Projects/audio-orbit/.cache/app-data"))
+        );
+    }
+
+    #[test]
+    fn app_data_without_override_remains_portable() {
+        let resolved = resolve_app_data_dir(
+            None,
+            Some(PathBuf::from("C:/Projects/audio-orbit")),
+            Some(PathBuf::from("C:/Apps/Audio Orbit/audio-orbit.exe")),
+        );
+
+        assert_eq!(
+            resolved,
+            Some(PathBuf::from("C:/Apps/Audio Orbit/.audio-orbit-data"))
+        );
     }
 
     #[test]
