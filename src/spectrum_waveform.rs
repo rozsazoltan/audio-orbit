@@ -16,7 +16,6 @@ pub struct SpectrumBucket {
     pub high: f32,
 }
 
-
 /// Build an AIMP-style overview waveform.
 ///
 /// The visible amplitude is shaped mostly from RMS/loudness with a restrained peak
@@ -68,7 +67,10 @@ pub struct LiveSpectrumAnalyzer {
 impl LiveSpectrumAnalyzer {
     pub fn new(sample_rate: u32, buckets_per_second: usize) -> Self {
         let sample_rate = sample_rate.max(1);
-        let fft_size = LIVE_FFT_SIZE.min(sample_rate as usize).max(512).next_power_of_two();
+        let fft_size = LIVE_FFT_SIZE
+            .min(sample_rate as usize)
+            .max(512)
+            .next_power_of_two();
         let hop_size = (sample_rate as usize / buckets_per_second.max(1)).max(1);
         Self {
             fft_size,
@@ -306,10 +308,26 @@ impl SpectrumAnalyzer {
             }
         }
 
-        let average = if weight_sum > 0.0 { weighted_sum / weight_sum } else { 0.0 };
-        let low = if low_weight > 0.0 { low_sum / low_weight } else { 0.0 };
-        let mid = if mid_weight > 0.0 { mid_sum / mid_weight } else { 0.0 };
-        let high = if high_weight > 0.0 { high_sum / high_weight } else { 0.0 };
+        let average = if weight_sum > 0.0 {
+            weighted_sum / weight_sum
+        } else {
+            0.0
+        };
+        let low = if low_weight > 0.0 {
+            low_sum / low_weight
+        } else {
+            0.0
+        };
+        let mid = if mid_weight > 0.0 {
+            mid_sum / mid_weight
+        } else {
+            0.0
+        };
+        let high = if high_weight > 0.0 {
+            high_sum / high_weight
+        } else {
+            0.0
+        };
 
         let mut positive_flux = 0.0_f32;
         let mut flux_count = 0usize;

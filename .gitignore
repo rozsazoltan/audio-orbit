@@ -4,3 +4,7 @@
 *.rs.bk
 *.pdb
 .DS_Store
+
+# Local developer-tool overrides
+hk.local.pkl
+mise.local.toml

@@ -34,18 +34,17 @@ fn output_device_change_action(
 }
 
 fn output_device_change_message(output_name: &str) -> String {
-    format!(
-        "Output device changed to {output_name}. Refresh output to continue on the new device."
-    )
+    format!("Output device changed to {output_name}. Refresh output to continue on the new device.")
 }
 
 impl AudioOrbitApp {
     pub(crate) fn add_profile(&mut self) {
         let settings = self.current_settings();
         let number = self.state.profiles.len() + 1;
-        self.state
-            .profiles
-            .push(config::DspProfile::new(format!("Profile {number}"), settings));
+        self.state.profiles.push(config::DspProfile::new(
+            format!("Profile {number}"),
+            settings,
+        ));
         self.state.selected_profile_index = self.state.profiles.len() - 1;
         self.status_message = "Created a new sound profile from the current settings.".to_owned();
         self.save_state_silently();
@@ -56,7 +55,9 @@ impl AudioOrbitApp {
             return;
         }
 
-        self.state.profiles.remove(self.state.selected_profile_index);
+        self.state
+            .profiles
+            .remove(self.state.selected_profile_index);
         self.state.selected_profile_index = self.state.selected_profile_index.saturating_sub(1);
         self.status_message = "Removed sound profile.".to_owned();
         self.save_state_silently();
@@ -72,7 +73,9 @@ impl AudioOrbitApp {
             return;
         };
 
-        let start_seconds = self.saved_paused_resume_position_for_track(&path).unwrap_or(0.0);
+        let start_seconds = self
+            .saved_paused_resume_position_for_track(&path)
+            .unwrap_or(0.0);
         self.play_path(path, self.selected_track_index, start_seconds);
     }
     pub(crate) fn saved_paused_resume_position_for_track(&self, path: &Path) -> Option<f32> {
@@ -121,14 +124,27 @@ impl AudioOrbitApp {
         }
     }
 
-    pub(crate) fn cached_track_for_path(&self, index: Option<usize>, path: &Path) -> Option<&Track> {
+    pub(crate) fn cached_track_for_path(
+        &self,
+        index: Option<usize>,
+        path: &Path,
+    ) -> Option<&Track> {
         let playlist = self.current_playlist()?;
         index
             .and_then(|index| playlist.tracks.get(index))
             .filter(|track| same_path(&track.path, path))
-            .or_else(|| playlist.tracks.iter().find(|track| same_path(&track.path, path)))
+            .or_else(|| {
+                playlist
+                    .tracks
+                    .iter()
+                    .find(|track| same_path(&track.path, path))
+            })
     }
-    pub(crate) fn cached_waveform_for_track(&self, index: Option<usize>, path: &Path) -> Option<(Vec<f32>, Vec<f32>)> {
+    pub(crate) fn cached_waveform_for_track(
+        &self,
+        index: Option<usize>,
+        path: &Path,
+    ) -> Option<(Vec<f32>, Vec<f32>)> {
         let track = self.cached_track_for_path(index, path)?;
 
         if track.waveform.is_empty() || track.waveform_brightness.is_empty() {
@@ -137,7 +153,11 @@ impl AudioOrbitApp {
             Some((track.waveform.clone(), track.waveform_brightness.clone()))
         }
     }
-    pub(crate) fn known_duration_for_track(&self, index: Option<usize>, path: &Path) -> Option<f32> {
+    pub(crate) fn known_duration_for_track(
+        &self,
+        index: Option<usize>,
+        path: &Path,
+    ) -> Option<f32> {
         self.cached_track_for_path(index, path)
             .and_then(|track| track.metadata.duration_seconds)
             .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
@@ -181,14 +201,21 @@ impl AudioOrbitApp {
         let entry = self.silence_analysis_cache.get(path)?;
         let (file_len, modified_nanos) = Self::audio_file_cache_identity(path);
         let settings = Self::silence_settings_fingerprint(settings);
-        if entry.file_len == file_len && entry.modified_nanos == modified_nanos && entry.settings == settings {
+        if entry.file_len == file_len
+            && entry.modified_nanos == modified_nanos
+            && entry.settings == settings
+        {
             Some(entry.ranges.clone())
         } else {
             None
         }
     }
     fn silence_adjusted_seek_position(seconds: f32, silence_ranges: Option<&[(f32, f32)]>) -> f32 {
-        let mut position = if seconds.is_finite() { seconds.max(0.0) } else { 0.0 };
+        let mut position = if seconds.is_finite() {
+            seconds.max(0.0)
+        } else {
+            0.0
+        };
         let Some(ranges) = silence_ranges else {
             return position;
         };
@@ -274,7 +301,8 @@ impl AudioOrbitApp {
         live_position_compensation: bool,
     ) {
         if self.player.is_none() {
-            self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+            self.error_message =
+                Some("No audio output device is available. Try Refresh output device.".to_owned());
             return;
         }
         if !self.ensure_track_available_for_playback(&path) {
@@ -285,7 +313,8 @@ impl AudioOrbitApp {
         let playlist_index = self.state.selected_playlist_index;
         let cached_waveform = self.cached_waveform_for_track(index, &path);
         let cached_silence_ranges = self.cached_silence_ranges_for_track(&path, settings);
-        let start_seconds = Self::silence_adjusted_seek_position(start_seconds, cached_silence_ranges.as_deref());
+        let start_seconds =
+            Self::silence_adjusted_seek_position(start_seconds, cached_silence_ranges.as_deref());
         let known_duration_seconds = self.known_duration_for_track(index, &path);
 
         if !settings.skip_silence_enabled {
@@ -327,14 +356,23 @@ impl AudioOrbitApp {
                     self.selected_track_index = index;
                     self.active_track_index = index;
                     self.active_track_path = Some(info.path.clone());
-                    self.request_active_track_scroll_if_changed(previous_track_index, previous_track_path, index, &info.path);
+                    self.request_active_track_scroll_if_changed(
+                        previous_track_index,
+                        previous_track_path,
+                        index,
+                        &info.path,
+                    );
                     self.pending_track_switch = None;
                     self.crossfade_started_for_path = None;
                     self.store_playback_metadata(&info);
                     self.remember_last_played_track(index, &info.path);
                     self.last_playback = Some(info.clone());
                     self.status_message = if live_position_compensation {
-                        format!("Applied sound profile and continued {} through {}.", display_file_name(&info.path), mode_label)
+                        format!(
+                            "Applied sound profile and continued {} through {}.",
+                            display_file_name(&info.path),
+                            mode_label
+                        )
                     } else if crossfade_seconds > 0.05 {
                         format!(
                             "Crossfading to {} through {}; previous source is fading out.",
@@ -342,7 +380,11 @@ impl AudioOrbitApp {
                             mode_label
                         )
                     } else {
-                        format!("Playing {} through {}.", display_file_name(&info.path), mode_label)
+                        format!(
+                            "Playing {} through {}.",
+                            display_file_name(&info.path),
+                            mode_label
+                        )
                     };
                     self.persist_playback_session();
                     self.save_state_silently();
@@ -397,7 +439,12 @@ impl AudioOrbitApp {
                 self.selected_track_index = index;
                 self.active_track_index = index;
                 self.active_track_path = Some(info.path.clone());
-                self.request_active_track_scroll_if_changed(previous_track_index, previous_track_path, index, &info.path);
+                self.request_active_track_scroll_if_changed(
+                    previous_track_index,
+                    previous_track_path,
+                    index,
+                    &info.path,
+                );
                 self.pending_track_switch = None;
                 self.crossfade_started_for_path = None;
                 self.store_playback_metadata(&info);
@@ -429,20 +476,31 @@ impl AudioOrbitApp {
                         crossfade_seconds
                     )
                 } else {
-                    format!("Fast playback failed; preparing {}...", display_file_name(&path))
+                    format!(
+                        "Fast playback failed; preparing {}...",
+                        display_file_name(&path)
+                    )
                 };
                 self.error_message = Some(error.to_string());
             }
         }
 
-        let background_crossfade_seconds = if quick_started { 0.0 } else { crossfade_seconds };
+        let background_crossfade_seconds = if quick_started {
+            0.0
+        } else {
+            crossfade_seconds
+        };
         let background_live_position_compensation = quick_started || live_position_compensation;
         let background_upgrade = quick_started;
         let (sender, receiver) = mpsc::channel();
         let path_for_thread = path.clone();
 
         self.pending_prepared_track_receiver = Some(receiver);
-        self.error_message = if quick_started { None } else { self.error_message.take() };
+        self.error_message = if quick_started {
+            None
+        } else {
+            self.error_message.take()
+        };
 
         thread::spawn(move || {
             let result = AudioPlayer::prepare_file_with_cached_analysis(
@@ -452,16 +510,16 @@ impl AudioOrbitApp {
                 cached_waveform,
                 cached_silence_ranges,
             )
-                .map(|prepared| PreparedTrackPlayback {
-                    playlist_index,
-                    index,
-                    crossfade_seconds: background_crossfade_seconds,
-                    live_position_compensation: background_live_position_compensation,
-                    background_upgrade,
-                    prepared,
-                    requested_at,
-                })
-                .map_err(|error| error.to_string());
+            .map(|prepared| PreparedTrackPlayback {
+                playlist_index,
+                index,
+                crossfade_seconds: background_crossfade_seconds,
+                live_position_compensation: background_live_position_compensation,
+                background_upgrade,
+                prepared,
+                requested_at,
+            })
+            .map_err(|error| error.to_string());
             let _ = sender.send(result);
         });
     }
@@ -508,7 +566,8 @@ impl AudioOrbitApp {
         );
 
         let Some(player) = &mut self.player else {
-            self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+            self.error_message =
+                Some("No audio output device is available. Try Refresh output device.".to_owned());
             return;
         };
 
@@ -544,16 +603,28 @@ impl AudioOrbitApp {
 
                 self.active_track_index = index;
                 self.active_track_path = Some(info.path.clone());
-                self.request_active_track_scroll_if_changed(previous_track_index, previous_track_path, index, &info.path);
+                self.request_active_track_scroll_if_changed(
+                    previous_track_index,
+                    previous_track_path,
+                    index,
+                    &info.path,
+                );
                 self.pending_track_switch = None;
                 self.crossfade_started_for_path = None;
                 self.store_playback_metadata(&info);
                 self.remember_last_played_track(index, &info.path);
                 self.last_playback = Some(info.clone());
                 self.status_message = if background_upgrade {
-                    format!("Silence-skip preparation finished for {}.", display_file_name(&info.path))
+                    format!(
+                        "Silence-skip preparation finished for {}.",
+                        display_file_name(&info.path)
+                    )
                 } else if live_position_compensation {
-                    format!("Applied sound profile and continued {} through {}.", display_file_name(&info.path), mode_label)
+                    format!(
+                        "Applied sound profile and continued {} through {}.",
+                        display_file_name(&info.path),
+                        mode_label
+                    )
                 } else if crossfade_seconds > 0.05 {
                     format!(
                         "Crossfading to {} through {}; previous source is fading out.",
@@ -561,7 +632,11 @@ impl AudioOrbitApp {
                         mode_label
                     )
                 } else {
-                    format!("Playing {} through {}.", display_file_name(&info.path), mode_label)
+                    format!(
+                        "Playing {} through {}.",
+                        display_file_name(&info.path),
+                        mode_label
+                    )
                 };
                 self.persist_playback_session();
                 self.save_state_silently();
@@ -599,8 +674,11 @@ impl AudioOrbitApp {
         } else if self.state.playback.shuffle_enabled {
             self.random_sequence_index(&indexes, current_index)?
         } else {
-            let current_position = current_index.and_then(|index| indexes.iter().position(|candidate| *candidate == index));
-            let next_position = current_position.map(|position| (position + 1) % indexes.len()).unwrap_or(0);
+            let current_position = current_index
+                .and_then(|index| indexes.iter().position(|candidate| *candidate == index));
+            let next_position = current_position
+                .map(|position| (position + 1) % indexes.len())
+                .unwrap_or(0);
             indexes[next_position]
         };
 
@@ -638,9 +716,16 @@ impl AudioOrbitApp {
                 .filter(|index| indexes.contains(index))
                 .unwrap_or(indexes[0])
         } else {
-            let current_position = current_index.and_then(|index| indexes.iter().position(|candidate| *candidate == index));
+            let current_position = current_index
+                .and_then(|index| indexes.iter().position(|candidate| *candidate == index));
             let previous_position = current_position
-                .map(|position| if position == 0 { indexes.len() - 1 } else { position - 1 })
+                .map(|position| {
+                    if position == 0 {
+                        indexes.len() - 1
+                    } else {
+                        position - 1
+                    }
+                })
                 .unwrap_or(0);
             indexes[previous_position]
         };
@@ -660,7 +745,10 @@ impl AudioOrbitApp {
     pub(crate) fn current_waveform_for_seek(&self) -> Option<(Vec<f32>, Vec<f32>)> {
         if let Some(playback) = &self.last_playback {
             if !playback.waveform.is_empty() && !playback.waveform_brightness.is_empty() {
-                return Some((playback.waveform.clone(), playback.waveform_brightness.clone()));
+                return Some((
+                    playback.waveform.clone(),
+                    playback.waveform_brightness.clone(),
+                ));
             }
         }
 
@@ -709,7 +797,8 @@ impl AudioOrbitApp {
             return;
         }
 
-        let duration = known_duration_seconds.unwrap_or_else(|| self.displayed_playback_duration_seconds());
+        let duration =
+            known_duration_seconds.unwrap_or_else(|| self.displayed_playback_duration_seconds());
         let requested_position_seconds = if duration.is_finite() && duration > 0.0 {
             seconds.clamp(0.0, duration)
         } else {
@@ -721,7 +810,9 @@ impl AudioOrbitApp {
             cached_silence_ranges.as_deref(),
         );
         let now = Instant::now();
-        let playlist_index = self.active_playlist_index.unwrap_or(self.state.selected_playlist_index);
+        let playlist_index = self
+            .active_playlist_index
+            .unwrap_or(self.state.selected_playlist_index);
         let index = self.active_track_index;
 
         // Any new seek makes older prepared results stale. The user-visible path is the
@@ -733,7 +824,9 @@ impl AudioOrbitApp {
         let can_restart_now = self.pending_fast_seek.is_none()
             && self
                 .last_fast_seek_started_at
-                .map(|started| now.saturating_duration_since(started) >= FAST_SEEK_COALESCE_INTERVAL)
+                .map(|started| {
+                    now.saturating_duration_since(started) >= FAST_SEEK_COALESCE_INTERVAL
+                })
                 .unwrap_or(true);
 
         if can_restart_now {
@@ -851,7 +944,10 @@ impl AudioOrbitApp {
             return;
         }
 
-        let pending = self.pending_fast_seek.take().expect("pending fast seek was checked above");
+        let pending = self
+            .pending_fast_seek
+            .take()
+            .expect("pending fast seek was checked above");
         if self
             .active_track_path
             .as_ref()
@@ -880,7 +976,10 @@ impl AudioOrbitApp {
             return;
         }
 
-        let pending = self.pending_seek_prepare.take().expect("pending seek prepare was checked above");
+        let pending = self
+            .pending_seek_prepare
+            .take()
+            .expect("pending seek prepare was checked above");
         if self
             .active_track_path
             .as_ref()
@@ -940,7 +1039,11 @@ impl AudioOrbitApp {
     pub(crate) fn profile_apply_status_text(&self) -> Option<String> {
         let now = Instant::now();
         if let Some(apply_at) = self.pending_profile_apply_at {
-            let seconds = apply_at.saturating_duration_since(now).as_secs_f32().ceil().max(1.0) as u64;
+            let seconds = apply_at
+                .saturating_duration_since(now)
+                .as_secs_f32()
+                .ceil()
+                .max(1.0) as u64;
             return Some(format!("Apply in {seconds}s..."));
         }
         if self
@@ -999,14 +1102,23 @@ impl AudioOrbitApp {
             let Some(player) = &self.player else {
                 return;
             };
-            (player.is_playing() || player.is_paused(), player.is_playing())
+            (
+                player.is_playing() || player.is_paused(),
+                player.is_playing(),
+            )
         };
 
         if !is_active {
             return;
         }
 
-        self.prepare_track_playback(path, self.active_track_index, position, 0.0, live_position_compensation);
+        self.prepare_track_playback(
+            path,
+            self.active_track_index,
+            position,
+            0.0,
+            live_position_compensation,
+        );
     }
     pub(crate) fn process_pending_track_switch(&mut self) {
         let Some(pending) = self.pending_track_switch.clone() else {
@@ -1024,7 +1136,12 @@ impl AudioOrbitApp {
         self.active_playlist_index = Some(pending.playlist_index);
         self.active_track_path = Some(pending.info.path.clone());
         self.selected_track_index = pending.index;
-        self.request_active_track_scroll_if_changed(previous_track_index, previous_track_path, pending.index, &pending.info.path);
+        self.request_active_track_scroll_if_changed(
+            previous_track_index,
+            previous_track_path,
+            pending.index,
+            &pending.info.path,
+        );
         self.crossfade_started_for_path = None;
         self.remember_last_played_track(pending.index, &pending.info.path);
         self.store_playback_metadata(&pending.info);
@@ -1062,7 +1179,11 @@ impl AudioOrbitApp {
         self.last_playback
             .as_ref()
             .map(|playback| playback.original_duration_seconds)
-            .or_else(|| self.player.as_ref().and_then(AudioPlayer::playback_duration_seconds))
+            .or_else(|| {
+                self.player
+                    .as_ref()
+                    .and_then(AudioPlayer::playback_duration_seconds)
+            })
             .unwrap_or(0.0)
     }
     pub(crate) fn stop(&mut self) {
@@ -1182,7 +1303,9 @@ impl AudioOrbitApp {
     pub(crate) fn set_volume_percent(&mut self, volume_percent: u8) {
         let next_volume = volume_percent.clamp(0, 100);
         let next_muted = next_volume == 0;
-        if self.state.playback.volume_percent == next_volume && self.state.playback.muted == next_muted {
+        if self.state.playback.volume_percent == next_volume
+            && self.state.playback.muted == next_muted
+        {
             return;
         }
 
@@ -1219,18 +1342,27 @@ impl AudioOrbitApp {
         let next = (current + delta_percent).clamp(0, 100) as u8;
         self.set_volume_percent(next);
     }
-    pub(crate) fn handle_top_panel_volume_wheel(&mut self, response: &egui::Response, context: &egui::Context) {
+    pub(crate) fn handle_top_panel_volume_wheel(
+        &mut self,
+        response: &egui::Response,
+        context: &egui::Context,
+    ) {
         if !response.hovered() {
             return;
         }
 
-        let scroll_y = context.input(|input| input.raw_scroll_delta.y + input.smooth_scroll_delta.y);
+        let scroll_y =
+            context.input(|input| input.raw_scroll_delta.y + input.smooth_scroll_delta.y);
         if scroll_y.abs() < 0.5 {
             return;
         }
 
         let steps = (scroll_y / 80.0).round() as i16;
-        let steps = if steps == 0 { scroll_y.signum() as i16 } else { steps };
+        let steps = if steps == 0 {
+            scroll_y.signum() as i16
+        } else {
+            steps
+        };
         self.adjust_volume(steps * 2);
     }
     pub(crate) fn seek_relative(&mut self, delta_seconds: f32) {
@@ -1243,7 +1375,9 @@ impl AudioOrbitApp {
         }
 
         let current = self.displayed_playback_position_seconds();
-        let duration = self.displayed_playback_duration_seconds().max(current.max(0.0));
+        let duration = self
+            .displayed_playback_duration_seconds()
+            .max(current.max(0.0));
         let next = (current + delta_seconds).clamp(0.0, duration.max(0.0));
         self.seek_current(next);
     }
@@ -1259,7 +1393,9 @@ impl AudioOrbitApp {
             .unwrap_or(false);
 
         if finished && self.active_track_index.is_some() {
-            if self.state.playback.auto_advance || self.state.playback.repeat_mode != RepeatMode::Off {
+            if self.state.playback.auto_advance
+                || self.state.playback.repeat_mode != RepeatMode::Off
+            {
                 self.play_next_track_with_crossfade(0.0);
             } else {
                 self.active_track_index = None;
@@ -1365,12 +1501,7 @@ mod tests {
     #[test]
     fn clears_pending_change_when_output_returns_to_active_device() {
         assert_eq!(
-            output_device_change_action(
-                "Speakers",
-                Some("Headphones"),
-                "Speakers",
-                false,
-            ),
+            output_device_change_action("Speakers", Some("Headphones"), "Speakers", false,),
             OutputDeviceChangeAction::ClearPending
         );
     }
@@ -1378,12 +1509,7 @@ mod tests {
     #[test]
     fn does_not_repeat_action_for_same_detected_output() {
         assert_eq!(
-            output_device_change_action(
-                "Speakers",
-                Some("Headphones"),
-                "Headphones",
-                true,
-            ),
+            output_device_change_action("Speakers", Some("Headphones"), "Headphones", true,),
             OutputDeviceChangeAction::None
         );
     }

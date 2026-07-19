@@ -17,7 +17,13 @@ impl AudioOrbitApp {
                     ui.set_min_size(content_size);
                     ui.set_max_width(content_size.x);
 
-                    if Self::render_modal_header(ui, outer_padding.x, panel.icon(), panel.title(), panel.description()) {
+                    if Self::render_modal_header(
+                        ui,
+                        outer_padding.x,
+                        panel.icon(),
+                        panel.title(),
+                        panel.description(),
+                    ) {
                         self.close_panel_modal();
                     }
 
@@ -28,9 +34,15 @@ impl AudioOrbitApp {
                             ui.set_width(ui.available_width());
                             match panel {
                                 AppPanelModal::Settings => self.render_settings_panel_content(ui),
-                                AppPanelModal::Updates => Self::render_modal_section(ui, |ui| self.render_updates_section_inner(ui, false)),
-                                AppPanelModal::Backup => Self::render_modal_section(ui, |ui| self.render_backup_settings_section_inner(ui, false)),
-                                AppPanelModal::About => Self::render_modal_section(ui, |ui| self.render_about_section_inner(ui, false)),
+                                AppPanelModal::Updates => Self::render_modal_section(ui, |ui| {
+                                    self.render_updates_section_inner(ui, false)
+                                }),
+                                AppPanelModal::Backup => Self::render_modal_section(ui, |ui| {
+                                    self.render_backup_settings_section_inner(ui, false)
+                                }),
+                                AppPanelModal::About => Self::render_modal_section(ui, |ui| {
+                                    self.render_about_section_inner(ui, false)
+                                }),
                             }
                         });
                 });
@@ -40,19 +52,30 @@ impl AudioOrbitApp {
     pub(crate) fn render_settings_panel_content(&mut self, ui: &mut egui::Ui) {
         Self::render_modal_section(ui, |ui| {
             ui.heading("Panels");
-            ui.small("Open a separate panel. Esc or the top-right X returns to the previous panel.");
+            ui.small(
+                "Open a separate panel. Esc or the top-right X returns to the previous panel.",
+            );
             ui.horizontal_wrapped(|ui| {
-                if ui.button(ui_icons::label(Icon::RefreshCw, "Updates")).clicked() {
+                if ui
+                    .button(ui_icons::label(Icon::RefreshCw, "Updates"))
+                    .clicked()
+                {
                     self.open_panel_modal(AppPanelModal::Updates);
                 }
-                if ui.button(ui_icons::label(Icon::Archive, "Backup")).clicked() {
+                if ui
+                    .button(ui_icons::label(Icon::Archive, "Backup"))
+                    .clicked()
+                {
                     self.open_panel_modal(AppPanelModal::Backup);
                 }
                 if ui.button(ui_icons::label(Icon::Info, "About")).clicked() {
                     self.open_panel_modal(AppPanelModal::About);
                 }
                 #[cfg(debug_assertions)]
-                if ui.button(ui_icons::label(Icon::Info, "Dev metrics")).clicked() {
+                if ui
+                    .button(ui_icons::label(Icon::Info, "Dev metrics"))
+                    .clicked()
+                {
                     self.show_dev_metrics_window = true;
                 }
             });
@@ -69,15 +92,20 @@ impl AudioOrbitApp {
                     file_associations::SUPPORTED_AUDIO_EXTENSIONS.join(", ")
                 ));
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button(ui_icons::label(Icon::Music, "Associate audio files...")).clicked() {
+                    if ui
+                        .button(ui_icons::label(Icon::Music, "Associate audio files..."))
+                        .clicked()
+                    {
                         match std::env::current_exe()
                             .map_err(|error| error.to_string())
                             .and_then(|path| file_associations::register(&path))
                         {
                             Ok(()) => {
                                 self.file_associations_registered = true;
-                                self.status_message = "Audio Orbit registered for supported audio files.".to_owned();
-                                if let Err(error) = file_associations::open_default_apps_settings() {
+                                self.status_message =
+                                    "Audio Orbit registered for supported audio files.".to_owned();
+                                if let Err(error) = file_associations::open_default_apps_settings()
+                                {
                                     self.error_message = Some(error);
                                 }
                             }
@@ -99,7 +127,8 @@ impl AudioOrbitApp {
                         match file_associations::unregister() {
                             Ok(()) => {
                                 self.file_associations_registered = false;
-                                self.status_message = "Audio Orbit file-association registration removed.".to_owned();
+                                self.status_message =
+                                    "Audio Orbit file-association registration removed.".to_owned();
                             }
                             Err(error) => self.error_message = Some(error),
                         }
@@ -135,11 +164,23 @@ impl AudioOrbitApp {
         ui.add_space(2.0);
     }
     pub(crate) fn modal_outer_padding(screen_rect: egui::Rect) -> egui::Vec2 {
-        let horizontal = if screen_rect.width() < 560.0 { 16.0 } else { 24.0 };
-        let vertical = if screen_rect.height() < 520.0 { 14.0 } else { 18.0 };
+        let horizontal = if screen_rect.width() < 560.0 {
+            16.0
+        } else {
+            24.0
+        };
+        let vertical = if screen_rect.height() < 520.0 {
+            14.0
+        } else {
+            18.0
+        };
         egui::vec2(horizontal, vertical)
     }
-    pub(crate) fn modal_content_size(screen_rect: egui::Rect, _outer_padding: egui::Vec2, footer_height: f32) -> egui::Vec2 {
+    pub(crate) fn modal_content_size(
+        screen_rect: egui::Rect,
+        _outer_padding: egui::Vec2,
+        footer_height: f32,
+    ) -> egui::Vec2 {
         egui::vec2(
             screen_rect.width().max(280.0),
             (screen_rect.height() - footer_height).max(200.0),
@@ -151,7 +192,13 @@ impl AudioOrbitApp {
             .corner_radius(egui::CornerRadius::same(0))
             .inner_margin(egui::Margin::same(0))
     }
-    pub(crate) fn render_modal_header(ui: &mut egui::Ui, horizontal_padding: f32, icon: Icon, title: &str, description: &str) -> bool {
+    pub(crate) fn render_modal_header(
+        ui: &mut egui::Ui,
+        horizontal_padding: f32,
+        icon: Icon,
+        title: &str,
+        description: &str,
+    ) -> bool {
         let mut close_clicked = false;
         let row_height = 34.0;
 
@@ -168,7 +215,9 @@ impl AudioOrbitApp {
                             close_clicked = ui
                                 .add_sized(
                                     egui::vec2(40.0, 30.0),
-                                    egui::Button::new(egui::RichText::new(ui_icons::icon(Icon::X)).size(17.0)),
+                                    egui::Button::new(
+                                        egui::RichText::new(ui_icons::icon(Icon::X)).size(17.0),
+                                    ),
                                 )
                                 .on_hover_text("Close")
                                 .clicked();
@@ -190,10 +239,16 @@ impl AudioOrbitApp {
         let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
         let y = ui.cursor().top().round();
         let rect = ui.max_rect();
-        ui.painter().line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], stroke);
+        ui.painter().line_segment(
+            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+            stroke,
+        );
         ui.add_space(1.0);
     }
-    pub(crate) fn render_modal_section(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+    pub(crate) fn render_modal_section(
+        ui: &mut egui::Ui,
+        add_contents: impl FnOnce(&mut egui::Ui),
+    ) {
         egui::Frame::new()
             .fill(egui::Color32::from_black_alpha(34))
             .stroke(egui::Stroke::new(1.0, egui::Color32::from_black_alpha(58)))
@@ -206,10 +261,8 @@ impl AudioOrbitApp {
     }
     pub(crate) fn render_modal_backdrop(&self, context: &egui::Context, id: &'static str) {
         let screen_rect = context.screen_rect();
-        let painter = context.layer_painter(egui::LayerId::new(
-            egui::Order::Middle,
-            egui::Id::new(id),
-        ));
+        let painter =
+            context.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new(id)));
         painter.rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(156));
     }
     pub(crate) fn render_details_modal(&mut self, context: &egui::Context) {
@@ -328,13 +381,16 @@ impl AudioOrbitApp {
         let active_location = self
             .active_playlist_index
             .and_then(|playlist_index| {
-                self.state.playlists.get(playlist_index).and_then(|playlist| {
-                    playlist
-                        .tracks
-                        .iter()
-                        .position(|track| same_path(&track.path, &active_path))
-                        .map(|track_index| (playlist_index, track_index))
-                })
+                self.state
+                    .playlists
+                    .get(playlist_index)
+                    .and_then(|playlist| {
+                        playlist
+                            .tracks
+                            .iter()
+                            .position(|track| same_path(&track.path, &active_path))
+                            .map(|track_index| (playlist_index, track_index))
+                    })
             })
             .or_else(|| self.find_track_location(&active_path));
 
@@ -449,9 +505,14 @@ impl AudioOrbitApp {
         if ui
             .add_enabled(
                 scan_idle,
-                egui::Button::new(ui_icons::label(Icon::RefreshCw, "Sync selected playlist now")),
+                egui::Button::new(ui_icons::label(
+                    Icon::RefreshCw,
+                    "Sync selected playlist now",
+                )),
             )
-            .on_hover_text("Check only selected playlist. Folder playlists scan their source folder once.")
+            .on_hover_text(
+                "Check only selected playlist. Folder playlists scan their source folder once.",
+            )
             .clicked()
         {
             self.start_library_sync(LibrarySyncTrigger::Manual, true);
@@ -468,20 +529,32 @@ impl AudioOrbitApp {
         ui.label("Radio recording folder");
         ui.horizontal_wrapped(|ui| {
             ui.monospace(folder.display().to_string());
-            if ui.button(ui_icons::label(Icon::FolderOpen, "Choose folder...")).clicked() {
+            if ui
+                .button(ui_icons::label(Icon::FolderOpen, "Choose folder..."))
+                .clicked()
+            {
                 self.choose_recording_folder();
             }
-            if ui.button(ui_icons::label(Icon::ExternalLink, "Open current folder")).clicked() {
+            if ui
+                .button(ui_icons::label(Icon::ExternalLink, "Open current folder"))
+                .clicked()
+            {
                 self.open_recording_folder();
             }
             if ui.button("Reset default").clicked() {
                 self.state.recording.output_folder = None;
-                self.status_message = "Radio recording folder reset to .audio-orbit-records next to the executable.".to_owned();
+                self.status_message =
+                    "Radio recording folder reset to .audio-orbit-records next to the executable."
+                        .to_owned();
                 self.error_message = None;
                 self.save_state_silently();
             }
         });
-        if let Some(info) = self.player.as_ref().and_then(|player| player.radio_recording_info()) {
+        if let Some(info) = self
+            .player
+            .as_ref()
+            .and_then(|player| player.radio_recording_info())
+        {
             ui.colored_label(
                 egui::Color32::RED,
                 format!(
@@ -528,7 +601,9 @@ impl AudioOrbitApp {
             .changed();
         playback_changed |= ui
             .checkbox(&mut self.state.playback.shuffle_enabled, "Shuffle playback")
-            .on_hover_text("Randomizes the next track inside the current playlist or repeat selection.")
+            .on_hover_text(
+                "Randomizes the next track inside the current playlist or repeat selection.",
+            )
             .changed();
 
         ui.horizontal(|ui| {
@@ -552,18 +627,34 @@ impl AudioOrbitApp {
                 .selected_text(self.state.playback.repeat_mode.label())
                 .show_ui(ui, |ui| {
                     playback_changed |= ui
-                        .selectable_value(&mut self.state.playback.repeat_mode, RepeatMode::Off, RepeatMode::Off.label())
+                        .selectable_value(
+                            &mut self.state.playback.repeat_mode,
+                            RepeatMode::Off,
+                            RepeatMode::Off.label(),
+                        )
                         .changed();
                     playback_changed |= ui
-                        .selectable_value(&mut self.state.playback.repeat_mode, RepeatMode::Track, RepeatMode::Track.label())
+                        .selectable_value(
+                            &mut self.state.playback.repeat_mode,
+                            RepeatMode::Track,
+                            RepeatMode::Track.label(),
+                        )
                         .changed();
                     playback_changed |= ui
-                        .selectable_value(&mut self.state.playback.repeat_mode, RepeatMode::Selection, RepeatMode::Selection.label())
+                        .selectable_value(
+                            &mut self.state.playback.repeat_mode,
+                            RepeatMode::Selection,
+                            RepeatMode::Selection.label(),
+                        )
                         .changed();
                 });
         });
         if self.state.playback.repeat_mode == RepeatMode::Selection {
-            let repeat_order = if self.state.playback.shuffle_enabled { "at random" } else { "in playlist order" };
+            let repeat_order = if self.state.playback.shuffle_enabled {
+                "at random"
+            } else {
+                "in playlist order"
+            };
             ui.small(format!(
                 "{} selected track(s) will repeat {repeat_order}.",
                 self.selected_track_indexes.len()
@@ -571,7 +662,10 @@ impl AudioOrbitApp {
         }
 
         playback_changed |= ui
-            .checkbox(&mut self.state.playback.crossfade_enabled, "Crossfade source changes")
+            .checkbox(
+                &mut self.state.playback.crossfade_enabled,
+                "Crossfade source changes",
+            )
             .changed();
         if self.state.playback.crossfade_enabled {
             playback_changed |= ui
@@ -706,17 +800,28 @@ impl AudioOrbitApp {
             ui.label(format!("Current version: v{}", check.current_version));
             ui.label(format!(
                 "Latest {} version: v{}",
-                if check.prerelease { "prerelease" } else { "stable" },
+                if check.prerelease {
+                    "prerelease"
+                } else {
+                    "stable"
+                },
                 check.latest_version
             ));
             ui.label(format!(
                 "Release type: {}",
-                if check.prerelease { "prerelease" } else { "stable" }
+                if check.prerelease {
+                    "prerelease"
+                } else {
+                    "stable"
+                }
             ));
             if let Some(asset_name) = &check.asset_name {
                 ui.label(format!("Asset: {asset_name}"));
             } else {
-                ui.colored_label(egui::Color32::YELLOW, "No Windows executable asset was found for this release.");
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "No Windows executable asset was found for this release.",
+                );
             }
 
             if check.is_update_available {
@@ -724,7 +829,11 @@ impl AudioOrbitApp {
                     egui::Color32::LIGHT_GREEN,
                     format!(
                         "A newer Audio Orbit {} release is available.",
-                        if check.prerelease { "prerelease" } else { "stable" }
+                        if check.prerelease {
+                            "prerelease"
+                        } else {
+                            "stable"
+                        }
                     ),
                 );
                 if ui
@@ -742,7 +851,11 @@ impl AudioOrbitApp {
                     egui::Color32::LIGHT_GREEN,
                     format!(
                         "No newer {} release is available.",
-                        if check.prerelease { "prerelease" } else { "stable" }
+                        if check.prerelease {
+                            "prerelease"
+                        } else {
+                            "stable"
+                        }
                     ),
                 );
             }
@@ -750,17 +863,27 @@ impl AudioOrbitApp {
             ui.small("No update check result yet.");
         }
     }
-    pub(crate) fn render_backup_settings_section_inner(&mut self, ui: &mut egui::Ui, show_title: bool) {
+    pub(crate) fn render_backup_settings_section_inner(
+        &mut self,
+        ui: &mut egui::Ui,
+        show_title: bool,
+    ) {
         if show_title {
             ui.heading("Backup and data");
         }
         ui.small("The ZIP backup stores the full app state: music folders, playlists, Favorites, sound profiles, playback settings, recording settings, and UI settings.");
 
         ui.horizontal_wrapped(|ui| {
-            if ui.button(ui_icons::label(Icon::Download, "Export full backup ZIP")).clicked() {
+            if ui
+                .button(ui_icons::label(Icon::Download, "Export full backup ZIP"))
+                .clicked()
+            {
                 self.export_app_backup();
             }
-            if ui.button(ui_icons::label(Icon::Upload, "Import backup ZIP")).clicked() {
+            if ui
+                .button(ui_icons::label(Icon::Upload, "Import backup ZIP"))
+                .clicked()
+            {
                 self.import_app_backup();
             }
         });
@@ -777,8 +900,15 @@ impl AudioOrbitApp {
         ui.add_space(8.0);
         ui.add(egui::Label::new(format!("Version: {}", app_version_label())).wrap());
         ui.add(egui::Label::new("Creator: Zoltán Rózsa").wrap());
-        ui.add(egui::Label::new("License: GNU Affero General Public License v3.0 (AGPL-3.0)").wrap());
-        ui.add(egui::Label::new("This app stores its portable state next to the executable in .audio-orbit-data.").wrap());
+        ui.add(
+            egui::Label::new("License: GNU Affero General Public License v3.0 (AGPL-3.0)").wrap(),
+        );
+        ui.add(
+            egui::Label::new(
+                "This app stores its portable state next to the executable in .audio-orbit-data.",
+            )
+            .wrap(),
+        );
 
         ui.add_space(10.0);
         ui.heading("External components");
@@ -804,7 +934,12 @@ impl AudioOrbitApp {
     pub(crate) fn modal_info_footer_reserved_height(&self) -> f32 {
         24.0
     }
-    pub(crate) fn render_modal_info_footer_fixed(&self, context: &egui::Context, id: &'static str, modal_rect: egui::Rect) {
+    pub(crate) fn render_modal_info_footer_fixed(
+        &self,
+        context: &egui::Context,
+        id: &'static str,
+        modal_rect: egui::Rect,
+    ) {
         let footer_height = self.modal_info_footer_reserved_height();
         let top_left = egui::pos2(modal_rect.left(), modal_rect.bottom() - footer_height);
         let style = context.style();
@@ -821,9 +956,13 @@ impl AudioOrbitApp {
                     .fill(footer_fill)
                     .stroke(footer_stroke)
                     .corner_radius(egui::CornerRadius::same(0))
-                    .inner_margin(egui::Margin::symmetric(horizontal_padding as i8, vertical_padding as i8))
+                    .inner_margin(egui::Margin::symmetric(
+                        horizontal_padding as i8,
+                        vertical_padding as i8,
+                    ))
                     .show(ui, |ui| {
-                        let content_width = (modal_rect.width() - horizontal_padding * 2.0).max(180.0);
+                        let content_width =
+                            (modal_rect.width() - horizontal_padding * 2.0).max(180.0);
                         let content_height = (footer_height - vertical_padding * 2.0).max(18.0);
                         ui.set_min_size(egui::vec2(content_width, content_height));
                         ui.set_width(content_width);

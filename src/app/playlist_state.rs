@@ -5,7 +5,9 @@ impl AudioOrbitApp {
         self.state.playlists.get(self.state.selected_playlist_index)
     }
     pub(crate) fn current_playlist_mut(&mut self) -> Option<&mut Playlist> {
-        self.state.playlists.get_mut(self.state.selected_playlist_index)
+        self.state
+            .playlists
+            .get_mut(self.state.selected_playlist_index)
     }
     pub(crate) fn select_playlist(&mut self, index: usize) {
         if index >= self.state.playlists.len() {
@@ -28,18 +30,22 @@ impl AudioOrbitApp {
         self.pending_folder_watch_full_rescan = false;
         self.save_state_silently();
     }
-    pub(crate) fn jump_to_track_in_playlist(&mut self, playlist_index: usize, expected_path: PathBuf) {
-        let Some((track_path, playlist_name)) = self
-            .state
-            .playlists
-            .get(playlist_index)
-            .and_then(|playlist| {
-                playlist
-                    .tracks
-                    .iter()
-                    .find(|track| same_path(&track.path, &expected_path))
-                    .map(|track| (track.path.clone(), playlist.name.clone()))
-            })
+    pub(crate) fn jump_to_track_in_playlist(
+        &mut self,
+        playlist_index: usize,
+        expected_path: PathBuf,
+    ) {
+        let Some((track_path, playlist_name)) =
+            self.state
+                .playlists
+                .get(playlist_index)
+                .and_then(|playlist| {
+                    playlist
+                        .tracks
+                        .iter()
+                        .find(|track| same_path(&track.path, &expected_path))
+                        .map(|track| (track.path.clone(), playlist.name.clone()))
+                })
         else {
             return;
         };
@@ -83,7 +89,9 @@ impl AudioOrbitApp {
                         playlist
                             .repeat_selection
                             .iter()
-                            .any(|selected_path| same_path(selected_path.as_path(), track.path.as_path()))
+                            .any(|selected_path| {
+                                same_path(selected_path.as_path(), track.path.as_path())
+                            })
                             .then_some(index)
                     })
                     .collect::<BTreeSet<_>>()
@@ -187,7 +195,9 @@ impl AudioOrbitApp {
             })
             .collect::<Vec<_>>();
 
-        if self.state.playback.repeat_mode == RepeatMode::Selection && !self.selected_track_indexes.is_empty() {
+        if self.state.playback.repeat_mode == RepeatMode::Selection
+            && !self.selected_track_indexes.is_empty()
+        {
             indexes
                 .into_iter()
                 .filter(|index| self.selected_track_indexes.contains(index))
@@ -232,10 +242,16 @@ impl AudioOrbitApp {
         if modifiers.shift {
             let visible_indexes = self.visible_track_indexes();
             let anchor = self.track_selection_anchor_index.unwrap_or(index);
-            let anchor_position = visible_indexes.iter().position(|candidate| *candidate == anchor);
-            let target_position = visible_indexes.iter().position(|candidate| *candidate == index);
+            let anchor_position = visible_indexes
+                .iter()
+                .position(|candidate| *candidate == anchor);
+            let target_position = visible_indexes
+                .iter()
+                .position(|candidate| *candidate == index);
 
-            if let (Some(anchor_position), Some(target_position)) = (anchor_position, target_position) {
+            if let (Some(anchor_position), Some(target_position)) =
+                (anchor_position, target_position)
+            {
                 if !additive {
                     self.multi_selected_track_indexes.clear();
                 }
@@ -298,7 +314,12 @@ impl AudioOrbitApp {
 
         self.action_track_indexes_for_context(index)
             .into_iter()
-            .filter_map(|track_index| playlist.tracks.get(track_index).map(|track| track.path.clone()))
+            .filter_map(|track_index| {
+                playlist
+                    .tracks
+                    .get(track_index)
+                    .map(|track| track.path.clone())
+            })
             .collect()
     }
     pub(crate) fn remember_last_played_track(&mut self, index: Option<usize>, path: &Path) {
@@ -306,7 +327,9 @@ impl AudioOrbitApp {
             return;
         };
         self.state.last_played_track = Some(LastPlayedTrack {
-            playlist_index: self.active_playlist_index.unwrap_or(self.state.selected_playlist_index),
+            playlist_index: self
+                .active_playlist_index
+                .unwrap_or(self.state.selected_playlist_index),
             track_path: path.to_path_buf(),
         });
         self.selected_track_index = Some(track_index);
@@ -334,7 +357,8 @@ impl AudioOrbitApp {
         let session = self.state.playback_session.clone();
         match session.source.as_str() {
             "radio" => {
-                let Some(radio_index) = session.radio_index.or(self.state.selected_radio_index) else {
+                let Some(radio_index) = session.radio_index.or(self.state.selected_radio_index)
+                else {
                     return;
                 };
                 if radio_index >= self.state.radio_stations.len() {
@@ -349,7 +373,8 @@ impl AudioOrbitApp {
                 }
             }
             "track" | "music" => {
-                let Some((playlist_index, track_index, path)) = self.find_session_track(&session) else {
+                let Some((playlist_index, track_index, path)) = self.find_session_track(&session)
+                else {
                     return;
                 };
                 self.active_tab = MainContentTab::Music;
@@ -364,26 +389,50 @@ impl AudioOrbitApp {
             _ => {}
         }
     }
-    pub(crate) fn find_session_track(&self, session: &PlaybackSession) -> Option<(usize, usize, PathBuf)> {
-        let session_path = session
-            .track_path
-            .as_ref()
-            .or_else(|| self.state.last_played_track.as_ref().map(|track| &track.track_path))?;
-        let preferred_playlist = session
-            .playlist_index
-            .or_else(|| self.state.last_played_track.as_ref().map(|track| track.playlist_index));
+    pub(crate) fn find_session_track(
+        &self,
+        session: &PlaybackSession,
+    ) -> Option<(usize, usize, PathBuf)> {
+        let session_path = session.track_path.as_ref().or_else(|| {
+            self.state
+                .last_played_track
+                .as_ref()
+                .map(|track| &track.track_path)
+        })?;
+        let preferred_playlist = session.playlist_index.or_else(|| {
+            self.state
+                .last_played_track
+                .as_ref()
+                .map(|track| track.playlist_index)
+        });
 
         if let Some(playlist_index) = preferred_playlist {
             if let Some(playlist) = self.state.playlists.get(playlist_index) {
-                if let Some(track_index) = playlist.tracks.iter().position(|track| !track.missing && same_path(&track.path, session_path)) {
-                    return Some((playlist_index, track_index, playlist.tracks[track_index].path.clone()));
+                if let Some(track_index) = playlist
+                    .tracks
+                    .iter()
+                    .position(|track| !track.missing && same_path(&track.path, session_path))
+                {
+                    return Some((
+                        playlist_index,
+                        track_index,
+                        playlist.tracks[track_index].path.clone(),
+                    ));
                 }
             }
         }
 
         for (playlist_index, playlist) in self.state.playlists.iter().enumerate() {
-            if let Some(track_index) = playlist.tracks.iter().position(|track| !track.missing && same_path(&track.path, session_path)) {
-                return Some((playlist_index, track_index, playlist.tracks[track_index].path.clone()));
+            if let Some(track_index) = playlist
+                .tracks
+                .iter()
+                .position(|track| !track.missing && same_path(&track.path, session_path))
+            {
+                return Some((
+                    playlist_index,
+                    track_index,
+                    playlist.tracks[track_index].path.clone(),
+                ));
             }
         }
 
@@ -413,7 +462,11 @@ impl AudioOrbitApp {
                 && self.active_radio_index.is_some();
             session.source = "radio".to_owned();
             session.was_active = is_active;
-            session.was_paused = self.player.as_ref().map(|player| player.is_paused()).unwrap_or(false);
+            session.was_paused = self
+                .player
+                .as_ref()
+                .map(|player| player.is_paused())
+                .unwrap_or(false);
             session.radio_index = Some(radio_index);
             self.state.selected_radio_index = Some(radio_index);
             self.state.playback_session = session;
@@ -424,11 +477,21 @@ impl AudioOrbitApp {
             .active_track_path
             .clone()
             .or_else(|| self.selected_track_path())
-            .or_else(|| self.state.last_played_track.as_ref().map(|track| track.track_path.clone()));
+            .or_else(|| {
+                self.state
+                    .last_played_track
+                    .as_ref()
+                    .map(|track| track.track_path.clone())
+            });
         if let Some(path) = track_path {
             let playlist_index = self
                 .active_playlist_index
-                .or_else(|| self.state.last_played_track.as_ref().map(|track| track.playlist_index))
+                .or_else(|| {
+                    self.state
+                        .last_played_track
+                        .as_ref()
+                        .map(|track| track.playlist_index)
+                })
                 .unwrap_or(self.state.selected_playlist_index);
             let is_active = self
                 .player
@@ -436,7 +499,11 @@ impl AudioOrbitApp {
                 .map(|player| player.is_playing() || player.is_paused())
                 .unwrap_or(false)
                 && self.active_track_path.is_some();
-            let player_is_paused = self.player.as_ref().map(|player| player.is_paused()).unwrap_or(false);
+            let player_is_paused = self
+                .player
+                .as_ref()
+                .map(|player| player.is_paused())
+                .unwrap_or(false);
             let preserved_paused_session_position = (!is_active
                 && self.state.playback_session.was_paused
                 && self
@@ -472,7 +539,9 @@ impl AudioOrbitApp {
                     .active_radio_title
                     .clone()
                     .or_else(|| station.last_stream_title.clone())
-                    .filter(|title| !title.trim().is_empty() && !title.eq_ignore_ascii_case(&station.name));
+                    .filter(|title| {
+                        !title.trim().is_empty() && !title.eq_ignore_ascii_case(&station.name)
+                    });
                 let station_name = self
                     .active_radio_station_name
                     .clone()
@@ -498,7 +567,10 @@ impl AudioOrbitApp {
                     .or_else(|| station.last_station_name.clone())
                     .filter(|name| !name.trim().is_empty())
                     .unwrap_or_else(|| station.name.clone());
-                let elapsed = self.radio_elapsed_seconds().map(format_duration).unwrap_or_else(|| "0:00".to_owned());
+                let elapsed = self
+                    .radio_elapsed_seconds()
+                    .map(format_duration)
+                    .unwrap_or_else(|| "0:00".to_owned());
                 format!("{station_name} · live for {elapsed} · {}", station.url)
             });
         }
@@ -509,7 +581,10 @@ impl AudioOrbitApp {
                     "{}k · {} ch · {}",
                     playback.sample_rate / 1000,
                     playback.input_channels,
-                    playback.size_bytes.map(format_file_size).unwrap_or_else(|| "unknown size".to_owned())
+                    playback
+                        .size_bytes
+                        .map(format_file_size)
+                        .unwrap_or_else(|| "unknown size".to_owned())
                 )
             } else {
                 format!(
@@ -517,7 +592,10 @@ impl AudioOrbitApp {
                     display_parent(&playback.path),
                     playback.sample_rate,
                     playback.input_channels,
-                    playback.size_bytes.map(format_file_size).unwrap_or_else(|| "unknown size".to_owned()),
+                    playback
+                        .size_bytes
+                        .map(format_file_size)
+                        .unwrap_or_else(|| "unknown size".to_owned()),
                     format_duration(playback.original_duration_seconds)
                 )
             }
@@ -536,15 +614,24 @@ impl AudioOrbitApp {
                 .waveform_drag_position_seconds
                 .unwrap_or_else(|| self.displayed_playback_position_seconds());
             let duration = self.displayed_playback_duration_seconds();
-            return format!("{} / {}", format_duration(position), format_duration(duration));
+            return format!(
+                "{} / {}",
+                format_duration(position),
+                format_duration(duration)
+            );
         }
 
         String::new()
     }
     pub(crate) fn radio_elapsed_seconds(&self) -> Option<f32> {
-        self.radio_started_at.map(|started_at| started_at.elapsed().as_secs_f32())
+        self.radio_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f32())
     }
-    pub(crate) fn random_sequence_index(&self, indexes: &[usize], current_index: Option<usize>) -> Option<usize> {
+    pub(crate) fn random_sequence_index(
+        &self,
+        indexes: &[usize],
+        current_index: Option<usize>,
+    ) -> Option<usize> {
         if indexes.is_empty() {
             return None;
         }
@@ -558,7 +645,11 @@ impl AudioOrbitApp {
             .copied()
             .filter(|index| Some(*index) != current_index)
             .collect::<Vec<_>>();
-        let candidates = if candidates.is_empty() { indexes.to_vec() } else { candidates };
+        let candidates = if candidates.is_empty() {
+            indexes.to_vec()
+        } else {
+            candidates
+        };
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_nanos() as usize)
@@ -572,7 +663,12 @@ impl AudioOrbitApp {
         };
 
         self.current_playlist()
-            .and_then(|playlist| playlist.tracks.get(index).map(|track| playlist.track_matches_selected_group(track)))
+            .and_then(|playlist| {
+                playlist
+                    .tracks
+                    .get(index)
+                    .map(|track| playlist.track_matches_selected_group(track))
+            })
             .unwrap_or(false)
     }
     pub(crate) fn ensure_selected_track_visible(&mut self) {
@@ -589,7 +685,12 @@ impl AudioOrbitApp {
     pub(crate) fn is_favorite(&self, path: &Path) -> bool {
         self.favorites_index()
             .and_then(|index| self.state.playlists.get(index))
-            .map(|playlist| playlist.tracks.iter().any(|track| same_path(&track.path, path)))
+            .map(|playlist| {
+                playlist
+                    .tracks
+                    .iter()
+                    .any(|track| same_path(&track.path, path))
+            })
             .unwrap_or(false)
     }
     pub(crate) fn toggle_favorite(&mut self, path: PathBuf) {
@@ -598,12 +699,16 @@ impl AudioOrbitApp {
         };
 
         let favorites_is_selected = self.state.selected_playlist_index == favorites_index;
-        let selected_path = favorites_is_selected.then(|| self.selected_track_path()).flatten();
+        let selected_path = favorites_is_selected
+            .then(|| self.selected_track_path())
+            .flatten();
         let selected_index = self.selected_track_index.unwrap_or(0);
         let is_favorite = self.is_favorite(&path);
         if let Some(favorites) = self.state.playlists.get_mut(favorites_index) {
             if is_favorite {
-                favorites.tracks.retain(|track| !same_path(&track.path, &path));
+                favorites
+                    .tracks
+                    .retain(|track| !same_path(&track.path, &path));
                 self.status_message = "Removed from Favorites.".to_owned();
             } else {
                 favorites.add_track_path(path.clone(), None, 0);
@@ -642,7 +747,8 @@ impl AudioOrbitApp {
         };
 
         if !playlist.accepts_manual_tracks() {
-            self.error_message = Some("This playlist is read-only and cannot receive manual tracks.".to_owned());
+            self.error_message =
+                Some("This playlist is read-only and cannot receive manual tracks.".to_owned());
             return;
         }
 
@@ -672,7 +778,10 @@ impl AudioOrbitApp {
     }
     pub(crate) fn remove_track_from_current_playlist(&mut self, track_index: usize) {
         let Some(remaining_len) = self.current_playlist_mut().and_then(|playlist| {
-            if matches!(playlist.kind, PlaylistKind::Folder | PlaylistKind::Temporary) {
+            if matches!(
+                playlist.kind,
+                PlaylistKind::Folder | PlaylistKind::Temporary
+            ) {
                 None
             } else if track_index < playlist.tracks.len() {
                 playlist.tracks.remove(track_index);
@@ -726,12 +835,15 @@ impl AudioOrbitApp {
             .active_playlist_index
             .zip(self.active_track_path.as_ref())
             .and_then(|(playlist_index, active_path)| {
-                self.state.playlists.get(playlist_index).and_then(|playlist| {
-                    playlist
-                        .tracks
-                        .iter()
-                        .position(|track| same_path(&track.path, active_path))
-                })
+                self.state
+                    .playlists
+                    .get(playlist_index)
+                    .and_then(|playlist| {
+                        playlist
+                            .tracks
+                            .iter()
+                            .position(|track| same_path(&track.path, active_path))
+                    })
             });
         self.restore_repeat_selection_for_current_playlist();
         self.status_message = format!("Removed missing entry {}.", display_file_name(&path));
@@ -739,14 +851,21 @@ impl AudioOrbitApp {
         self.save_state_silently();
     }
     pub(crate) fn delete_track_from_disk(&mut self, path: PathBuf) {
-        if self.active_track_path.as_ref().map(|active| same_path(active, &path)).unwrap_or(false) {
+        if self
+            .active_track_path
+            .as_ref()
+            .map(|active| same_path(active, &path))
+            .unwrap_or(false)
+        {
             self.stop();
         }
 
         match fs::remove_file(&path) {
             Ok(()) => {
                 for playlist in &mut self.state.playlists {
-                    playlist.tracks.retain(|track| !same_path(&track.path, &path));
+                    playlist
+                        .tracks
+                        .retain(|track| !same_path(&track.path, &path));
                 }
                 self.selected_track_index = self.eligible_track_indexes().first().copied();
                 self.clear_multi_track_selection();

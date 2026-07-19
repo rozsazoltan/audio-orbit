@@ -167,9 +167,9 @@ fn collect_fingerprint(path: &Path, fingerprint: &mut FileFingerprint) {
     if metadata.is_file() {
         fingerprint.files = fingerprint.files.saturating_add(1);
         fingerprint.bytes = fingerprint.bytes.saturating_add(metadata.len());
-        fingerprint.modified_nanos = fingerprint
-            .modified_nanos
-            .max(system_time_to_nanos(metadata.modified().unwrap_or(UNIX_EPOCH)));
+        fingerprint.modified_nanos = fingerprint.modified_nanos.max(system_time_to_nanos(
+            metadata.modified().unwrap_or(UNIX_EPOCH),
+        ));
         return;
     }
 

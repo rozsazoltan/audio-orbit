@@ -9,7 +9,8 @@ impl AudioOrbitApp {
             return false;
         }
         if !(url.starts_with("http://") || url.starts_with("https://")) {
-            self.error_message = Some("Internet radio stream URL must start with http:// or https://.".to_owned());
+            self.error_message =
+                Some("Internet radio stream URL must start with http:// or https://.".to_owned());
             return false;
         }
 
@@ -68,7 +69,8 @@ impl AudioOrbitApp {
         let settings = self.current_settings();
         let crossfade_seconds = self.configured_manual_crossfade_seconds();
         let Some(player) = &mut self.player else {
-            self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+            self.error_message =
+                Some("No audio output device is available. Try Refresh output device.".to_owned());
             return;
         };
         self.status_message = if crossfade_seconds > 0.05 {
@@ -125,8 +127,14 @@ impl AudioOrbitApp {
             completed = true;
             if let Some(metadata) = metadata {
                 if self.active_radio_index == Some(index) {
-                    self.active_radio_station_name = metadata.station_name.clone().or_else(|| self.active_radio_station_name.clone());
-                    self.active_radio_title = metadata.stream_title.clone().or_else(|| self.active_radio_title.clone());
+                    self.active_radio_station_name = metadata
+                        .station_name
+                        .clone()
+                        .or_else(|| self.active_radio_station_name.clone());
+                    self.active_radio_title = metadata
+                        .stream_title
+                        .clone()
+                        .or_else(|| self.active_radio_title.clone());
                 }
                 if let Some(station) = self.state.radio_stations.get_mut(index) {
                     if metadata.station_name.is_some() {
@@ -179,7 +187,9 @@ impl AudioOrbitApp {
         let is_recording = match self.player.as_ref() {
             Some(player) => player.is_radio_recording(),
             None => {
-                self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+                self.error_message = Some(
+                    "No audio output device is available. Try Refresh output device.".to_owned(),
+                );
                 return;
             }
         };
@@ -205,24 +215,27 @@ impl AudioOrbitApp {
                     self.error_message = Some(error.to_string());
                 }
                 None => {
-                    self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+                    self.error_message = Some(
+                        "No audio output device is available. Try Refresh output device."
+                            .to_owned(),
+                    );
                 }
             }
             return;
         }
 
         if self.active_radio_index.is_none() {
-            self.error_message = Some("Start an internet radio station before recording.".to_owned());
+            self.error_message =
+                Some("Start an internet radio station before recording.".to_owned());
             return;
         }
 
         let folder = self.state.recording.resolved_output_folder();
         let station_name = self.current_radio_recording_name();
         let stream_title = self.active_radio_title.clone();
-        let result = self
-            .player
-            .as_mut()
-            .map(|player| player.start_radio_recording(&folder, &station_name, stream_title.as_deref()));
+        let result = self.player.as_mut().map(|player| {
+            player.start_radio_recording(&folder, &station_name, stream_title.as_deref())
+        });
         match result {
             Some(Ok(path)) => {
                 self.status_message = format!("Recording internet radio to {}.", path.display());
@@ -232,7 +245,9 @@ impl AudioOrbitApp {
                 self.error_message = Some(error.to_string());
             }
             None => {
-                self.error_message = Some("No audio output device is available. Try Refresh output device.".to_owned());
+                self.error_message = Some(
+                    "No audio output device is available. Try Refresh output device.".to_owned(),
+                );
             }
         }
     }
@@ -251,7 +266,10 @@ impl AudioOrbitApp {
     }
     pub(crate) fn open_recording_folder(&mut self) {
         let folder = self.state.recording.resolved_output_folder();
-        if let Err(error) = fs::create_dir_all(&folder).and_then(|_| reveal_in_file_manager(&folder).map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.to_string()))) {
+        if let Err(error) = fs::create_dir_all(&folder).and_then(|_| {
+            reveal_in_file_manager(&folder)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.to_string()))
+        }) {
             self.error_message = Some(format!("Failed to open recording folder: {error}"));
         } else {
             self.status_message = format!("Opened radio recordings folder: {}.", folder.display());

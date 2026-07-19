@@ -163,7 +163,9 @@ impl Track {
         let group = folder_group_for_path(&path, root, folder_depth);
         // Keep large folder imports responsive: expensive decoder/tag metadata is filled
         // lazily from playback results instead of being read for every scanned file.
-        let file_metadata = fs::metadata(&path).ok().filter(|metadata| metadata.is_file());
+        let file_metadata = fs::metadata(&path)
+            .ok()
+            .filter(|metadata| metadata.is_file());
         let metadata = TrackMetadata {
             size_bytes: file_metadata.as_ref().map(|metadata| metadata.len()),
             ..Default::default()
@@ -269,7 +271,6 @@ fn default_playback_session_source() -> String {
     "music".to_owned()
 }
 
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TrackAvailabilityStats {
     pub restored: usize,
@@ -343,7 +344,11 @@ impl Playlist {
 
         let mut added = Vec::new();
         for path in files {
-            if self.tracks.iter().any(|track| same_path(&track.path, &path)) {
+            if self
+                .tracks
+                .iter()
+                .any(|track| same_path(&track.path, &path))
+            {
                 continue;
             }
             self.tracks.push(Track::from_path(path.clone(), None, 0));
@@ -391,8 +396,17 @@ impl Playlist {
         added_paths
     }
 
-    pub fn add_track_path(&mut self, path: PathBuf, root: Option<&Path>, folder_depth: usize) -> bool {
-        if self.tracks.iter().any(|track| same_path(&track.path, &path)) {
+    pub fn add_track_path(
+        &mut self,
+        path: PathBuf,
+        root: Option<&Path>,
+        folder_depth: usize,
+    ) -> bool {
+        if self
+            .tracks
+            .iter()
+            .any(|track| same_path(&track.path, &path))
+        {
             return false;
         }
 
@@ -694,7 +708,11 @@ impl Playlist {
             return;
         };
 
-        if !self.tracks.iter().any(|track| track.group == selected_group) {
+        if !self
+            .tracks
+            .iter()
+            .any(|track| track.group == selected_group)
+        {
             self.selected_group = None;
         }
     }
@@ -739,7 +757,8 @@ impl Playlist {
         }
 
         self.ensure_favorite_added_sequences();
-        self.tracks.sort_by_key(|track| Reverse(track.favorite_added_sequence.unwrap_or(0)));
+        self.tracks
+            .sort_by_key(|track| Reverse(track.favorite_added_sequence.unwrap_or(0)));
     }
 
     pub fn sort_tracks(&mut self) {
@@ -767,8 +786,6 @@ impl DspProfile {
     }
 }
 
-
-
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RecordingSettings {
     #[serde(default)]
@@ -785,11 +802,11 @@ impl RecordingSettings {
 }
 
 pub fn default_recording_output_folder() -> Option<PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join(".audio-orbit-records")))
+    std::env::current_exe().ok().and_then(|path| {
+        path.parent()
+            .map(|parent| parent.join(".audio-orbit-records"))
+    })
 }
-
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LibrarySettings {
@@ -821,7 +838,6 @@ impl Default for UpdateSettings {
         }
     }
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepeatMode {
@@ -900,8 +916,6 @@ fn default_crossfade_seconds() -> u8 {
 fn default_volume_percent() -> u8 {
     100
 }
-
-
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct WindowGeometry {
@@ -1181,12 +1195,15 @@ pub fn scan_audio_folder(root: &Path) -> Result<FolderScanResult> {
 
         for entry in entries {
             let entry = entry.with_context(|| {
-                format!("failed to inspect a folder entry under {}", directory.display())
+                format!(
+                    "failed to inspect a folder entry under {}",
+                    directory.display()
+                )
             })?;
             let path = entry.path();
-            let file_type = entry.file_type().with_context(|| {
-                format!("failed to read file type: {}", path.display())
-            })?;
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("failed to read file type: {}", path.display()))?;
 
             // Never follow symbolic links or Windows reparse points during
             // recursive scans. This prevents cycles and avoids leaving the
@@ -1202,7 +1219,9 @@ pub fn scan_audio_folder(root: &Path) -> Result<FolderScanResult> {
         }
     }
 
-    files.sort_by(|left, right| natural_key(&left.to_string_lossy()).cmp(&natural_key(&right.to_string_lossy())));
+    files.sort_by(|left, right| {
+        natural_key(&left.to_string_lossy()).cmp(&natural_key(&right.to_string_lossy()))
+    });
     Ok(FolderScanResult { files })
 }
 
@@ -1212,7 +1231,18 @@ pub fn is_supported_audio_file(path: &Path) -> bool {
         .map(|extension| {
             matches!(
                 extension.to_lowercase().as_str(),
-                "mp3" | "wav" | "flac" | "ogg" | "opus" | "m4a" | "mp4" | "aac" | "aiff" | "aif" | "ape" | "wv"
+                "mp3"
+                    | "wav"
+                    | "flac"
+                    | "ogg"
+                    | "opus"
+                    | "m4a"
+                    | "mp4"
+                    | "aac"
+                    | "aiff"
+                    | "aif"
+                    | "ape"
+                    | "wv"
             )
         })
         .unwrap_or(false)
@@ -1274,12 +1304,16 @@ pub fn display_file_name(path: &Path) -> String {
 
 fn write_state_to_path(state: &SavedState, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create application data directory: {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create application data directory: {}",
+                parent.display()
+            )
+        })?;
     }
 
-    let contents = serde_json::to_string_pretty(state)
-        .context("failed to serialize application state")?;
+    let contents =
+        serde_json::to_string_pretty(state).context("failed to serialize application state")?;
     fs::write(path, contents)
         .with_context(|| format!("failed to save application state: {}", path.display()))?;
 
@@ -1298,7 +1332,9 @@ fn read_track_metadata(path: &Path) -> Result<TrackMetadata> {
         duration_seconds: Some(properties.duration().as_secs_f32()).filter(|value| *value > 0.0),
         sample_rate_hz: properties.sample_rate(),
         channels: properties.channels(),
-        bitrate_kbps: properties.audio_bitrate().or_else(|| properties.overall_bitrate()),
+        bitrate_kbps: properties
+            .audio_bitrate()
+            .or_else(|| properties.overall_bitrate()),
     })
 }
 
@@ -1377,7 +1413,10 @@ mod tests {
         assert_eq!(track_paths(&favorites), owned_paths(&[&alpha, &beta]));
 
         assert!(favorites.add_track_path(charlie.clone(), None, 0));
-        assert_eq!(track_paths(&favorites), owned_paths(&[&charlie, &alpha, &beta]));
+        assert_eq!(
+            track_paths(&favorites),
+            owned_paths(&[&charlie, &alpha, &beta])
+        );
         assert!(!favorites.add_track_path(alpha.clone(), None, 0));
 
         favorites.sort_favorites_by_added();
@@ -1453,20 +1492,17 @@ mod tests {
 
     #[test]
     fn library_settings_migrate_previous_automatic_sync_key() {
-        let settings: LibrarySettings = serde_json::from_str(
-            r#"{"auto_sync_folder_playlists":true}"#,
-        )
-        .unwrap();
+        let settings: LibrarySettings =
+            serde_json::from_str(r#"{"auto_sync_folder_playlists":true}"#).unwrap();
 
         assert!(settings.auto_sync_selected_playlist);
     }
 
     #[test]
     fn tracks_from_existing_state_default_to_available() {
-        let track: Track = serde_json::from_str(
-            r#"{"path":"C:/Music/Track.mp3","title":"Track","group":"Root"}"#,
-        )
-        .unwrap();
+        let track: Track =
+            serde_json::from_str(r#"{"path":"C:/Music/Track.mp3","title":"Track","group":"Root"}"#)
+                .unwrap();
 
         assert!(!track.missing);
     }
@@ -1513,19 +1549,26 @@ mod tests {
         assert_eq!(stats.newly_missing, 1);
         assert_eq!(stats.present_total, 3);
         assert_eq!(stats.missing_total, 1);
+        assert!(
+            playlist
+                .tracks
+                .iter()
+                .find(|track| same_path(&track.path, &alpha))
+                .unwrap()
+                .missing
+        );
+        assert!(
+            !playlist
+                .tracks
+                .iter()
+                .find(|track| same_path(&track.path, &gamma))
+                .unwrap()
+                .missing
+        );
         assert!(playlist
             .tracks
             .iter()
-            .find(|track| same_path(&track.path, &alpha))
-            .unwrap()
-            .missing);
-        assert!(!playlist
-            .tracks
-            .iter()
-            .find(|track| same_path(&track.path, &gamma))
-            .unwrap()
-            .missing);
-        assert!(playlist.tracks.iter().any(|track| same_path(&track.path, &delta)));
+            .any(|track| same_path(&track.path, &delta)));
     }
 
     #[test]
@@ -1534,19 +1577,18 @@ mod tests {
         let alpha = root.join("Alpha.mp3");
         let beta = root.join("Beta.mp3");
         let gamma = root.join("Gamma.mp3");
-        let mut playlist = Playlist::from_folder(
-            "Folder",
-            root,
-            1,
-            vec![alpha.clone(), beta.clone()],
-        );
+        let mut playlist =
+            Playlist::from_folder("Folder", root, 1, vec![alpha.clone(), beta.clone()]);
 
         let stats = playlist.merge_tracks_from_folder_scan(&[beta.clone(), gamma.clone()]);
 
         assert_eq!(stats.added, 1);
         assert_eq!(stats.newly_missing, 1);
         assert_eq!(stats.missing_total, 1);
-        assert_eq!(track_paths(&playlist), owned_paths(&[&alpha, &beta, &gamma]));
+        assert_eq!(
+            track_paths(&playlist),
+            owned_paths(&[&alpha, &beta, &gamma])
+        );
         assert!(playlist.tracks[0].missing);
         assert!(!playlist.tracks[1].missing);
         assert!(!playlist.tracks[2].missing);
@@ -1595,7 +1637,11 @@ mod tests {
             "Folder",
             root,
             1,
-            vec![artist_a_one.clone(), artist_b_one.clone(), artist_a_two.clone()],
+            vec![
+                artist_a_one.clone(),
+                artist_b_one.clone(),
+                artist_a_two.clone(),
+            ],
         );
         playlist.tracks = vec![
             Track::from_path(artist_a_one.clone(), playlist.source_folder.as_deref(), 1),
@@ -1616,12 +1662,8 @@ mod tests {
         let root = PathBuf::from("C:/Music");
         let alpha = root.join("Alpha.mp3");
         let beta = root.join("Beta.mp3");
-        let mut playlist = Playlist::from_folder(
-            "Folder",
-            root,
-            1,
-            vec![alpha.clone(), beta.clone()],
-        );
+        let mut playlist =
+            Playlist::from_folder("Folder", root, 1, vec![alpha.clone(), beta.clone()]);
         playlist.tracks.swap(0, 1);
 
         playlist.merge_tracks_from_folder_scan(std::slice::from_ref(&beta));
@@ -1674,10 +1716,7 @@ mod tests {
             track.missing = false;
         }
 
-        let availability = BTreeMap::from([
-            (path_key(&alpha), false),
-            (path_key(&beta), true),
-        ]);
+        let availability = BTreeMap::from([(path_key(&alpha), false), (path_key(&beta), true)]);
         let missing = playlist.apply_track_availability(&availability);
 
         assert_eq!(missing.newly_missing, 1);

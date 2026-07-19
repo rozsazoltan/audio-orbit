@@ -30,9 +30,8 @@ impl FolderWatcher {
         use windows_sys::Win32::{
             Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
             Storage::FileSystem::{
-                CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED,
-                FILE_LIST_DIRECTORY, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-                OPEN_EXISTING,
+                CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY,
+                FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
             },
             System::Threading::{CreateEventW, SetEvent},
         };
@@ -111,11 +110,9 @@ impl FolderWatcher {
                 let directory_handle = ThreadOwnedHandle(
                     thread_directory_handle as windows_sys::Win32::Foundation::HANDLE,
                 );
-                let stop_event =
-                    thread_stop_event as windows_sys::Win32::Foundation::HANDLE;
-                let io_event = ThreadOwnedHandle(
-                    thread_io_event as windows_sys::Win32::Foundation::HANDLE,
-                );
+                let stop_event = thread_stop_event as windows_sys::Win32::Foundation::HANDLE;
+                let io_event =
+                    ThreadOwnedHandle(thread_io_event as windows_sys::Win32::Foundation::HANDLE);
                 run_watcher_thread(
                     thread_root,
                     directory_handle.get(),
@@ -124,8 +121,7 @@ impl FolderWatcher {
                     sender,
                     context,
                 );
-            })
-        {
+            }) {
             Ok(thread) => thread,
             Err(error) => {
                 // SAFETY: Thread did not start, so all handles remain exclusively
@@ -188,8 +184,8 @@ fn run_watcher_thread(
             ReadDirectoryChangesW, FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME,
         },
         System::{
-            IO::{GetOverlappedResult, OVERLAPPED},
             Threading::{ResetEvent, WaitForMultipleObjects, INFINITE},
+            IO::{GetOverlappedResult, OVERLAPPED},
         },
     };
 
@@ -239,9 +235,8 @@ fn run_watcher_thread(
         }
 
         // SAFETY: handles contains two valid event handles and remains alive for call.
-        let wait_result = unsafe {
-            WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, INFINITE)
-        };
+        let wait_result =
+            unsafe { WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, INFINITE) };
         match wait_result {
             WAIT_OBJECT_0_VALUE => {
                 cancel_pending_read(directory_handle, &overlapped);
@@ -251,12 +246,7 @@ fn run_watcher_thread(
                 let mut bytes_returned = 0;
                 // SAFETY: OVERLAPPED belongs to completed request on directory_handle.
                 let completed = unsafe {
-                    GetOverlappedResult(
-                        directory_handle,
-                        &overlapped,
-                        &mut bytes_returned,
-                        0,
-                    )
+                    GetOverlappedResult(directory_handle, &overlapped, &mut bytes_returned, 0)
                 };
                 if completed == 0 {
                     const ERROR_NOTIFY_ENUM_DIR_VALUE: i32 = 1022;
@@ -318,7 +308,10 @@ fn run_watcher_thread(
                         send_failure(
                             &sender,
                             &context,
-                            format!("invalid folder watcher data for {}: {error}", root.display()),
+                            format!(
+                                "invalid folder watcher data for {}: {error}",
+                                root.display()
+                            ),
                         );
                         break;
                     }

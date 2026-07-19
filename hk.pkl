@@ -1,0 +1,53 @@
+amends "package://github.com/jdx/hk/releases/download/v1.51.0/hk@1.51.0#/Config.pkl"
+
+import "package://github.com/jdx/hk/releases/download/v1.51.0/hk@1.51.0#/Builtins.pkl"
+
+local preCommitSteps = new Mapping<String, Step> {
+  ["rustfmt"] {
+    glob = List("**/*.rs")
+    check_first = true
+    check = "cargo fmt --all -- --check"
+    fix = "cargo fmt --all"
+    exclusive = true
+  }
+
+  ["toml-format"] = (Builtins.tombi_format) {
+    check_first = true
+  }
+
+  ["toml-lint"] = Builtins.tombi
+  ["pkl-format"] = Builtins.pkl_format
+  ["hk-config"] = Builtins.hk_test
+  ["merge-conflict"] = Builtins.check_merge_conflict
+  ["private-key"] = Builtins.detect_private_key
+}
+
+hooks {
+  ["pre-commit"] {
+    fix = true
+    stash = "git"
+    steps = preCommitSteps
+  }
+
+  ["pre-push"] {
+    fix = false
+
+    steps {
+      ["local-ci"] {
+        check = "mise run ci"
+        exclusive = true
+      }
+    }
+  }
+
+  ["fix"] {
+    fix = true
+    stash = "none"
+    steps = preCommitSteps
+  }
+
+  ["check"] {
+    fix = false
+    steps = preCommitSteps
+  }
+}

@@ -4,7 +4,8 @@ const TRACK_ROW_HEIGHT: f32 = 32.0;
 const TRACK_SEPARATOR_HEIGHT: f32 = 1.0;
 const TRACK_GROUP_TOP_GAP: f32 = 6.0;
 const TRACK_GROUP_HEADER_HEIGHT: f32 = 24.0;
-const TRACK_GROUP_BLOCK_HEIGHT: f32 = TRACK_GROUP_TOP_GAP + TRACK_GROUP_HEADER_HEIGHT + TRACK_SEPARATOR_HEIGHT;
+const TRACK_GROUP_BLOCK_HEIGHT: f32 =
+    TRACK_GROUP_TOP_GAP + TRACK_GROUP_HEADER_HEIGHT + TRACK_SEPARATOR_HEIGHT;
 const TRACK_LIST_OVERSCAN_ROWS: f32 = 4.0;
 const PLAYLIST_SUBMENU_MAX_HEIGHT: f32 = 320.0;
 const PLAYLIST_SUBMENU_GAP: f32 = 1.0;
@@ -19,7 +20,9 @@ enum PlaylistSubmenuKind {
 
 #[derive(Clone, Debug)]
 enum PlaylistSubmenuAction {
-    Add { playlist_index: usize },
+    Add {
+        playlist_index: usize,
+    },
     New,
     Search {
         playlist_index: usize,
@@ -55,10 +58,7 @@ fn load_playlist_submenu_state(context: &egui::Context) -> Option<PlaylistSubmen
     })
 }
 
-fn store_playlist_submenu_state(
-    context: &egui::Context,
-    state: Option<PlaylistSubmenuState>,
-) {
+fn store_playlist_submenu_state(context: &egui::Context, state: Option<PlaylistSubmenuState>) {
     context.data_mut(|data| data.insert_temp(playlist_submenu_state_id(), state));
 }
 
@@ -88,7 +88,9 @@ fn render_playlist_submenu(
         .iter()
         .map(|(label, _)| text_width(ui, label, font_id.clone(), text_color))
         .fold(0.0, f32::max);
-    let content_width = (longest_text_width + button_padding.x * 2.0).ceil().max(1.0);
+    let content_width = (longest_text_width + button_padding.x * 2.0)
+        .ceil()
+        .max(1.0);
     let outer_width = content_width + frame_margin.left + frame_margin.right;
     let gap = ui.spacing().menu_spacing.max(PLAYLIST_SUBMENU_GAP);
     let screen_rect = ui.ctx().screen_rect();
@@ -159,17 +161,24 @@ fn render_playlist_submenu(
     let (pivot, position) = if open_left {
         (
             egui::Align2::RIGHT_TOP,
-            egui::pos2(response.rect.left() - gap, response.rect.top() - frame_margin.top),
+            egui::pos2(
+                response.rect.left() - gap,
+                response.rect.top() - frame_margin.top,
+            ),
         )
     } else {
         (
             egui::Align2::LEFT_TOP,
-            egui::pos2(response.rect.right() + gap, response.rect.top() - frame_margin.top),
+            egui::pos2(
+                response.rect.right() + gap,
+                response.rect.top() - frame_margin.top,
+            ),
         )
     };
 
     let available_content_height =
-        (screen_rect.bottom() - response.rect.top() - frame_margin.bottom).max(ui.spacing().interact_size.y);
+        (screen_rect.bottom() - response.rect.top() - frame_margin.bottom)
+            .max(ui.spacing().interact_size.y);
     let max_height = PLAYLIST_SUBMENU_MAX_HEIGHT.min(available_content_height);
     let popup_entries = entries;
     let mut rendered_entries = Vec::with_capacity(popup_entries.len());
@@ -325,12 +334,7 @@ impl AudioOrbitApp {
             .playlists
             .iter()
             .enumerate()
-            .map(|(index, playlist)| {
-                (
-                    index,
-                    format!("{} {}", playlist.kind.icon(), playlist.name),
-                )
-            })
+            .map(|(index, playlist)| (index, format!("{} {}", playlist.kind.icon(), playlist.name)))
             .collect();
 
         ui.horizontal(|ui| {
@@ -361,14 +365,23 @@ impl AudioOrbitApp {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let search_label = if self.show_track_search {
-                    if compact_controls { ui_icons::icon(Icon::X) } else { self.control_label(Icon::X, "Close search") }
+                    if compact_controls {
+                        ui_icons::icon(Icon::X)
+                    } else {
+                        self.control_label(Icon::X, "Close search")
+                    }
                 } else if compact_controls {
                     ui_icons::icon(Icon::Search)
                 } else {
                     self.control_label(Icon::Search, "Search")
                 };
-                if ui.button(search_label)
-                    .on_hover_text(if self.show_track_search { "Close search" } else { "Search tracks" })
+                if ui
+                    .button(search_label)
+                    .on_hover_text(if self.show_track_search {
+                        "Close search"
+                    } else {
+                        "Search tracks"
+                    })
                     .clicked()
                 {
                     self.show_track_search = !self.show_track_search;
@@ -404,7 +417,8 @@ impl AudioOrbitApp {
                     self.sort_current_favorites_by_added();
                 }
 
-                let has_active_source = self.active_track_path.is_some() || self.active_radio_index.is_some();
+                let has_active_source =
+                    self.active_track_path.is_some() || self.active_radio_index.is_some();
                 let now_playing_label = if compact_controls {
                     ui_icons::icon(Icon::Music)
                 } else {
@@ -412,7 +426,9 @@ impl AudioOrbitApp {
                 };
                 if ui
                     .add_enabled(has_active_source, egui::Button::new(now_playing_label))
-                    .on_hover_text("Switch to the active source and center the currently playing item")
+                    .on_hover_text(
+                        "Switch to the active source and center the currently playing item",
+                    )
                     .clicked()
                 {
                     self.jump_to_now_playing();
@@ -428,7 +444,8 @@ impl AudioOrbitApp {
                 let search_input_width = ui.available_width().max(120.0);
                 let response = ui.add_sized(
                     egui::vec2(search_input_width, ui.spacing().interact_size.y),
-                    egui::TextEdit::singleline(&mut self.track_search_query).hint_text("Search tracks or folders"),
+                    egui::TextEdit::singleline(&mut self.track_search_query)
+                        .hint_text("Search tracks or folders"),
                 );
                 if self.focus_track_search {
                     response.request_focus();
@@ -466,22 +483,36 @@ impl AudioOrbitApp {
             });
             if !query.is_empty() {
                 ui.add_space(2.0);
-                let mode = if self.search_playback_filtered_only { "playback is limited to search results" } else { "playback keeps normal playlist order" };
+                let mode = if self.search_playback_filtered_only {
+                    "playback is limited to search results"
+                } else {
+                    "playback keeps normal playlist order"
+                };
                 ui.small(format!("Filtering tracks by: {query} · {mode}"));
             }
         }
 
         if self.state.playback.repeat_mode == RepeatMode::Selection {
             ui.add_space(4.0);
-            let repeat_order = if self.state.playback.shuffle_enabled { "random playback" } else { "playlist order" };
-            let helper = format!("Repeat selection mode: tick tracks or whole folders for {repeat_order}.");
+            let repeat_order = if self.state.playback.shuffle_enabled {
+                "random playback"
+            } else {
+                "playlist order"
+            };
+            let helper =
+                format!("Repeat selection mode: tick tracks or whole folders for {repeat_order}.");
             let helper_width = ui.available_width().max(32.0);
             let _ = render_ellipsized_single_line(
                 ui,
                 &helper,
                 helper_width,
                 egui::TextStyle::Small.resolve(ui.style()),
-                ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.78),
+                ui.visuals()
+                    .widgets
+                    .inactive
+                    .fg_stroke
+                    .color
+                    .linear_multiply(0.78),
             );
         }
 
@@ -522,7 +553,10 @@ impl AudioOrbitApp {
         if let Some(playlist) = self.state.playlists.get(playlist_index) {
             for index in visible_indexes.iter().copied() {
                 if let Some(track) = playlist.tracks.get(index) {
-                    group_track_indexes.entry(track.group.clone()).or_default().push(index);
+                    group_track_indexes
+                        .entry(track.group.clone())
+                        .or_default()
+                        .push(index);
                 }
             }
         }
@@ -1233,12 +1267,19 @@ impl AudioOrbitApp {
             ui.close_menu();
         }
         let can_move_up = selected_count <= 1 && self.can_move_track_in_current_playlist(index, -1);
-        if ui.add_enabled(can_move_up, egui::Button::new("Move up")).clicked() {
+        if ui
+            .add_enabled(can_move_up, egui::Button::new("Move up"))
+            .clicked()
+        {
             self.move_track_in_current_playlist(index, -1);
             ui.close_menu();
         }
-        let can_move_down = selected_count <= 1 && self.can_move_track_in_current_playlist(index, 1);
-        if ui.add_enabled(can_move_down, egui::Button::new("Move down")).clicked() {
+        let can_move_down =
+            selected_count <= 1 && self.can_move_track_in_current_playlist(index, 1);
+        if ui
+            .add_enabled(can_move_down, egui::Button::new("Move down"))
+            .clicked()
+        {
             self.move_track_in_current_playlist(index, 1);
             ui.close_menu();
         }
@@ -1312,7 +1353,9 @@ impl AudioOrbitApp {
                 available_dj_track_count >= 2 && !self.dj_mix_is_running(),
                 egui::Button::new(ui_icons::label(Icon::Music, "Create DJ mix...")),
             )
-            .on_disabled_hover_text("Select at least two available tracks, or wait for current DJ mix export.")
+            .on_disabled_hover_text(
+                "Select at least two available tracks, or wait for current DJ mix export.",
+            )
             .clicked()
         {
             self.open_dj_mix_builder_for_selection(index);
@@ -1420,7 +1463,13 @@ fn paint_track_row_fast_scroll(
     }
     let title_font = egui::FontId::proportional(14.0);
     let metadata_font = egui::FontId::proportional(12.0);
-    let mut metadata_color = ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.50);
+    let mut metadata_color = ui
+        .visuals()
+        .widgets
+        .inactive
+        .fg_stroke
+        .color
+        .linear_multiply(0.50);
     if missing {
         metadata_color = metadata_color.linear_multiply(0.42);
     }
@@ -1482,7 +1531,11 @@ fn paint_track_row_fast_scroll(
         ui.painter().rect_filled(
             body_rect,
             5.0,
-            if missing { fill.linear_multiply(0.42) } else { fill },
+            if missing {
+                fill.linear_multiply(0.42)
+            } else {
+                fill
+            },
         );
     }
 
@@ -1494,13 +1547,19 @@ fn paint_track_row_fast_scroll(
     };
     let metadata_gap = if metadata.is_empty() { 0.0 } else { 6.0 };
     let title_left = body_rect.left() + body_padding;
-    let title_right = (body_rect.right() - body_padding - metadata_width - metadata_gap)
-        .max(title_left + 24.0);
+    let title_right =
+        (body_rect.right() - body_padding - metadata_width - metadata_gap).max(title_left + 24.0);
     let title_rect = egui::Rect::from_min_max(
         egui::pos2(title_left, body_rect.top()),
         egui::pos2(title_right, body_rect.bottom()),
     );
-    let clipped_title = ellipsize_to_width_exact(ui, title, title_rect.width(), title_font.clone(), text_color);
+    let clipped_title = ellipsize_to_width_exact(
+        ui,
+        title,
+        title_rect.width(),
+        title_font.clone(),
+        text_color,
+    );
     ui.painter().with_clip_rect(title_rect).text(
         egui::pos2(title_rect.left(), title_rect.center().y),
         egui::Align2::LEFT_CENTER,
@@ -1511,7 +1570,10 @@ fn paint_track_row_fast_scroll(
 
     if !metadata.is_empty() {
         let metadata_rect = egui::Rect::from_min_max(
-            egui::pos2(body_rect.right() - body_padding - metadata_width, body_rect.top()),
+            egui::pos2(
+                body_rect.right() - body_padding - metadata_width,
+                body_rect.top(),
+            ),
             egui::pos2(body_rect.right() - body_padding, body_rect.bottom()),
         );
         ui.painter().with_clip_rect(metadata_rect).text(
@@ -1539,7 +1601,10 @@ mod playlist_search_tests {
             Track::from_path(requested.clone(), None, 0),
         ];
 
-        assert_eq!(find_track_by_exact_path_or_file_name(&playlist, &requested), Some(1));
+        assert_eq!(
+            find_track_by_exact_path_or_file_name(&playlist, &requested),
+            Some(1)
+        );
     }
 
     #[test]
@@ -1551,7 +1616,10 @@ mod playlist_search_tests {
             Track::from_path(PathBuf::from("D:/Archive/TRACK.MP3"), None, 0),
         ];
 
-        assert_eq!(find_track_by_exact_path_or_file_name(&playlist, &requested), Some(1));
+        assert_eq!(
+            find_track_by_exact_path_or_file_name(&playlist, &requested),
+            Some(1)
+        );
     }
 
     #[test]
@@ -1564,6 +1632,9 @@ mod playlist_search_tests {
             0,
         )];
 
-        assert_eq!(find_track_by_exact_path_or_file_name(&playlist, &requested), None);
+        assert_eq!(
+            find_track_by_exact_path_or_file_name(&playlist, &requested),
+            None
+        );
     }
 }

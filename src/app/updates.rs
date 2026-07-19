@@ -34,7 +34,8 @@ impl AudioOrbitApp {
         let include_prereleases = self.state.update_settings.include_prereleases;
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
-            let result = updater::check_for_update(include_prereleases).map_err(|error| error.to_string());
+            let result =
+                updater::check_for_update(include_prereleases).map_err(|error| error.to_string());
             let _ = sender.send(result);
         });
 
@@ -50,14 +51,16 @@ impl AudioOrbitApp {
         self.error_message = None;
     }
     pub(crate) fn process_update_events(&mut self) {
-        let update_check_result = self
-            .update_check_receiver
-            .as_ref()
-            .and_then(|receiver| match receiver.try_recv() {
-                Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err("Update check stopped before returning a result.".to_owned())),
-            });
+        let update_check_result =
+            self.update_check_receiver
+                .as_ref()
+                .and_then(|receiver| match receiver.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(mpsc::TryRecvError::Empty) => None,
+                    Err(mpsc::TryRecvError::Disconnected) => Some(Err(
+                        "Update check stopped before returning a result.".to_owned(),
+                    )),
+                });
 
         if let Some(result) = update_check_result {
             self.update_check_receiver = None;
@@ -65,11 +68,25 @@ impl AudioOrbitApp {
             match result {
                 Ok(check) => {
                     if check.is_update_available {
-                        let release_type = if check.prerelease { "Prerelease" } else { "Stable" };
-                        self.status_message = format!("{release_type} update available: v{}.", check.latest_version);
+                        let release_type = if check.prerelease {
+                            "Prerelease"
+                        } else {
+                            "Stable"
+                        };
+                        self.status_message = format!(
+                            "{release_type} update available: v{}.",
+                            check.latest_version
+                        );
                     } else {
-                        let release_type = if check.prerelease { "prerelease" } else { "stable" };
-                        self.status_message = format!("No newer {release_type} release is available. Current version: v{}.", check.current_version);
+                        let release_type = if check.prerelease {
+                            "prerelease"
+                        } else {
+                            "stable"
+                        };
+                        self.status_message = format!(
+                            "No newer {release_type} release is available. Current version: v{}.",
+                            check.current_version
+                        );
                     }
                     self.error_message = None;
                     self.last_update_check = Some(check);
@@ -81,14 +98,16 @@ impl AudioOrbitApp {
             }
         }
 
-        let install_result = self
-            .update_install_receiver
-            .as_ref()
-            .and_then(|receiver| match receiver.try_recv() {
-                Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err("Update installer stopped before replacing the executable.".to_owned())),
-            });
+        let install_result =
+            self.update_install_receiver
+                .as_ref()
+                .and_then(|receiver| match receiver.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(mpsc::TryRecvError::Empty) => None,
+                    Err(mpsc::TryRecvError::Disconnected) => Some(Err(
+                        "Update installer stopped before replacing the executable.".to_owned(),
+                    )),
+                });
 
         if let Some(result) = install_result {
             self.update_install_receiver = None;
@@ -115,7 +134,9 @@ impl AudioOrbitApp {
             return;
         }
         if check.asset_download_url.is_none() {
-            self.error_message = Some("The selected release does not contain a Windows executable asset.".to_owned());
+            self.error_message = Some(
+                "The selected release does not contain a Windows executable asset.".to_owned(),
+            );
             return;
         }
 

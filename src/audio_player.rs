@@ -20,7 +20,8 @@ const RADIO_VISUALIZER_HISTORY_SECONDS: usize = 180;
 // which avoids synthetic/repeating patterns and keeps the strip tied to the
 // decoded audio itself.
 const RADIO_VISUALIZER_BUCKETS_PER_SECOND: usize = 64;
-const RADIO_VISUALIZER_MAX_BUCKETS: usize = RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
+const RADIO_VISUALIZER_MAX_BUCKETS: usize =
+    RADIO_VISUALIZER_HISTORY_SECONDS * RADIO_VISUALIZER_BUCKETS_PER_SECOND;
 // The orbit position changes very slowly compared to the audio sample rate.
 // Updating gain coefficients once per small block avoids expensive sin/cos work
 // for every single decoded frame while keeping the movement perceptually smooth.
@@ -61,7 +62,10 @@ fn live_orbit_gains(settings: DspSettings, frame_index: u64, sample_rate: u32) -
     let mut left = angle.cos();
     let mut right = angle.sin();
 
-    if matches!(settings.mode, crate::dsp::OrbitMode::VirtualEightDirectionOrbit) {
+    if matches!(
+        settings.mode,
+        crate::dsp::OrbitMode::VirtualEightDirectionOrbit
+    ) {
         let depth = phase.cos();
         let rear = (-depth).max(0.0) * (settings.depth_cue_percent.min(100) as f32 / 100.0);
         let shade = 1.0 - rear * 0.22;
@@ -151,7 +155,8 @@ impl<R: Read + Send> Read for RadioStream<R> {
             if let Ok(mut recording) = self.recorder.lock() {
                 if let Some(recording) = recording.as_mut() {
                     if recording.file.write_all(&buffer[..read]).is_ok() {
-                        recording.bytes_written = recording.bytes_written.saturating_add(read as u64);
+                        recording.bytes_written =
+                            recording.bytes_written.saturating_add(read as u64);
                     }
                 }
             }
@@ -332,7 +337,8 @@ fn fill_radio_waveform_gaps(values: &mut [f32]) {
                 let current_value = values[index];
                 for offset in 1..=gap {
                     let mix = offset as f32 / (gap + 1) as f32;
-                    values[previous_index + offset] = previous_value * (1.0 - mix) + current_value * mix;
+                    values[previous_index + offset] =
+                        previous_value * (1.0 - mix) + current_value * mix;
                 }
             }
         }
@@ -342,7 +348,11 @@ fn fill_radio_waveform_gaps(values: &mut [f32]) {
 }
 
 fn silence_adjusted_position(seconds: f32, silence_ranges: Option<&[(f32, f32)]>) -> f32 {
-    let mut position = if seconds.is_finite() { seconds.max(0.0) } else { 0.0 };
+    let mut position = if seconds.is_finite() {
+        seconds.max(0.0)
+    } else {
+        0.0
+    };
     let Some(ranges) = silence_ranges else {
         return position;
     };
@@ -362,7 +372,10 @@ fn silence_adjusted_position(seconds: f32, silence_ranges: Option<&[(f32, f32)]>
     position
 }
 
-fn silence_ranges_to_frame_ranges(ranges: Option<&[(f32, f32)]>, sample_rate: u32) -> Vec<(u64, u64)> {
+fn silence_ranges_to_frame_ranges(
+    ranges: Option<&[(f32, f32)]>,
+    sample_rate: u32,
+) -> Vec<(u64, u64)> {
     let Some(ranges) = ranges else {
         return Vec::new();
     };
@@ -397,7 +410,12 @@ struct LiveFileSource<S> {
 }
 
 impl<S: Source<Item = f32>> LiveFileSource<S> {
-    fn new(inner: S, settings: DspSettings, start_seconds: f32, silence_ranges: Option<Vec<(f32, f32)>>) -> Self {
+    fn new(
+        inner: S,
+        settings: DspSettings,
+        start_seconds: f32,
+        silence_ranges: Option<Vec<(f32, f32)>>,
+    ) -> Self {
         let input_channels = inner.channels().max(1);
         let sample_rate = inner.sample_rate().max(1);
         let start_seconds = silence_adjusted_position(start_seconds, silence_ranges.as_deref());
@@ -572,11 +590,7 @@ struct LiveRadioSource<S> {
 }
 
 impl<S: Source<Item = f32>> LiveRadioSource<S> {
-    fn new(
-        inner: S,
-        settings: DspSettings,
-        visualizer: RadioVisualizerHandle,
-    ) -> Self {
+    fn new(inner: S, settings: DspSettings, visualizer: RadioVisualizerHandle) -> Self {
         let input_channels = inner.channels().max(1);
         let sample_rate = inner.sample_rate().max(1);
         Self {
@@ -590,7 +604,10 @@ impl<S: Source<Item = f32>> LiveRadioSource<S> {
             cached_gains: LiveOrbitGains::default(),
             cached_gains_until_frame: 0,
             visualizer,
-            visualizer_analyzer: LiveRadioWaveformAnalyzer::new(sample_rate, RADIO_VISUALIZER_BUCKETS_PER_SECOND),
+            visualizer_analyzer: LiveRadioWaveformAnalyzer::new(
+                sample_rate,
+                RADIO_VISUALIZER_BUCKETS_PER_SECOND,
+            ),
         }
     }
 
@@ -810,9 +827,10 @@ impl AudioPlayer {
             self.radio_visualizer = Arc::new(Mutex::new(RadioVisualizerState::default()));
         }
         let visualizer = Arc::clone(&self.radio_visualizer);
-        let radio_source = LiveRadioSource::new(decoder.convert_samples::<f32>(), settings, visualizer);
-        let sink = Sink::try_new(&self.stream_handle)
-            .context("failed to create audio playback sink")?;
+        let radio_source =
+            LiveRadioSource::new(decoder.convert_samples::<f32>(), settings, visualizer);
+        let sink =
+            Sink::try_new(&self.stream_handle).context("failed to create audio playback sink")?;
         sink.set_volume(self.volume_gain());
         if fade_seconds > 0.05 {
             sink.append(FadeInSource::new(radio_source, fade_seconds));
@@ -867,8 +885,12 @@ impl AudioPlayer {
             }
         }
 
-        fs::create_dir_all(output_folder)
-            .with_context(|| format!("failed to create recording folder: {}", output_folder.display()))?;
+        fs::create_dir_all(output_folder).with_context(|| {
+            format!(
+                "failed to create recording folder: {}",
+                output_folder.display()
+            )
+        })?;
         let path = unique_recording_path(output_folder, "audio-orbit-records-recording", "part");
         let file = File::create(&path)
             .with_context(|| format!("failed to create recording file: {}", path.display()))?;
@@ -918,7 +940,11 @@ impl AudioPlayer {
         }))
     }
 
-    pub fn radio_visualizer_frame(&self, requested_points: usize, visible_seconds: f32) -> RadioVisualizerFrame {
+    pub fn radio_visualizer_frame(
+        &self,
+        requested_points: usize,
+        visible_seconds: f32,
+    ) -> RadioVisualizerFrame {
         let Ok(mut state) = self.radio_visualizer.lock() else {
             return RadioVisualizerFrame::default();
         };
@@ -928,8 +954,7 @@ impl AudioPlayer {
 
         let now = Instant::now();
         let requested_points = requested_points.clamp(1, RADIO_VISUALIZER_MAX_BUCKETS);
-        let visible_seconds = visible_seconds
-            .clamp(1.0, RADIO_VISUALIZER_HISTORY_SECONDS as f32);
+        let visible_seconds = visible_seconds.clamp(1.0, RADIO_VISUALIZER_HISTORY_SECONDS as f32);
         let bucket_seconds = (visible_seconds / requested_points as f32).max(1.0 / 240.0);
         let max_age = visible_seconds + bucket_seconds * 2.0;
 
@@ -1001,15 +1026,25 @@ impl AudioPlayer {
         nonzero.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
         let last = nonzero.len().saturating_sub(1);
         let target_floor = nonzero[((last as f32 * 0.06) as usize).min(last)].min(0.22);
-        let target_peak = nonzero[((last as f32 * 0.94) as usize).min(last)].max(target_floor + 0.18);
+        let target_peak =
+            nonzero[((last as f32 * 0.94) as usize).min(last)].max(target_floor + 0.18);
 
         // Slow range tracking gives radio a full-track-like overview feel without
         // making every UI frame rescale the entire strip.
-        let floor_blend = if target_floor > state.display_floor { 0.010 } else { 0.040 };
-        state.display_floor = (state.display_floor * (1.0 - floor_blend) + target_floor * floor_blend)
+        let floor_blend = if target_floor > state.display_floor {
+            0.010
+        } else {
+            0.040
+        };
+        state.display_floor = (state.display_floor * (1.0 - floor_blend)
+            + target_floor * floor_blend)
             .clamp(0.0, 0.24);
 
-        let peak_blend = if target_peak > state.display_peak { 0.040 } else { 0.010 };
+        let peak_blend = if target_peak > state.display_peak {
+            0.040
+        } else {
+            0.010
+        };
         state.display_peak = (state.display_peak * (1.0 - peak_blend) + target_peak * peak_blend)
             .max(state.display_floor + 0.16)
             .clamp(0.22, 1.0);
@@ -1031,7 +1066,6 @@ impl AudioPlayer {
         RadioVisualizerFrame { bars }
     }
 
-
     pub fn play_file_streaming_with_cached_waveform_and_crossfade(
         &mut self,
         path: &Path,
@@ -1051,7 +1085,8 @@ impl AudioPlayer {
         } else {
             0.0
         };
-        let start_seconds = silence_adjusted_position(start_seconds, cached_silence_ranges.as_deref());
+        let start_seconds =
+            silence_adjusted_position(start_seconds, cached_silence_ranges.as_deref());
         let file = File::open(path)
             .with_context(|| format!("failed to open audio file: {}", path.display()))?;
         let mut decoder = Decoder::new(BufReader::new(file))
@@ -1099,9 +1134,7 @@ impl AudioPlayer {
             path,
             settings,
             start_seconds,
-            decoder
-                .convert_samples::<f32>()
-                .skip_duration(seek_to),
+            decoder.convert_samples::<f32>().skip_duration(seek_to),
             total_duration,
             input_channels,
             sample_rate,
@@ -1132,7 +1165,12 @@ impl AudioPlayer {
         let remaining_duration = total_duration
             .map(|duration| duration.saturating_sub(Duration::from_secs_f32(start_seconds)))
             .unwrap_or(Duration::ZERO);
-        let source = LiveFileSource::new(source, settings, start_seconds, cached_silence_ranges.clone());
+        let source = LiveFileSource::new(
+            source,
+            settings,
+            start_seconds,
+            cached_silence_ranges.clone(),
+        );
         let fade_seconds = crossfade_seconds.max(0.0);
 
         if fade_seconds > 0.05 {
@@ -1144,8 +1182,8 @@ impl AudioPlayer {
             self.stop();
         }
 
-        let sink = Sink::try_new(&self.stream_handle)
-            .context("failed to create audio playback sink")?;
+        let sink =
+            Sink::try_new(&self.stream_handle).context("failed to create audio playback sink")?;
         sink.set_volume(self.volume_gain());
         if fade_seconds > 0.05 {
             sink.append(FadeInSource::new(source, fade_seconds));
@@ -1164,7 +1202,9 @@ impl AudioPlayer {
         self.current_settings = Some(settings);
         self.current_radio_url = None;
 
-        let original_duration_seconds = total_duration.map(|duration| duration.as_secs_f32()).unwrap_or(0.0);
+        let original_duration_seconds = total_duration
+            .map(|duration| duration.as_secs_f32())
+            .unwrap_or(0.0);
         Ok(PlaybackInfo {
             path: path.to_path_buf(),
             original_duration_seconds,
@@ -1212,8 +1252,16 @@ impl AudioPlayer {
         } = prepared;
 
         self.stop();
-        let rendered_duration = Duration::from_secs_f32(render_info.rendered_duration_seconds.max(0.0));
-        self.play_processed_samples(processed_samples, sample_rate, rendered_duration, &path, settings, start_seconds)?;
+        let rendered_duration =
+            Duration::from_secs_f32(render_info.rendered_duration_seconds.max(0.0));
+        self.play_processed_samples(
+            processed_samples,
+            sample_rate,
+            rendered_duration,
+            &path,
+            settings,
+            start_seconds,
+        )?;
 
         Ok(playback_info(&path, render_info))
     }
@@ -1226,16 +1274,21 @@ impl AudioPlayer {
         let compensated_start_seconds = prepared.start_seconds + render_elapsed_seconds.max(0.0);
 
         if render_elapsed_seconds > 0.025 {
-            let trim_frames = (render_elapsed_seconds * prepared.sample_rate as f32).round().max(0.0) as usize;
+            let trim_frames = (render_elapsed_seconds * prepared.sample_rate as f32)
+                .round()
+                .max(0.0) as usize;
             let trim_samples = (trim_frames * 2).min(prepared.processed_samples.len());
             if trim_samples > 0 && trim_samples < prepared.processed_samples.len() {
                 prepared.processed_samples.drain(0..trim_samples);
-                prepared.render_info.rendered_duration_seconds = (prepared.render_info.rendered_duration_seconds - render_elapsed_seconds).max(0.0);
+                prepared.render_info.rendered_duration_seconds =
+                    (prepared.render_info.rendered_duration_seconds - render_elapsed_seconds)
+                        .max(0.0);
             }
         }
 
         self.stop();
-        let rendered_duration = Duration::from_secs_f32(prepared.render_info.rendered_duration_seconds.max(0.0));
+        let rendered_duration =
+            Duration::from_secs_f32(prepared.render_info.rendered_duration_seconds.max(0.0));
         self.play_processed_samples(
             prepared.processed_samples,
             prepared.sample_rate,
@@ -1257,7 +1310,11 @@ impl AudioPlayer {
             .max(0.0)
             .min(prepared.render_info.rendered_duration_seconds.max(0.0));
 
-        apply_fade_in(&mut prepared.processed_samples, prepared.sample_rate, fade_seconds);
+        apply_fade_in(
+            &mut prepared.processed_samples,
+            prepared.sample_rate,
+            fade_seconds,
+        );
 
         if fade_seconds > 0.05 {
             let _ = self.stop_radio_recording();
@@ -1268,7 +1325,8 @@ impl AudioPlayer {
             self.stop();
         }
 
-        let rendered_duration = Duration::from_secs_f32(prepared.render_info.rendered_duration_seconds.max(0.0));
+        let rendered_duration =
+            Duration::from_secs_f32(prepared.render_info.rendered_duration_seconds.max(0.0));
         self.play_processed_samples(
             prepared.processed_samples,
             prepared.sample_rate,
@@ -1344,7 +1402,9 @@ impl AudioPlayer {
         let position = self.current_start_offset_seconds + elapsed.as_secs_f32();
 
         match self.current_duration {
-            Some(duration) => position.min(self.current_start_offset_seconds + duration.as_secs_f32()),
+            Some(duration) => {
+                position.min(self.current_start_offset_seconds + duration.as_secs_f32())
+            }
             None => position,
         }
     }
@@ -1371,8 +1431,8 @@ impl AudioPlayer {
         settings: DspSettings,
         start_seconds: f32,
     ) -> Result<()> {
-        let sink = Sink::try_new(&self.stream_handle)
-            .context("failed to create audio playback sink")?;
+        let sink =
+            Sink::try_new(&self.stream_handle).context("failed to create audio playback sink")?;
         let source = SamplesBuffer::new(2, sample_rate, samples);
 
         sink.set_volume(self.volume_gain());

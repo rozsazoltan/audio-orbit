@@ -1,6 +1,5 @@
 # Contributing to Audio Orbit
 
-
 ## Development goals
 
 Audio Orbit should stay lightweight, portable, and predictable. Prefer incremental changes over rewrites.
@@ -13,28 +12,52 @@ Important priorities:
 
 ## Local development
 
-Install a recent Rust toolchain and build the project with Cargo.
+Project uses [mise](https://mise.jdx.dev/) for Rust and developer-tool installation, task execution, and local/CI parity.
+
+Install configured tools and repository hooks:
 
 ```sh
-cargo check
-cargo build
+mise install
+mise run hooks:install
 ```
 
-For WSL → Windows sync workflows, edit files in WSL, let Mutagen sync them into the Windows checkout, then run the dev watcher from the Windows checkout, for example `D:\github\rozsazoltan\audio-orbit`:
+`mise install` also installs pinned Clang 18.1.8. Project environment sets `LIBCLANG_PATH` to mise-managed native library directory, so `signalsmith-stretch` can generate bindings on Windows, Linux, and macOS without separate LLVM setup. Run Cargo commands from mise-activated shell or through `mise exec -- cargo ...`.
+
+Available validation commands:
+
+```sh
+mise run format          # apply Rust, TOML, and Pkl formatting
+mise run format:check    # verify Rust, TOML, and Pkl formatting
+mise run tooling:check   # validate mise tasks and hk/Pkl config
+mise run check           # cargo check --locked --all-targets
+mise run clippy          # cargo clippy --locked --all-targets
+mise run test            # cargo nextest run --locked --all-targets
+mise run test:doc        # doctests not run by nextest
+mise run ci              # complete suite also used by GitHub Actions
+```
+
+Git hooks use `hk`:
+
+- `pre-commit` fixes Rust, TOML, and Pkl formatting; validates TOML and hk config; checks merge markers and private keys
+- `pre-push` runs complete `mise run ci` suite
+- `mise run hooks:check` checks all tracked files without changing them
+- `mise run hooks:fix` applies supported fixes across all tracked files
+
+`HK_MISE=1` is used when installing hooks, so generated hook commands execute through `mise` even when shell activation is unavailable. Do not install both global and repository-local hk hooks, because Git can execute both.
+
+For WSL → Windows sync workflows, edit files in WSL, let Mutagen sync them into Windows checkout, then run dev watcher from Windows checkout, for example `D:\github\rozsazoltan\audio-orbit`:
 
 ```powershell
 .\scripts\dev.ps1
 ```
 
-You can also run the same watcher directly:
+You can also run same watcher directly:
 
 ```sh
 cargo dev
 ```
 
-`cargo dev` is a project-local Cargo alias that runs the built-in `audio-orbit-dev` helper. It does not require `cargo-watch`. The helper uses polling-friendly file watching for Mutagen/WSL sync workflows, watches `src`, `Cargo.toml`, `Cargo.lock`, `assets`, and `build.rs`, ignores `target` and portable app data folders, rebuilds `audio-orbit`, and restarts the desktop app after synced file changes.
-
-
+`cargo dev` is project-local Cargo alias running built-in `audio-orbit-dev` helper. It does not require `cargo-watch`. Helper uses polling-friendly file watching for Mutagen/WSL sync workflows, watches `src`, `Cargo.toml`, `Cargo.lock`, `assets`, and `build.rs`, ignores `target` and portable app data folders, rebuilds `audio-orbit`, and restarts desktop app after synced file changes.
 
 ## Project structure
 
@@ -78,21 +101,12 @@ refactor(ui): separate settings sections
 
 
 
-```text
-```
-
-The version metadata should be committed as:
-
-```text
-```
-
-
 
 ## Pull request checklist
 
 Before merging, check:
 
-- `cargo check` passes
+- `mise run ci` passes
 - no unexpected version number changes were committed
 - no unused Rust warnings were introduced
 - playback still works after profile changes, seeking, crossfade, and media key commands
@@ -100,8 +114,3 @@ Before merging, check:
 ## License
 
 By contributing, you agree that your contribution is licensed under the GNU Affero General Public License v3.0 or later.
-
-
-## Development runner
-
-Use `cargo dev` from the repository root. The repository contains both `.cargo/config.toml` and `.cargo/config` so Cargo uses the built-in polling dev runner instead of requiring the external `cargo-watch` subcommand. On Windows, `scripts/dev.ps1` runs the same project-local runner directly with `cargo run --bin audio-orbit-dev --`.

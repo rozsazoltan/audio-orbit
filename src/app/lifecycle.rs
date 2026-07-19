@@ -18,7 +18,6 @@ impl Drop for AudioOrbitApp {
     }
 }
 
-
 impl AudioOrbitApp {
     fn next_repaint_interval(&self, context: &egui::Context) -> Duration {
         let has_live_input = context.input(|input| {
@@ -45,7 +44,11 @@ impl AudioOrbitApp {
             return RADIO_REPAINT_INTERVAL;
         }
 
-        if self.player.as_ref().map(AudioPlayer::is_playing).unwrap_or(false)
+        if self
+            .player
+            .as_ref()
+            .map(AudioPlayer::is_playing)
+            .unwrap_or(false)
             || self.pending_track_switch.is_some()
         {
             return PLAYBACK_REPAINT_INTERVAL;
@@ -88,7 +91,10 @@ impl AudioOrbitApp {
             || self.update_install_receiver.is_some()
             || self.radio_title_receiver.is_some()
             || self.pending_profile_apply_at.is_some()
-            || self.profile_apply_applied_until.map(|until| until > Instant::now()).unwrap_or(false)
+            || self
+                .profile_apply_applied_until
+                .map(|until| until > Instant::now())
+                .unwrap_or(false)
             || self.detected_output_change.is_some()
             || self.focus_track_search
             || self.focus_radio_search
@@ -135,9 +141,10 @@ impl eframe::App for AudioOrbitApp {
             context.copy_text(text);
         }
 
-        let now_playing_response = egui::TopBottomPanel::top("now_playing_panel").show(context, |ui| {
-            self.render_now_playing_panel(ui);
-        });
+        let now_playing_response =
+            egui::TopBottomPanel::top("now_playing_panel").show(context, |ui| {
+                self.render_now_playing_panel(ui);
+            });
         self.handle_top_panel_volume_wheel(&now_playing_response.response, context);
 
         if !self.player_only_mode && self.show_library_panel {

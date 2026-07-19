@@ -38,7 +38,19 @@ impl AudioOrbitApp {
             return;
         }
 
-        let (space, enter, stop, next, previous, seek_forward, seek_backward, search, player_only, library, profiles) = context.input(|input| {
+        let (
+            space,
+            enter,
+            stop,
+            next,
+            previous,
+            seek_forward,
+            seek_backward,
+            search,
+            player_only,
+            library,
+            profiles,
+        ) = context.input(|input| {
             (
                 input.key_pressed(egui::Key::Space),
                 input.key_pressed(egui::Key::Enter),

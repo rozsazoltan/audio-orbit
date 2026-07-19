@@ -23,10 +23,7 @@ impl AudioOrbitApp {
                     .tracks
                     .iter()
                     .filter(|track| !track.missing && track.path.is_file())
-                    .map(|track| DjMixTrack {
-                        path: track.path.clone(),
-                        title: track.title.clone(),
-                    })
+                    .map(|track| DjMixTrack::new(track.path.clone(), track.title.clone()))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -59,10 +56,7 @@ impl AudioOrbitApp {
                             && !track.missing
                             && track.path.is_file()
                     })
-                    .map(|track| DjMixTrack {
-                        path: track.path.clone(),
-                        title: track.title.clone(),
-                    })
+                    .map(|track| DjMixTrack::new(track.path.clone(), track.title.clone()))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -86,6 +80,8 @@ impl AudioOrbitApp {
             stage: "Ready".to_owned(),
             progress: 0.0,
             output_path: None,
+            report_path: None,
+            diagnostics_summary: None,
             completed: false,
         });
     }
@@ -120,15 +116,34 @@ impl AudioOrbitApp {
                 }
                 DjMixEvent::Completed {
                     output_path,
+                    report_path,
                     track_count,
+                    duration_seconds,
+                    integrated_lufs,
+                    true_peak_dbfs,
+                    diagnostics_summary,
                 } => {
                     if let Some(modal) = self.dj_mix_modal.as_mut() {
-                        modal.stage = format!("Complete — {track_count} tracks");
+                        modal.stage = format!(
+                            "Complete — {track_count} tracks, {:.1} min",
+                            duration_seconds / 60.0
+                        );
                         modal.progress = 1.0;
                         modal.output_path = Some(output_path.clone());
+                        modal.report_path = Some(report_path);
+                        modal.diagnostics_summary = Some(diagnostics_summary);
                         modal.completed = true;
                     }
-                    self.status_message = format!("DJ mix saved: {}", output_path.display());
+                    self.status_message = format!(
+                        "DJ mix saved: {}{}{}",
+                        output_path.display(),
+                        integrated_lufs
+                            .map(|value| format!(" — {value:.1} LUFS"))
+                            .unwrap_or_default(),
+                        true_peak_dbfs
+                            .map(|value| format!(", {value:.1} dBTP"))
+                            .unwrap_or_default(),
+                    );
                     self.dj_mix_event_receiver = None;
                     self.dj_mix_cancel_flag = None;
                 }
@@ -208,6 +223,8 @@ impl AudioOrbitApp {
             modal.stage = "Starting analysis...".to_owned();
             modal.progress = 0.0;
             modal.output_path = None;
+            modal.report_path = None;
+            modal.diagnostics_summary = None;
             modal.completed = false;
         }
         thread::spawn(move || dj_mix::export_mix(request, sender, worker_cancel));
@@ -274,7 +291,7 @@ impl AudioOrbitApp {
                         outer_padding.x,
                         Icon::Music,
                         "DJ Mix Builder",
-                        "Build one low-memory MP3 mix from selected tracks. Keep simple crossfades or let built-in Rust Smart DJ engine plan beatmatched transitions with filter sweeps, loop rolls, echo tails, and bass swaps.",
+                        "Build one deterministic MP3 mix from selected tracks. Keep simple crossfades or use Smart DJ for phrase-aligned section selection, pitch-preserving tempo sync, filtered equal-power blends, and bass swaps.",
                     ) {
                         if running {
                             cancel_requested = true;
@@ -311,7 +328,7 @@ impl AudioOrbitApp {
                                         });
                                         ui.small(match modal.options.style {
                                             DjMixStyle::Crossfade => "Simple equal-power overlap. No tempo change, loop roll, echo, or filter performance.",
-                                            DjMixStyle::SmartDj => "Autonomous Rust DJ engine: pairwise BPM sync up to ±6%, beat alignment with phrase-length transitions, filter sweep, loop roll, echo tail, and optional bass swap.",
+                                            DjMixStyle::SmartDj => "Deterministic offline DJ engine: pairwise BPM sync up to ±6%, pitch-preserving stretch, useful section selection, 8/16/32-bar phrase alignment, restrained filtering, and optional bass swap.",
                                         });
                                         ui.add_space(6.0);
                                         ui.horizontal_wrapped(|ui| {
@@ -323,12 +340,12 @@ impl AudioOrbitApp {
                                         });
                                         ui.horizontal_wrapped(|ui| {
                                             ui.label("Transition:");
-                                            for beats in [8, 16, 32] {
+                                            for bars in [8, 16, 32] {
                                                 ui.add_enabled_ui(!running, |ui| {
                                                     ui.selectable_value(
-                                                        &mut modal.options.transition_beats,
-                                                        beats,
-                                                        format!("{beats} beats"),
+                                                        &mut modal.options.transition_bars,
+                                                        bars,
+                                                        format!("{bars} bars"),
                                                     );
                                                 });
                                             }
@@ -344,7 +361,18 @@ impl AudioOrbitApp {
                                                 });
                                             }
                                         });
-                                        ui.small("Both engines render as a stream. Only active transition buffers remain in RAM.");
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label("Target length:");
+                                            ui.add_enabled(
+                                                !running,
+                                                egui::DragValue::new(&mut modal.options.target_minutes)
+                                                    .range(1.0..=180.0)
+                                                    .speed(1.0)
+                                                    .suffix(" min"),
+                                            );
+                                            ui.small("Auto highlight sections are shortened to approach target.");
+                                        });
+                                        ui.small("Both engines render outside playback callback. Only active section and transition buffers remain in RAM.");
                                     });
 
                                     ui.add_space(8.0);
@@ -366,7 +394,10 @@ impl AudioOrbitApp {
                                                 }
                                             },
                                         );
-                                        ui.small("Choose options, then click Export DJ mix... and select the output MP3 file.");
+                                        ui.small("Choose target length and section mode per track, then export MP3. A deterministic .dj-plan.json report is saved beside it.");
+                                        if let Some(summary) = &modal.diagnostics_summary {
+                                            ui.small(summary);
+                                        }
                                         if modal.tracks.len() < 2 {
                                             ui.small("Choose at least two available tracks.");
                                         }
@@ -381,6 +412,11 @@ impl AudioOrbitApp {
                                                         play_path = Some(path.clone());
                                                     }
                                                     if ui.button(ui_icons::label(Icon::FolderOpen, "Show MP3")).clicked() {
+                                                        reveal_path = Some(path);
+                                                    }
+                                                }
+                                                if let Some(path) = modal.report_path.clone() {
+                                                    if ui.button("Show diagnostics").clicked() {
                                                         reveal_path = Some(path);
                                                     }
                                                 }
@@ -433,25 +469,68 @@ impl AudioOrbitApp {
                                             .show(ui, |ui| {
                                                 let mut move_action = None;
                                                 let mut remove_index = None;
-                                                for index in 0..modal.tracks.len() {
+                                                let track_count = modal.tracks.len();
+                                                for index in 0..track_count {
                                                     let title = modal.tracks[index].title.clone();
                                                     let path = modal.tracks[index].path.clone();
+                                                    let mut section_mode = modal.tracks[index].section_mode;
+                                                    let mut favorite_start = modal.tracks[index].favorite_start_seconds;
+                                                    let mut favorite_end = modal.tracks[index].favorite_end_seconds;
                                                     ui.horizontal(|ui| {
                                                         ui.label(format!("{}.", index + 1));
                                                         ui.vertical(|ui| {
                                                             ui.label(ellipsize_chars(&title, 72));
                                                             ui.small(ellipsize_chars(&path.display().to_string(), 96));
+                                                            ui.horizontal_wrapped(|ui| {
+                                                                ui.add_enabled_ui(!running, |ui| {
+                                                                    ui.selectable_value(
+                                                                        &mut section_mode,
+                                                                        DjTrackSectionMode::AutoHighlight,
+                                                                        "Auto highlight",
+                                                                    );
+                                                                    ui.selectable_value(
+                                                                        &mut section_mode,
+                                                                        DjTrackSectionMode::FullTrack,
+                                                                        "Full track",
+                                                                    );
+                                                                    ui.selectable_value(
+                                                                        &mut section_mode,
+                                                                        DjTrackSectionMode::FavoriteRange,
+                                                                        "Favorite range",
+                                                                    );
+                                                                });
+                                                            });
+                                                            if section_mode == DjTrackSectionMode::FavoriteRange {
+                                                                ui.horizontal_wrapped(|ui| {
+                                                                    ui.label("Start:");
+                                                                    ui.add_enabled(
+                                                                        !running,
+                                                                        egui::DragValue::new(&mut favorite_start)
+                                                                            .range(0.0..=86_400.0)
+                                                                            .speed(1.0)
+                                                                            .suffix(" s"),
+                                                                    );
+                                                                    ui.label("End:");
+                                                                    ui.add_enabled(
+                                                                        !running,
+                                                                        egui::DragValue::new(&mut favorite_end)
+                                                                            .range(0.0..=86_400.0)
+                                                                            .speed(1.0)
+                                                                            .suffix(" s"),
+                                                                    );
+                                                                });
+                                                            }
                                                         });
                                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                             if ui
-                                                                .add_enabled(!running && modal.tracks.len() > 2, egui::Button::new(ui_icons::icon(Icon::X)))
+                                                                .add_enabled(!running && track_count > 2, egui::Button::new(ui_icons::icon(Icon::X)))
                                                                 .on_hover_text("Remove from mix")
                                                                 .clicked()
                                                             {
                                                                 remove_index = Some(index);
                                                             }
                                                             if ui
-                                                                .add_enabled(!running && index + 1 < modal.tracks.len(), egui::Button::new(ui_icons::icon(Icon::ArrowDown)))
+                                                                .add_enabled(!running && index + 1 < track_count, egui::Button::new(ui_icons::icon(Icon::ArrowDown)))
                                                                 .on_hover_text("Move down")
                                                                 .clicked()
                                                             {
@@ -466,7 +545,10 @@ impl AudioOrbitApp {
                                                             }
                                                         });
                                                     });
-                                                    if index + 1 < modal.tracks.len() {
+                                                    modal.tracks[index].section_mode = section_mode;
+                                                    modal.tracks[index].favorite_start_seconds = favorite_start.max(0.0);
+                                                    modal.tracks[index].favorite_end_seconds = favorite_end.max(0.0);
+                                                    if index + 1 < track_count {
                                                         ui.separator();
                                                     }
                                                 }

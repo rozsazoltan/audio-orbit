@@ -291,19 +291,29 @@ impl AudioOrbitApp {
 
         geometry
             .filter(WindowGeometry::is_valid)
-            .map(|geometry| egui::vec2(geometry.width.max(min_size.x), geometry.height.max(min_size.y)))
+            .map(|geometry| {
+                egui::vec2(
+                    geometry.width.max(min_size.x),
+                    geometry.height.max(min_size.y),
+                )
+            })
             .unwrap_or_else(|| default_window_size_for_mode(player_only_mode))
     }
     pub(crate) fn apply_window_mode_size(&self, context: &egui::Context, player_only_mode: bool) {
-        context.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min_window_size_for_mode(player_only_mode)));
-        context.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.saved_window_size_for_mode(player_only_mode)));
+        context.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(
+            min_window_size_for_mode(player_only_mode),
+        ));
+        context.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+            self.saved_window_size_for_mode(player_only_mode),
+        ));
     }
     pub(crate) fn toggle_player_only_mode(&mut self, context: &egui::Context) {
         self.remember_window_geometry(context);
         self.player_only_mode = !self.player_only_mode;
         self.state.ui.player_only_mode = self.player_only_mode;
         self.apply_window_mode_size(context, self.player_only_mode);
-        self.suppress_window_geometry_save_until = Some(Instant::now() + Duration::from_millis(450));
+        self.suppress_window_geometry_save_until =
+            Some(Instant::now() + Duration::from_millis(450));
         self.save_state_silently();
     }
     pub(crate) fn open_panel_modal(&mut self, panel: AppPanelModal) {
@@ -390,7 +400,9 @@ impl AudioOrbitApp {
         if self.status_message != self.status_last_seen {
             self.status_last_seen = self.status_message.clone();
             self.status_updated_at = Instant::now();
-        } else if !self.status_message.is_empty() && self.status_updated_at.elapsed() >= Duration::from_secs(10) {
+        } else if !self.status_message.is_empty()
+            && self.status_updated_at.elapsed() >= Duration::from_secs(10)
+        {
             self.status_message.clear();
             self.status_last_seen.clear();
             self.status_updated_at = Instant::now();
@@ -399,7 +411,9 @@ impl AudioOrbitApp {
         if self.error_message != self.error_last_seen {
             self.error_last_seen = self.error_message.clone();
             self.error_updated_at = Instant::now();
-        } else if self.error_message.is_some() && self.error_updated_at.elapsed() >= Duration::from_secs(10) {
+        } else if self.error_message.is_some()
+            && self.error_updated_at.elapsed() >= Duration::from_secs(10)
+        {
             self.error_message = None;
             self.error_last_seen = None;
             self.error_updated_at = Instant::now();

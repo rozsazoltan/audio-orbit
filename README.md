@@ -66,7 +66,7 @@ Audio Orbit supports common desktop-player behavior:
 - play saved internet radio streams from the Radio tab
 - favorite radio stations and filter the Radio list to favorites
 - select multiple local tracks with Ctrl-click or Shift-click, then copy, add, delete, or mix them together
-- export a low-memory DJ-style MP3 mix with BPM analysis, classic pitch sync, beat-aligned crossfades, bass swap, and loudness leveling
+- export deterministic DJ-style MP3 mixes from full tracks or selected highlights with BPM/downbeat analysis, pitch-preserving tempo sync, phrase-aligned bass swaps, EBU R128 loudness measurement, and transition diagnostics
 - show a live radio visualizer with elapsed listening time
 - record the original internet radio stream bytes to timestamped files
 - remember the window size and position between app launches
@@ -211,14 +211,29 @@ Use **DJ mix...** in Library panel to mix current playlist, or select at least t
 
 DJ Mix Builder offers two engines:
 
-- **Crossfade** keeps original playback speed and joins tracks with a simple equal-power overlap. Optional bass swap and loudness leveling remain available.
-- **Smart DJ** uses the built-in Rust DJ engine to plan pairwise BPM matching, beat-aligned transitions sized to 8, 16, or 32-beat phrases, filter sweeps, loop rolls, echo tails, and bass swaps. Classic pitch sync is capped at ±6% to keep CPU usage and artifacts controlled.
+- **Crossfade** keeps original playback speed and joins selected sections with a simple equal-power overlap.
+- **Smart DJ** analyzes BPM, beat phase, downbeat phase, silence, energy, EBU R128 loudness, sample peak, and true peak. It selects phrase-aligned sections, applies pitch-preserving tempo sync through Signalsmith Stretch, then renders equal-power transitions with restrained filtering and optional bass swap.
 
-Both engines support manual ordering or BPM-based smart ordering, 8/16/32-beat transitions, optional loudness leveling, optional bass swap, and 192/256/320 kbps MP3 export. Export runs in background with progress and cancellation. Audio is decoded and encoded as stream; only transition buffers stay in memory. Track analysis is cached in `.audio-orbit-data/dj-analysis-cache.json` and reused while source file size and modification time stay unchanged. Smart DJ needs no external executable or DLL.
+Set target mix length from 1 to 180 minutes. Each track supports:
 
-After export completes, use **Play** to add the generated MP3 to **Temporary playback** and start it immediately. **Show MP3** still reveals the saved file in File Explorer.
+- **Auto highlight**: select a deterministic energetic section and align its boundaries to 8/16/32-bar phrases.
+- **Full track**: keep complete playable track after detected leading/trailing silence.
+- **Favorite range**: use manually entered start and end seconds, then phrase-align safe boundaries.
 
-Smart DJ classic pitch sync changes playback speed and pitch together, matching traditional pitch-controlled DJ playback while keeping CPU use low. Analysis and rendering use one below-normal-priority worker on Windows. Automatic BPM and beat detection can need manual track ordering for difficult intros or irregular music. Builder does not perform key-lock/time-stretch, harmonic key matching, stem separation, or manual beat-grid editing.
+Smart order keeps first track and chooses following tracks by BPM compatibility and analysis confidence. Tempo change is capped at ±6%. Loudness leveling targets approximately -14 LUFS while peak-aware gain and output limiting prevent clipping. MP3 output uses 192/256/320 kbps.
+
+Export runs in background with progress and cancellation. Expensive decoding, analysis, planning, time stretching, and encoding never run in real-time playback callback. Analysis cache is versioned and invalidated by source file size, modification time, and analyzer version.
+
+Every completed export creates:
+
+```text
+mix-name.mp3
+mix-name.dj-plan.json
+```
+
+Diagnostics report contains selected sections, BPM/downbeat estimates, tempo ratios, gain decisions, transition reasons, measured output loudness/peaks, timing data, and explicit warnings for unavailable key/vocal/model analysis. Use **Show diagnostics** to reveal report. Use **Play** to add generated MP3 to **Temporary playback** and start it immediately.
+
+Current production slice intentionally does not claim reliable musical-key, vocal-overlap, genre, drop-swap, double-drop, or stem-aware decisions. Those require separately approved analyzers/models and packaging. See `docs/dj-engine-audit.md` and `docs/dj-engine-dependencies.md`.
 
 ### Open audio files and configure file associations
 
@@ -277,7 +292,7 @@ Automatic synchronization is scoped to selected folder playlist. Windows wakes A
 Copyright (C) 2020–present [Zoltán Rózsa](https://github.com/rozsazoltan)
 
 
-DJ Mix Builder encodes MP3 output with the pure-Rust `shine-rs` encoder, distributed under LGPL-2.0. Audio Orbit remains licensed under AGPL-3.0-or-later.
+DJ Mix Builder uses `signalsmith-stretch` and bundled Signalsmith Stretch C++ code under MIT for offline pitch-preserving time stretch, `ebur128` under MIT for EBU R128 measurement, and `shine-rs` under LGPL-2.0 for MP3 encoding. Redistribution notices are tracked in `THIRD_PARTY_NOTICES.md`. Audio Orbit remains licensed under AGPL-3.0-or-later.
 
 Audio Orbit renders local and live radio waveform bars through a RustFFT-backed amplitude analysis path. The visual design intentionally follows AIMP-like progress bars: neutral gray for the upcoming waveform, blue for the played region, and yellow markers for silence-skip sections. The analyzer still uses spectral information internally to shape a stable loudness envelope, but the UI does not draw colored bass/mid/treble stacks.
 

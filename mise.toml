@@ -1,0 +1,80 @@
+[tools]
+clang = "18.1.8"
+hk = "1.51.0"
+pkl = "0.31.1"
+rust = { version = "stable", components = ["rustfmt", "clippy"] }
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.137"
+"aqua:tombi-toml/tombi" = "1.1.0"
+
+[env]
+CARGO_INCREMENTAL = "0"
+CARGO_TERM_COLOR = "always"
+LIBCLANG_PATH = { value = "{% if os() == 'windows' %}{{ tools.clang.path }}/Library/bin{% else %}{{ tools.clang.path }}/lib{% endif %}", tools = true }
+
+[tasks."hooks:install"]
+description = "Install repository Git hooks through hk and mise"
+env = { HK_MISE = "1" }
+run = "hk install"
+
+[tasks."hooks:check"]
+description = "Run pre-commit checks against all tracked files"
+run = "hk run pre-commit --all --check"
+
+[tasks."hooks:fix"]
+description = "Run pre-commit auto-fixes against all tracked files"
+run = "hk run pre-commit --all --fix"
+
+[tasks."hooks:pre-push"]
+description = "Run pre-push checks manually"
+run = "hk run pre-push --all --check"
+
+[tasks.format]
+description = "Format Rust, TOML, and Pkl files"
+run = [
+  "cargo fmt --all",
+  "tombi format .",
+  "pkl format --write hk.pkl",
+]
+
+[tasks."format:check"]
+description = "Verify Rust, TOML, and Pkl formatting"
+run = [
+  "cargo fmt --all -- --check",
+  "tombi format --check .",
+  "tombi lint --quiet --error-on-warnings .",
+  "pkl format --silent hk.pkl",
+]
+
+[tasks."tooling:check"]
+description = "Validate mise tasks and hk/Pkl configuration"
+run = [
+  "mise tasks validate --errors-only",
+  "hk test --quiet",
+]
+
+[tasks.check]
+description = "Type-check all locked Cargo targets"
+run = "cargo check --locked --all-targets"
+
+[tasks.clippy]
+description = "Run Clippy against all locked Cargo targets"
+run = "cargo clippy --locked --all-targets"
+
+[tasks.test]
+description = "Run Rust tests with cargo-nextest"
+run = "cargo nextest run --locked --all-targets"
+
+[tasks."test:doc"]
+description = "Run Rust documentation tests not handled by nextest"
+run = "cargo test --locked --doc"
+
+[tasks.ci]
+description = "Run same validation suite used by GitHub Actions"
+run = [
+  { task = "format:check" },
+  { task = "tooling:check" },
+  { task = "check" },
+  { task = "clippy" },
+  { task = "test" },
+  { task = "test:doc" },
+]

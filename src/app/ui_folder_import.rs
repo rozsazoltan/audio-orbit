@@ -72,7 +72,11 @@ impl AudioOrbitApp {
                         });
                 });
             });
-        self.render_modal_info_footer_fixed(context, "folder_import_modal_info_footer", screen_rect);
+        self.render_modal_info_footer_fixed(
+            context,
+            "folder_import_modal_info_footer",
+            screen_rect,
+        );
 
         if context.input(|input| input.key_pressed(egui::Key::Escape)) {
             close_after_import = true;

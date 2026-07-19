@@ -22,7 +22,8 @@ impl AudioOrbitApp {
             if ui
                 .add_enabled(
                     self.player.is_some(),
-                    egui::Button::new(self.control_label(Icon::SkipBack, "Previous")).min_size(transport_button_size),
+                    egui::Button::new(self.control_label(Icon::SkipBack, "Previous"))
+                        .min_size(transport_button_size),
                 )
                 .clicked()
             {
@@ -51,7 +52,8 @@ impl AudioOrbitApp {
         if ui
             .add_enabled(
                 self.player.is_some(),
-                egui::Button::new(self.control_label(Icon::Square, "Stop")).min_size(stop_button_size),
+                egui::Button::new(self.control_label(Icon::Square, "Stop"))
+                    .min_size(stop_button_size),
             )
             .clicked()
         {
@@ -62,7 +64,8 @@ impl AudioOrbitApp {
             if ui
                 .add_enabled(
                     self.player.is_some(),
-                    egui::Button::new(self.control_label(Icon::SkipForward, "Next")).min_size(transport_button_size),
+                    egui::Button::new(self.control_label(Icon::SkipForward, "Next"))
+                        .min_size(transport_button_size),
                 )
                 .clicked()
             {
@@ -81,7 +84,11 @@ impl AudioOrbitApp {
             return;
         }
 
-        let is_recording = self.player.as_ref().map(|player| player.is_radio_recording()).unwrap_or(false);
+        let is_recording = self
+            .player
+            .as_ref()
+            .map(|player| player.is_radio_recording())
+            .unwrap_or(false);
         let blink_on = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| (duration.as_millis() / 500) % 2 == 0)
@@ -103,13 +110,13 @@ impl AudioOrbitApp {
         } else {
             egui::Button::new(record_text).min_size(icon_button_size)
         };
-        let record_response = ui
-            .add_sized(icon_button_size, record_button)
-            .on_hover_text(if is_recording {
+        let record_response = ui.add_sized(icon_button_size, record_button).on_hover_text(
+            if is_recording {
                 "Stop and save radio recording · Right-click to open the recordings folder"
             } else {
                 "Record original internet radio stream · Right-click to open the recordings folder"
-            });
+            },
+        );
         if record_response.clicked() {
             self.toggle_radio_recording();
         }
@@ -119,7 +126,8 @@ impl AudioOrbitApp {
     }
     pub(crate) fn copy_current_radio_title(&mut self) {
         let Some(radio_index) = self.active_radio_index else {
-            self.error_message = Some("Start an internet radio station before copying track info.".to_owned());
+            self.error_message =
+                Some("Start an internet radio station before copying track info.".to_owned());
             return;
         };
 
@@ -132,16 +140,29 @@ impl AudioOrbitApp {
                     .clone()
                     .filter(|name| !name.trim().is_empty())
             })
-            .or_else(|| self.state.radio_stations.get(radio_index).map(|station| station.name.clone()))
+            .or_else(|| {
+                self.state
+                    .radio_stations
+                    .get(radio_index)
+                    .map(|station| station.name.clone())
+            })
             .unwrap_or_else(|| "Internet radio".to_owned());
 
         self.pending_clipboard_text = Some(text.clone());
         self.status_message = format!("Radio info copied: {text}.");
         self.error_message = None;
     }
-    pub(crate) fn render_copy_and_volume_controls(&mut self, ui: &mut egui::Ui, _has_now_playing: bool, icon_button_size: egui::Vec2) {
+    pub(crate) fn render_copy_and_volume_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        _has_now_playing: bool,
+        icon_button_size: egui::Vec2,
+    ) {
         if self.active_radio_index.is_some() {
-            let copy_button_size = egui::vec2(if self.player_only_mode { 42.0 } else { 58.0 }, icon_button_size.y);
+            let copy_button_size = egui::vec2(
+                if self.player_only_mode { 42.0 } else { 58.0 },
+                icon_button_size.y,
+            );
             if ui
                 .add_sized(copy_button_size, egui::Button::new("Copy"))
                 .on_hover_text("Copy the current radio stream title. Falls back to the station name when no title is available.")
@@ -151,9 +172,16 @@ impl AudioOrbitApp {
             }
         }
 
-        let volume_icon = if self.effective_volume_percent() == 0 { Icon::VolumeX } else { Icon::Volume2 };
+        let volume_icon = if self.effective_volume_percent() == 0 {
+            Icon::VolumeX
+        } else {
+            Icon::Volume2
+        };
         if ui
-            .add_sized(icon_button_size, egui::Button::new(egui::RichText::new(ui_icons::icon(volume_icon)).size(14.0)))
+            .add_sized(
+                icon_button_size,
+                egui::Button::new(egui::RichText::new(ui_icons::icon(volume_icon)).size(14.0)),
+            )
             .on_hover_text("Mute / unmute")
             .clicked()
         {
@@ -183,41 +211,108 @@ impl AudioOrbitApp {
         ui.horizontal(|ui| {
             let controls_width = if self.player_only_mode { 74.0 } else { 164.0 };
             let title_width = (ui.available_width() - controls_width).max(140.0);
-            let (title_rect, title_response) = ui.allocate_exact_size(
-                egui::vec2(title_width, 54.0),
-                egui::Sense::hover(),
-            );
+            let (title_rect, title_response) =
+                ui.allocate_exact_size(egui::vec2(title_width, 54.0), egui::Sense::hover());
             let title_available_width = title_width - 10.0;
             let active_title_color = ui.visuals().widgets.inactive.fg_stroke.color;
-            let active_detail_color = ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.76);
-            let active_time_color = ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.68);
-            let placeholder_title_color = ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.82);
-            let placeholder_detail_color = ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.62);
-            let placeholder_time_color = ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.52);
+            let active_detail_color = ui
+                .visuals()
+                .widgets
+                .inactive
+                .fg_stroke
+                .color
+                .linear_multiply(0.76);
+            let active_time_color = ui
+                .visuals()
+                .widgets
+                .inactive
+                .fg_stroke
+                .color
+                .linear_multiply(0.68);
+            let placeholder_title_color = ui
+                .visuals()
+                .widgets
+                .inactive
+                .fg_stroke
+                .color
+                .linear_multiply(0.82);
+            let placeholder_detail_color = ui
+                .visuals()
+                .widgets
+                .inactive
+                .fg_stroke
+                .color
+                .linear_multiply(0.62);
+            let placeholder_time_color = ui
+                .visuals()
+                .widgets
+                .inactive
+                .fg_stroke
+                .color
+                .linear_multiply(0.52);
             let title_font = egui::FontId::proportional(15.0);
             let detail_font = egui::FontId::proportional(11.5);
             let time_font = egui::FontId::proportional(11.5);
-            let (title, detail, time_label, title_color, detail_color, time_color) = if has_now_playing {
-                (
-                    ellipsize_to_width_exact(ui, &self.active_track_title(), title_available_width, title_font.clone(), active_title_color),
-                    self.active_track_detail()
-                        .map(|value| ellipsize_to_width_exact(ui, &value, title_available_width, detail_font.clone(), active_detail_color))
-                        .unwrap_or_default(),
-                    ellipsize_to_width_exact(ui, &self.active_track_time_label(), title_available_width, time_font.clone(), active_time_color),
-                    active_title_color,
-                    active_detail_color,
-                    active_time_color,
-                )
-            } else {
-                (
-                    ellipsize_to_width_exact(ui, "Audio Orbit is ready", title_available_width, title_font.clone(), placeholder_title_color),
-                    ellipsize_to_width_exact(ui, "Choose a song, start a playlist, or tune in to internet radio.", title_available_width, detail_font.clone(), placeholder_detail_color),
-                    ellipsize_to_width_exact(ui, "Local music · Live radio · Sound profiles", title_available_width, time_font.clone(), placeholder_time_color),
-                    placeholder_title_color,
-                    placeholder_detail_color,
-                    placeholder_time_color,
-                )
-            };
+            let (title, detail, time_label, title_color, detail_color, time_color) =
+                if has_now_playing {
+                    (
+                        ellipsize_to_width_exact(
+                            ui,
+                            &self.active_track_title(),
+                            title_available_width,
+                            title_font.clone(),
+                            active_title_color,
+                        ),
+                        self.active_track_detail()
+                            .map(|value| {
+                                ellipsize_to_width_exact(
+                                    ui,
+                                    &value,
+                                    title_available_width,
+                                    detail_font.clone(),
+                                    active_detail_color,
+                                )
+                            })
+                            .unwrap_or_default(),
+                        ellipsize_to_width_exact(
+                            ui,
+                            &self.active_track_time_label(),
+                            title_available_width,
+                            time_font.clone(),
+                            active_time_color,
+                        ),
+                        active_title_color,
+                        active_detail_color,
+                        active_time_color,
+                    )
+                } else {
+                    (
+                        ellipsize_to_width_exact(
+                            ui,
+                            "Audio Orbit is ready",
+                            title_available_width,
+                            title_font.clone(),
+                            placeholder_title_color,
+                        ),
+                        ellipsize_to_width_exact(
+                            ui,
+                            "Choose a song, start a playlist, or tune in to internet radio.",
+                            title_available_width,
+                            detail_font.clone(),
+                            placeholder_detail_color,
+                        ),
+                        ellipsize_to_width_exact(
+                            ui,
+                            "Local music · Live radio · Sound profiles",
+                            title_available_width,
+                            time_font.clone(),
+                            placeholder_time_color,
+                        ),
+                        placeholder_title_color,
+                        placeholder_detail_color,
+                        placeholder_time_color,
+                    )
+                };
 
             let painter = ui.painter();
             painter.text(
@@ -249,7 +344,11 @@ impl AudioOrbitApp {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let settings_label = self.control_label(Icon::Settings2, "Settings");
-                if ui.button(settings_label).on_hover_text("Settings").clicked() {
+                if ui
+                    .button(settings_label)
+                    .on_hover_text("Settings")
+                    .clicked()
+                {
                     self.open_panel_modal(AppPanelModal::Settings);
                 }
 
@@ -285,7 +384,6 @@ impl AudioOrbitApp {
                         self.save_state_silently();
                     }
                 }
-
             });
         });
 
@@ -295,7 +393,8 @@ impl AudioOrbitApp {
                 .clamp(1.0, RADIO_WAVEFORM_MAX_VISIBLE_SECONDS);
             let requested_points = (available_width / RADIO_WAVEFORM_BAR_PITCH_PIXELS)
                 .floor()
-                .clamp(1.0, 900.0) as usize + 1;
+                .clamp(1.0, 900.0) as usize
+                + 1;
             let frame = self
                 .player
                 .as_ref()
@@ -349,7 +448,10 @@ impl AudioOrbitApp {
                 let pointer_position = response.interact_pointer_pos();
                 if response.drag_started() || response.dragged() {
                     if let Some(pointer) = pointer_position {
-                        let next_position = ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration;
+                        let next_position = ((pointer.x - response.rect.left())
+                            / response.rect.width())
+                        .clamp(0.0, 1.0)
+                            * duration;
                         self.waveform_drag_position_seconds = Some(next_position);
                     }
                 }
@@ -357,7 +459,9 @@ impl AudioOrbitApp {
                 if response.drag_stopped() {
                     let next_position = self.waveform_drag_position_seconds.or_else(|| {
                         pointer_position.map(|pointer| {
-                            ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration
+                            ((pointer.x - response.rect.left()) / response.rect.width())
+                                .clamp(0.0, 1.0)
+                                * duration
                         })
                     });
                     if let Some(next_position) = next_position {
@@ -366,7 +470,10 @@ impl AudioOrbitApp {
                     self.waveform_drag_position_seconds = None;
                 } else if response.clicked() {
                     if let Some(pointer) = pointer_position {
-                        let next_position = ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0) * duration;
+                        let next_position = ((pointer.x - response.rect.left())
+                            / response.rect.width())
+                        .clamp(0.0, 1.0)
+                            * duration;
                         self.seek_current(next_position);
                     }
                     self.waveform_drag_position_seconds = None;
@@ -394,15 +501,31 @@ impl AudioOrbitApp {
             .unwrap_or(false);
 
         let play_label = match self.player.as_ref() {
-            Some(player) if context_is_active && player.is_playing() => self.control_label(Icon::Pause, "Pause"),
-            Some(player) if context_is_active && player.is_paused() => self.control_label(Icon::Play, "Resume"),
+            Some(player) if context_is_active && player.is_playing() => {
+                self.control_label(Icon::Pause, "Pause")
+            }
+            Some(player) if context_is_active && player.is_paused() => {
+                self.control_label(Icon::Play, "Resume")
+            }
             _ => self.control_label(Icon::Play, "Play"),
         };
 
         let icon_button_size = egui::vec2(24.0, 24.0);
-        let transport_button_size = if self.player_only_mode { icon_button_size } else { egui::vec2(84.0, 24.0) };
-        let play_button_size = if self.player_only_mode { icon_button_size } else { egui::vec2(70.0, 24.0) };
-        let stop_button_size = if self.player_only_mode { icon_button_size } else { egui::vec2(64.0, 24.0) };
+        let transport_button_size = if self.player_only_mode {
+            icon_button_size
+        } else {
+            egui::vec2(84.0, 24.0)
+        };
+        let play_button_size = if self.player_only_mode {
+            icon_button_size
+        } else {
+            egui::vec2(70.0, 24.0)
+        };
+        let stop_button_size = if self.player_only_mode {
+            icon_button_size
+        } else {
+            egui::vec2(64.0, 24.0)
+        };
 
         let control_width = ui.available_width();
         if control_width < 360.0 {
@@ -419,7 +542,11 @@ impl AudioOrbitApp {
                     );
                 });
                 ui.horizontal(|ui| {
-                    self.render_playback_mode_or_recording_controls(ui, radio_controls_active, icon_button_size);
+                    self.render_playback_mode_or_recording_controls(
+                        ui,
+                        radio_controls_active,
+                        icon_button_size,
+                    );
                 });
                 ui.horizontal(|ui| {
                     self.render_copy_and_volume_controls(ui, has_now_playing, icon_button_size);
@@ -437,7 +564,11 @@ impl AudioOrbitApp {
                         play_button_size,
                         stop_button_size,
                     );
-                    self.render_playback_mode_or_recording_controls(ui, radio_controls_active, icon_button_size);
+                    self.render_playback_mode_or_recording_controls(
+                        ui,
+                        radio_controls_active,
+                        icon_button_size,
+                    );
                 });
                 ui.horizontal(|ui| {
                     self.render_copy_and_volume_controls(ui, has_now_playing, icon_button_size);
@@ -454,7 +585,11 @@ impl AudioOrbitApp {
                     play_button_size,
                     stop_button_size,
                 );
-                self.render_playback_mode_or_recording_controls(ui, radio_controls_active, icon_button_size);
+                self.render_playback_mode_or_recording_controls(
+                    ui,
+                    radio_controls_active,
+                    icon_button_size,
+                );
                 self.render_copy_and_volume_controls(ui, has_now_playing, icon_button_size);
             });
         }
@@ -465,7 +600,10 @@ impl AudioOrbitApp {
                     egui::Color32::YELLOW,
                     format!("Output changed to {output_name}."),
                 );
-                if ui.button(ui_icons::label(Icon::RefreshCw, "Refresh and continue")).clicked() {
+                if ui
+                    .button(ui_icons::label(Icon::RefreshCw, "Refresh and continue"))
+                    .clicked()
+                {
                     self.refresh_output_device();
                 }
             });
@@ -490,14 +628,24 @@ impl AudioOrbitApp {
         };
         if ui
             .add(repeat_button)
-            .on_hover_text(format!("Cycle repeat mode. Current: {}", self.state.playback.repeat_mode.label()))
+            .on_hover_text(format!(
+                "Cycle repeat mode. Current: {}",
+                self.state.playback.repeat_mode.label()
+            ))
             .clicked()
         {
             self.state.playback.repeat_mode = self.state.playback.repeat_mode.next();
             playback_changed = true;
         }
         playback_changed |= ui
-            .checkbox(&mut self.state.playback.auto_advance, if self.player_only_mode { "Auto" } else { "Auto-play next" })
+            .checkbox(
+                &mut self.state.playback.auto_advance,
+                if self.player_only_mode {
+                    "Auto"
+                } else {
+                    "Auto-play next"
+                },
+            )
             .changed();
         playback_changed |= ui
             .checkbox(&mut self.state.playback.shuffle_enabled, "Shuffle")
@@ -506,6 +654,5 @@ impl AudioOrbitApp {
         if playback_changed {
             self.save_state_silently();
         }
-
     }
 }

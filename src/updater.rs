@@ -3,14 +3,14 @@ use reqwest::{blocking::Client, StatusCode};
 use semver::Version;
 use serde::{de::DeserializeOwned, Deserialize};
 use std::{
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
 };
 
 const RELEASES_API: &str = "https://api.github.com/repos/rozsazoltan/audio-orbit/releases";
-const LATEST_RELEASE_API: &str = "https://api.github.com/repos/rozsazoltan/audio-orbit/releases/latest";
+const LATEST_RELEASE_API: &str =
+    "https://api.github.com/repos/rozsazoltan/audio-orbit/releases/latest";
 const RELEASES_PAGE: &str = "https://github.com/rozsazoltan/audio-orbit/releases";
 const USER_AGENT: &str = "Audio-Orbit-Updater";
 
@@ -48,7 +48,8 @@ pub fn check_for_update(include_prereleases: bool) -> Result<UpdateCheck> {
 
 pub fn check_latest_stable() -> Result<UpdateCheck> {
     let client = Client::builder().user_agent(USER_AGENT).build()?;
-    let release: GitHubRelease = get_github_json(&client, LATEST_RELEASE_API, "GitHub latest stable release")?;
+    let release: GitHubRelease =
+        get_github_json(&client, LATEST_RELEASE_API, "GitHub latest stable release")?;
     update_check_from_release(release)
 }
 
@@ -74,14 +75,20 @@ pub fn check_latest_prerelease() -> Result<UpdateCheck> {
 
 fn update_check_from_release(release: GitHubRelease) -> Result<UpdateCheck> {
     let current_version = env!("CARGO_PKG_VERSION").to_owned();
-    let current_semver = Version::parse(&current_version).context("invalid current application version")?;
+    let current_semver =
+        Version::parse(&current_version).context("invalid current application version")?;
     let latest_semver = Version::parse(release.tag_name.trim_start_matches('v'))
         .context("invalid latest GitHub release version")?;
     let asset = release
         .assets
         .iter()
         .find(|asset| asset.name.ends_with("windows-x64.exe"))
-        .or_else(|| release.assets.iter().find(|asset| asset.name.ends_with(".exe")));
+        .or_else(|| {
+            release
+                .assets
+                .iter()
+                .find(|asset| asset.name.ends_with(".exe"))
+        });
 
     Ok(UpdateCheck {
         current_version,
