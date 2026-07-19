@@ -14,17 +14,21 @@ description = "Install repository Git hooks through hk and mise"
 env = { HK_MISE = "1" }
 run = "hk install"
 
+[tasks."hooks:pre-commit"]
+description = "Run the repository pre-commit hook against all tracked files"
+run = "hk run pre-commit --all --check"
+
+[tasks."hooks:pre-push"]
+description = "Run the repository pre-push hook against all tracked files"
+run = "hk run pre-push --all --check"
+
 [tasks."hooks:check"]
 description = "Run pre-commit checks against all tracked files"
-run = "hk run pre-commit --all --check"
+run = "mise run hooks:pre-commit"
 
 [tasks."hooks:fix"]
 description = "Run pre-commit auto-fixes against all tracked files"
 run = "hk run pre-commit --all --fix"
-
-[tasks."hooks:pre-push"]
-description = "Run pre-push checks manually"
-run = "hk run pre-push --all --check"
 
 [tasks.format]
 description = "Format Rust, TOML, and Pkl files"
@@ -56,7 +60,7 @@ run = "cargo check --locked --all-targets"
 
 [tasks.clippy]
 description = "Run Clippy against all locked Cargo targets"
-run = "cargo clippy --locked --all-targets"
+run = "cargo clippy --locked --all-targets -- -D warnings"
 
 [tasks.test]
 description = "Run Rust tests with cargo-nextest"
@@ -67,12 +71,8 @@ description = "Run Rust documentation tests not handled by nextest"
 run = "cargo test --locked --doc"
 
 [tasks.ci]
-description = "Run same validation suite used by GitHub Actions"
+description = "Run the same hk hooks enforced by Windows GitHub Actions"
 run = [
-  { task = "format:check" },
-  { task = "tooling:check" },
-  { task = "check" },
-  { task = "clippy" },
-  { task = "test" },
-  { task = "test:doc" },
+  { task = "hooks:pre-commit" },
+  { task = "hooks:pre-push" },
 ]

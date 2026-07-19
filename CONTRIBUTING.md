@@ -12,7 +12,7 @@ Important priorities:
 
 ## Local development
 
-Project uses [mise](https://mise.jdx.dev/) for Rust and developer-tool installation, task execution, and local/CI parity.
+Project is currently Windows-only. It uses [mise](https://mise.jdx.dev/) for Rust and developer-tool installation, task execution, and exact local/CI parity on `windows-latest`.
 
 Install configured tools and repository hooks:
 
@@ -30,7 +30,7 @@ mise run format          # apply Rust, TOML, and Pkl formatting
 mise run format:check    # verify Rust, TOML, and Pkl formatting
 mise run tooling:check   # validate mise tasks and hk/Pkl config
 mise run check           # cargo check --locked --all-targets
-mise run clippy          # cargo clippy --locked --all-targets
+mise run clippy          # cargo clippy --locked --all-targets -- -D warnings
 mise run test            # cargo nextest run --locked --all-targets
 mise run test:doc        # doctests not run by nextest
 mise run ci              # complete suite also used by GitHub Actions
@@ -38,10 +38,13 @@ mise run ci              # complete suite also used by GitHub Actions
 
 Git hooks use `hk`:
 
-- `pre-commit` fixes Rust, TOML, and Pkl formatting; validates TOML and hk config; checks merge markers and private keys
-- `pre-push` runs complete `mise run ci` suite
-- `mise run hooks:check` checks all tracked files without changing them
-- `mise run hooks:fix` applies supported fixes across all tracked files
+- `pre-commit` fixes Rust, TOML, and Pkl formatting; validates TOML, mise, and hk/Pkl config; checks merge markers and private keys
+- `pre-push` runs locked Cargo check, Clippy with warnings denied, nextest, and doctests
+- `mise run hooks:pre-commit` checks the full pre-commit hook against all tracked files
+- `mise run hooks:pre-push` checks the full pre-push hook against all tracked files
+- `mise run hooks:check` aliases the full pre-commit check
+- `mise run hooks:fix` applies supported pre-commit fixes across all tracked files
+- `mise run ci` runs both hooks exactly as Windows GitHub Actions does
 
 `HK_MISE=1` is used when installing hooks, so generated hook commands execute through `mise` even when shell activation is unavailable. Do not install both global and repository-local hk hooks, because Git can execute both.
 

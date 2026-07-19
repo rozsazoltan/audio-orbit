@@ -214,6 +214,8 @@ DJ Mix Builder offers two engines:
 - **Crossfade** keeps original playback speed and joins selected sections with a simple equal-power overlap.
 - **Smart DJ** analyzes BPM, beat phase, downbeat phase, silence, energy, EBU R128 loudness, sample peak, and true peak. It selects phrase-aligned sections, applies pitch-preserving tempo sync through the built-in deterministic WSOLA engine, then renders equal-power transitions with restrained filtering and optional bass swap.
 
+Requested transition length is treated as a target. When selected sections cannot fit the full overlap, Audio Orbit shortens the transition automatically and reserves middle-track audio for both incoming and outgoing transitions. If no overlap remains, export continues with a clean cut instead of failing.
+
 Set target mix length from 1 to 180 minutes. Each track supports:
 
 - **Auto highlight**: select a deterministic energetic section and align its boundaries to 8/16/32-bar phrases.

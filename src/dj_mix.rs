@@ -453,6 +453,7 @@ fn render_planned_mix(
         .first()
         .ok_or_else(|| anyhow!("DJ plan contains no tracks."))?;
     let mut current_audio = render_planned_section(first, options.style, cancel)?;
+    let planned_transitions = planned_transition_frame_counts(tracks, options);
 
     for pair_index in 0..tracks.len() - 1 {
         ensure_not_cancelled(cancel)?;
@@ -473,16 +474,23 @@ fn render_planned_mix(
         );
 
         let next_audio = render_planned_section(next, options.style, cancel)?;
-        let requested_transition = transition_frame_count(current, next, options.transition_bars);
+        let requested_transition = planned_transitions[pair_index];
+        let following_transition = planned_transitions
+            .get(pair_index + 1)
+            .copied()
+            .unwrap_or(0);
+        let next_budget = incoming_transition_budget(
+            next_audio.len(),
+            requested_transition,
+            following_transition,
+        );
         let overlap = requested_transition
             .min(current_audio.len())
-            .min(next_audio.len());
+            .min(next_budget);
         if overlap == 0 {
-            return Err(anyhow!(
-                "Selected section is too short for transition: {} → {}",
-                current.track.title,
-                next.track.title
-            ));
+            write_frames(&current_audio, current.gain, writer, cancel)?;
+            current_audio = next_audio;
+            continue;
         }
 
         let body_len = current_audio.len().saturating_sub(overlap);
@@ -1322,17 +1330,21 @@ fn plan_transition_diagnostics(
     tracks: &[PlannedTrack],
     options: DjMixOptions,
 ) -> Vec<TransitionDiagnostic> {
+    let transition_frames = planned_transition_frame_counts(tracks, options);
     tracks
         .windows(2)
-        .map(|pair| {
+        .enumerate()
+        .map(|(index, pair)| {
             let current = &pair[0];
             let next = &pair[1];
             let effective_bpm = ((current.analysis.bpm * current.speed_ratio
                 + next.analysis.bpm * next.speed_ratio)
                 * 0.5)
                 .clamp(MIN_BPM, MAX_BPM);
-            let duration_seconds = planned_transition_frame_count(current, next, options) as f32
-                / OUTPUT_SAMPLE_RATE as f32;
+            let requested_frames =
+                transition_frame_count(current, next, options.transition_bars);
+            let actual_frames = transition_frames[index];
+            let duration_seconds = actual_frames as f32 / OUTPUT_SAMPLE_RATE as f32;
             let mut decisions = vec![
                 format!(
                     "Aligned to {}-bar phrase boundary.",
@@ -1344,6 +1356,13 @@ fn plan_transition_diagnostics(
                 ),
                 "Equal-power overlap selected.".to_owned(),
             ];
+            if actual_frames < requested_frames {
+                decisions.push(format!(
+                    "Transition shortened from {:.2} to {:.2} seconds to fit selected sections.",
+                    requested_frames as f32 / OUTPUT_SAMPLE_RATE as f32,
+                    duration_seconds
+                ));
+            }
             if options.bass_swap {
                 decisions.push("Bass swap at transition midpoint.".to_owned());
             }
@@ -1470,14 +1489,68 @@ fn planned_output_section_frame_count(track: &PlannedTrack, style: DjMixStyle) -
     }
 }
 
-fn planned_transition_frame_count(
-    current: &PlannedTrack,
-    next: &PlannedTrack,
-    options: DjMixOptions,
+fn planned_transition_frame_counts(tracks: &[PlannedTrack], options: DjMixOptions) -> Vec<usize> {
+    if tracks.len() < 2 {
+        return Vec::new();
+    }
+
+    let section_frames = tracks
+        .iter()
+        .map(|track| planned_output_section_frame_count(track, options.style))
+        .collect::<Vec<_>>();
+    let requested = tracks
+        .windows(2)
+        .map(|pair| transition_frame_count(&pair[0], &pair[1], options.transition_bars))
+        .collect::<Vec<_>>();
+    allocate_transition_frame_counts(&section_frames, &requested)
+}
+
+fn allocate_transition_frame_counts(section_frames: &[usize], requested: &[usize]) -> Vec<usize> {
+    if section_frames.len() < 2 || requested.is_empty() {
+        return Vec::new();
+    }
+
+    debug_assert_eq!(requested.len(), section_frames.len() - 1);
+    let pair_count = requested.len().min(section_frames.len().saturating_sub(1));
+    let mut remaining = section_frames.to_vec();
+    let mut overlaps = Vec::with_capacity(pair_count);
+
+    for index in 0..pair_count {
+        let following_requested = requested.get(index + 1).copied().unwrap_or(0);
+        let next_budget = incoming_transition_budget(
+            section_frames[index + 1],
+            requested[index],
+            following_requested,
+        );
+        let overlap = requested[index]
+            .min(remaining[index])
+            .min(next_budget);
+        overlaps.push(overlap);
+        remaining[index] = remaining[index].saturating_sub(overlap);
+        remaining[index + 1] = section_frames[index + 1].saturating_sub(overlap);
+    }
+
+    overlaps
+}
+
+fn incoming_transition_budget(
+    track_frames: usize,
+    incoming_requested: usize,
+    outgoing_requested: usize,
 ) -> usize {
-    transition_frame_count(current, next, options.transition_bars)
-        .min(planned_output_section_frame_count(current, options.style))
-        .min(planned_output_section_frame_count(next, options.style))
+    if track_frames == 0 || incoming_requested == 0 {
+        return 0;
+    }
+    if outgoing_requested == 0 || track_frames == 1 {
+        return track_frames.min(incoming_requested);
+    }
+
+    let total_requested = incoming_requested as u128 + outgoing_requested as u128;
+    let proportional =
+        (track_frames as u128 * incoming_requested as u128 / total_requested) as usize;
+    proportional
+        .clamp(1, track_frames - 1)
+        .min(incoming_requested)
 }
 
 fn estimated_transition_seconds(tracks: &[(DjMixTrack, TrackAnalysis)], bars: u32) -> f32 {
@@ -1880,6 +1953,28 @@ mod tests {
         let planned = plan_tracks(analyzed, options).expect("plan");
         assert!((planned[0].speed_ratio - 1.0).abs() < f32::EPSILON);
         assert!((planned[1].speed_ratio - (1.0 - MAX_SMART_TEMPO_CHANGE)).abs() < 0.0001);
+    }
+
+    #[test]
+    fn adaptive_transitions_preserve_middle_track_for_both_sides() {
+        let overlaps = allocate_transition_frame_counts(&[100, 100, 100], &[100, 100]);
+        assert_eq!(overlaps, vec![50, 50]);
+        assert_eq!(overlaps[0] + overlaps[1], 100);
+    }
+
+    #[test]
+    fn adaptive_transitions_shorten_to_available_sections() {
+        let overlaps = allocate_transition_frame_counts(&[20, 30, 40], &[100, 100]);
+        assert_eq!(overlaps, vec![15, 15]);
+        assert!(overlaps[0] <= 20);
+        assert!(overlaps[0] + overlaps[1] <= 30);
+        assert!(overlaps[1] <= 40);
+    }
+
+    #[test]
+    fn final_transition_can_use_remaining_last_track() {
+        let overlaps = allocate_transition_frame_counts(&[20, 50], &[100]);
+        assert_eq!(overlaps, vec![20]);
     }
 
     #[test]

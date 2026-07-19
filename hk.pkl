@@ -17,9 +17,37 @@ local preCommitSteps = new Mapping<String, Step> {
 
   ["toml-lint"] = Builtins.tombi
   ["pkl-format"] = Builtins.pkl_format
+
+  ["mise-config"] {
+    check = "mise tasks validate --errors-only"
+    exclusive = true
+  }
+
   ["hk-config"] = Builtins.hk_test
   ["merge-conflict"] = Builtins.check_merge_conflict
   ["private-key"] = Builtins.detect_private_key
+}
+
+local prePushSteps = new Mapping<String, Step> {
+  ["cargo-check"] {
+    check = "cargo check --locked --all-targets"
+    exclusive = true
+  }
+
+  ["clippy"] {
+    check = "cargo clippy --locked --all-targets -- -D warnings"
+    exclusive = true
+  }
+
+  ["tests"] {
+    check = "cargo nextest run --locked --all-targets"
+    exclusive = true
+  }
+
+  ["doctests"] {
+    check = "cargo test --locked --doc"
+    exclusive = true
+  }
 }
 
 hooks {
@@ -31,13 +59,7 @@ hooks {
 
   ["pre-push"] {
     fix = false
-
-    steps {
-      ["local-ci"] {
-        check = "mise run ci"
-        exclusive = true
-      }
-    }
+    steps = prePushSteps
   }
 
   ["fix"] {
