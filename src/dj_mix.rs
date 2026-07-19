@@ -23,7 +23,7 @@ use std::{
 
 const ENGINE_SCHEMA_VERSION: u32 = 2;
 const ANALYZER_VERSION: &str = "audio-orbit-envelope-ebur128-v2";
-const ENGINE_VERSION: &str = "performance-dj-v3-wsola";
+const ENGINE_VERSION: &str = "performance-dj-v5-composed-bridge-wsola";
 const OUTPUT_SAMPLE_RATE: u32 = 44_100;
 const OUTPUT_CHANNELS: u16 = 2;
 const ANALYSIS_RATE_HZ: usize = 100;
@@ -452,6 +452,11 @@ fn render_planned_mix(
     let first = tracks
         .first()
         .ok_or_else(|| anyhow!("DJ plan contains no tracks."))?;
+    send_progress(
+        sender,
+        format!("Decoding and preparing {}", first.track.title),
+        0.40,
+    );
     let mut current_audio = render_planned_section(first, options.style, cancel)?;
     let planned_transitions = planned_transition_frame_counts(tracks, options);
 
@@ -473,6 +478,11 @@ fn render_planned_mix(
             0.45 + pair_index as f32 / ((tracks.len() - 1) as f32 * 2.0),
         );
 
+        send_progress(
+            sender,
+            format!("Decoding and preparing {}", next.track.title),
+            0.45 + pair_index as f32 / ((tracks.len() - 1) as f32 * 2.0),
+        );
         let next_audio = render_planned_section(next, options.style, cancel)?;
         let requested_transition = planned_transitions[pair_index];
         let following_transition = planned_transitions
@@ -684,17 +694,20 @@ fn write_performance_transition(
     let mut outgoing_sweep = LowPassStereo::new(18_000.0);
     let mut incoming_sweep = LowPassStereo::new(350.0);
     let mut delay = StereoDelay::new((beat_frames / 2).max(1), 0.38);
-    let mut noise_state = transition_seed(current, next);
+    let mut outgoing_vocal_guard = CenterVocalGuard::new();
+    let mut incoming_vocal_guard = CenterVocalGuard::new();
+    let vocal_plan = plan_vocal_handoff(&outgoing[..frames], &incoming[..frames]);
+    let seed = transition_seed(current, next);
+    let mut bridge = MusicalBridge::new(bpm, seed, strong_change);
 
     for index in 0..frames {
         if index % (OUTPUT_SAMPLE_RATE as usize / 2) == 0 {
             ensure_not_cancelled(cancel)?;
         }
         let progress = normalized_progress(index, frames);
-        let phrase_progress = (progress * 4.0).fract();
-        let repeat_divisor = if progress < 0.55 {
+        let repeat_divisor = if progress < 0.42 {
             1
-        } else if progress < 0.78 {
+        } else if progress < 0.62 {
             2
         } else {
             4
@@ -709,18 +722,20 @@ fn write_performance_transition(
         };
 
         if index % 64 == 0 {
-            outgoing_sweep.set_cutoff(18_000.0 - progress.powf(1.7) * 17_200.0);
-            incoming_sweep.set_cutoff(300.0 + progress.powf(1.8) * 17_700.0);
+            outgoing_sweep.set_cutoff(18_000.0 - progress.powf(1.6) * 17_300.0);
+            incoming_sweep.set_cutoff(450.0 + progress.powf(1.5) * 17_500.0);
         }
 
         let mut out = multiply_frame(outgoing[source_index], current.gain * peak_scale);
         let mut input = multiply_frame(incoming[index], next.gain * peak_scale);
         let filtered_out = outgoing_sweep.process(out);
         let filtered_in = incoming_sweep.process(input);
-        let out_filter_mix = (progress * 1.15).clamp(0.0, 0.92);
-        let in_filter_mix = ((1.0 - progress) * 1.1).clamp(0.0, 0.88);
-        out = mix_frame(out, filtered_out, out_filter_mix);
-        input = mix_frame(input, filtered_in, in_filter_mix);
+        out = mix_frame(out, filtered_out, (progress * 1.3).clamp(0.0, 0.94));
+        input = mix_frame(
+            input,
+            filtered_in,
+            ((1.0 - progress) * 1.35).clamp(0.0, 0.96),
+        );
 
         if bass_swap {
             apply_bass_swap(
@@ -732,45 +747,247 @@ fn write_performance_transition(
             );
         }
 
+        let (outgoing_vocal_duck, incoming_vocal_duck) = vocal_plan.duck_amounts(index, progress);
+        out = outgoing_vocal_guard.process(out, outgoing_vocal_duck);
+        input = incoming_vocal_guard.process(input, incoming_vocal_duck);
+
         let delayed = delay.process(out);
-        let echo_mix = ((progress - 0.35) / 0.65).clamp(0.0, 0.46);
+        let echo_mix = ((progress - 0.30) / 0.42).clamp(0.0, 0.38);
         out = [
             out[0] + delayed[0] * echo_mix,
             out[1] + delayed[1] * echo_mix,
         ];
 
-        let out_fade = ((1.0 - progress) * std::f32::consts::FRAC_PI_2).sin();
-        let in_fade = (progress * std::f32::consts::FRAC_PI_2).sin();
+        // Senior-style handoff: the next complete song does not sit underneath and slowly grow.
+        // The outgoing phrase exits, an original rhythmic/melodic bridge owns the middle,
+        // then the incoming track is revealed on a phrase boundary or drop.
+        let out_gate = 1.0 - smoothstep(0.40, if strong_change { 0.64 } else { 0.72 }, progress);
+        let in_gate = smoothstep(
+            if strong_change { 0.76 } else { 0.68 },
+            if strong_change { 0.84 } else { 0.88 },
+            progress,
+        );
         let mut mixed = [
-            out[0] * out_fade + input[0] * in_fade,
-            out[1] * out_fade + input[1] * in_fade,
+            out[0] * out_gate + input[0] * in_gate,
+            out[1] * out_gate + input[1] * in_gate,
         ];
 
-        let riser = transition_noise(&mut noise_state)
-            * progress.powf(2.3)
-            * (1.0 - phrase_progress * 0.35)
-            * if strong_change { 0.10 } else { 0.045 };
-        mixed[0] += riser;
-        mixed[1] -= riser * 0.82;
+        let bridge_frame = bridge.render(index, progress);
+        let bridge_gate =
+            smoothstep(0.22, 0.38, progress) * (1.0 - smoothstep(0.80, 0.94, progress));
+        mixed[0] += bridge_frame[0] * bridge_gate;
+        mixed[1] += bridge_frame[1] * bridge_gate;
 
-        if strong_change {
-            let hit_window = ((progress - 0.78) / 0.22).clamp(0.0, 1.0);
-            let pulse = (std::f32::consts::TAU * 48.0 * index as f32 / OUTPUT_SAMPLE_RATE as f32)
-                .sin()
-                * (1.0 - hit_window)
-                * if progress >= 0.78 { 0.18 } else { 0.0 };
-            mixed[0] += pulse;
-            mixed[1] += pulse;
-            if progress > 0.94 {
-                let duck = ((progress - 0.94) / 0.06).clamp(0.0, 1.0);
-                mixed[0] *= 0.55 + duck * 0.45;
-                mixed[1] *= 0.55 + duck * 0.45;
-            }
+        if strong_change && progress > 0.72 && progress < 0.76 {
+            let cut = 1.0 - smoothstep(0.72, 0.755, progress);
+            mixed[0] *= cut;
+            mixed[1] *= cut;
         }
 
         writer.write_frame(limit_frame(mixed))?;
     }
     Ok(())
+}
+
+fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let x = ((value - edge0) / (edge1 - edge0).max(1.0e-6)).clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
+struct MusicalBridge {
+    bpm: f32,
+    seed: u32,
+    strong: bool,
+    kick_phase: f32,
+    bass_phase: f32,
+    pluck_phase: f32,
+    string_phase: f32,
+    previous_step: usize,
+    pluck_envelope: f32,
+    string_filter: f32,
+    noise_state: u32,
+}
+
+impl MusicalBridge {
+    fn new(bpm: f32, seed: u32, strong: bool) -> Self {
+        Self {
+            bpm,
+            seed,
+            strong,
+            kick_phase: 0.0,
+            bass_phase: 0.0,
+            pluck_phase: 0.0,
+            string_phase: 0.0,
+            previous_step: usize::MAX,
+            pluck_envelope: 0.0,
+            string_filter: 0.0,
+            noise_state: seed ^ 0xA5A5_17C3,
+        }
+    }
+
+    fn render(&mut self, frame_index: usize, progress: f32) -> [f32; 2] {
+        let seconds = frame_index as f32 / OUTPUT_SAMPLE_RATE as f32;
+        let beats = seconds * self.bpm / 60.0;
+        let step = (beats * 2.0).floor() as usize;
+        let beat_phase = beats.fract();
+        let half_beat_phase = (beats * 2.0).fract();
+        if step != self.previous_step {
+            self.previous_step = step;
+            self.pluck_envelope = if step % 2 == 0 { 1.0 } else { 0.68 };
+        }
+
+        let root_midi = 43 + (self.seed % 8) as i32;
+        let scale = [0, 3, 5, 7, 10, 12, 15, 17];
+        let note = root_midi + scale[(step + ((self.seed >> 8) as usize)) % scale.len()];
+        let note_hz = 440.0 * 2.0f32.powf((note as f32 - 69.0) / 12.0);
+        let bass_hz = 440.0 * 2.0f32.powf((root_midi as f32 - 69.0) / 12.0);
+
+        let kick_env = (-beat_phase * 18.0).exp();
+        let kick_hz = 48.0 + 75.0 * (-beat_phase * 24.0).exp();
+        self.kick_phase = (self.kick_phase + kick_hz / OUTPUT_SAMPLE_RATE as f32).fract();
+        let kick = (std::f32::consts::TAU * self.kick_phase).sin() * kick_env * 0.30;
+
+        self.bass_phase = (self.bass_phase + bass_hz / OUTPUT_SAMPLE_RATE as f32).fract();
+        let bass = (std::f32::consts::TAU * self.bass_phase).sin()
+            * (0.08 + 0.05 * (1.0 - half_beat_phase))
+            * (1.0 - kick_env * 0.65);
+
+        self.pluck_phase = (self.pluck_phase + note_hz / OUTPUT_SAMPLE_RATE as f32).fract();
+        self.pluck_envelope *= 0.99972;
+        let fundamental = (std::f32::consts::TAU * self.pluck_phase).sin();
+        let harmonic = (std::f32::consts::TAU * self.pluck_phase * 2.0).sin() * 0.34;
+        let pluck = (fundamental + harmonic) * self.pluck_envelope * 0.13;
+
+        let string_hz = note_hz * 0.5;
+        self.string_phase = (self.string_phase + string_hz / OUTPUT_SAMPLE_RATE as f32).fract();
+        let bow = (std::f32::consts::TAU * self.string_phase).sin()
+            + (std::f32::consts::TAU * self.string_phase * 2.01).sin() * 0.28;
+        self.string_filter += 0.018 * (bow - self.string_filter);
+        let string_rise =
+            smoothstep(0.34, 0.66, progress) * (1.0 - smoothstep(0.68, 0.88, progress));
+        let string = self.string_filter * string_rise * 0.10;
+
+        let noise = transition_noise(&mut self.noise_state);
+        let hat_env = if half_beat_phase < 0.10 {
+            (1.0 - half_beat_phase / 0.10) * 0.055
+        } else {
+            0.0
+        };
+        let hat = noise * hat_env;
+        let snare_position = (beats + 0.5).fract();
+        let snare_env = if snare_position < 0.12 {
+            (1.0 - snare_position / 0.12).powi(2)
+        } else {
+            0.0
+        };
+        let snare = noise * snare_env * if self.strong { 0.12 } else { 0.075 };
+
+        let stereo_motion = (std::f32::consts::TAU * seconds * 0.23).sin() * 0.18;
+        let tonal = kick + bass + pluck + string;
+        [
+            tonal * (1.0 - stereo_motion) + hat + snare,
+            tonal * (1.0 + stereo_motion) - hat * 0.72 + snare,
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct VocalHandoffPlan {
+    outgoing_activity: f32,
+    incoming_activity: f32,
+    handoff_progress: f32,
+}
+
+impl VocalHandoffPlan {
+    fn duck_amounts(self, _index: usize, progress: f32) -> (f32, f32) {
+        let both_vocal = self.outgoing_activity.min(self.incoming_activity);
+        if both_vocal < 0.18 {
+            return (0.0, 0.0);
+        }
+
+        let handoff_width = 0.08;
+        let handoff = ((progress - (self.handoff_progress - handoff_width))
+            / (handoff_width * 2.0))
+            .clamp(0.0, 1.0);
+        let strength = ((both_vocal - 0.18) / 0.42).clamp(0.0, 1.0);
+        let max_duck = 0.88 * strength;
+
+        // One lead vocal at a time: incoming stays back before the phrase handoff,
+        // outgoing gets removed after it. The short interpolation avoids a hard hole.
+        (max_duck * handoff, max_duck * (1.0 - handoff))
+    }
+}
+
+fn plan_vocal_handoff(outgoing: &[[f32; 2]], incoming: &[[f32; 2]]) -> VocalHandoffPlan {
+    let outgoing_activity = estimate_center_vocal_activity(outgoing);
+    let incoming_activity = estimate_center_vocal_activity(incoming);
+    let bias = (incoming_activity - outgoing_activity) * 0.08;
+    VocalHandoffPlan {
+        outgoing_activity,
+        incoming_activity,
+        handoff_progress: (0.52 - bias).clamp(0.42, 0.62),
+    }
+}
+
+fn estimate_center_vocal_activity(frames: &[[f32; 2]]) -> f32 {
+    if frames.is_empty() {
+        return 0.0;
+    }
+    let stride = (OUTPUT_SAMPLE_RATE as usize / 50).max(1);
+    let mut active_blocks = 0usize;
+    let mut measured_blocks = 0usize;
+    for block in frames.chunks(stride) {
+        let mut mid_energy = 0.0f32;
+        let mut side_energy = 0.0f32;
+        let mut total_energy = 0.0f32;
+        for frame in block {
+            let mid = (frame[0] + frame[1]) * 0.5;
+            let side = (frame[0] - frame[1]) * 0.5;
+            mid_energy += mid * mid;
+            side_energy += side * side;
+            total_energy += (frame[0] * frame[0] + frame[1] * frame[1]) * 0.5;
+        }
+        let count = block.len().max(1) as f32;
+        let rms = (total_energy / count).sqrt();
+        if rms < 0.012 {
+            continue;
+        }
+        measured_blocks += 1;
+        let center_ratio = mid_energy / (mid_energy + side_energy + 1.0e-9);
+        if center_ratio > 0.68 {
+            active_blocks += 1;
+        }
+    }
+    if measured_blocks == 0 {
+        0.0
+    } else {
+        active_blocks as f32 / measured_blocks as f32
+    }
+}
+
+struct CenterVocalGuard {
+    bass_low_pass: f32,
+}
+
+impl CenterVocalGuard {
+    fn new() -> Self {
+        Self { bass_low_pass: 0.0 }
+    }
+
+    fn process(&mut self, frame: [f32; 2], amount: f32) -> [f32; 2] {
+        let amount = amount.clamp(0.0, 0.92);
+        if amount <= 0.0001 {
+            return frame;
+        }
+        let mid = (frame[0] + frame[1]) * 0.5;
+        let side = (frame[0] - frame[1]) * 0.5;
+        // Preserve centered kick/bass while suppressing the vocal-heavy center band.
+        let alpha = 1.0 - (-std::f32::consts::TAU * 180.0 / OUTPUT_SAMPLE_RATE as f32).exp();
+        self.bass_low_pass += alpha * (mid - self.bass_low_pass);
+        let upper_center = mid - self.bass_low_pass;
+        let guarded_mid = self.bass_low_pass + upper_center * (1.0 - amount);
+        [guarded_mid + side, guarded_mid - side]
+    }
 }
 
 fn transition_should_hit_hard(current: &PlannedTrack, next: &PlannedTrack) -> bool {
@@ -1466,7 +1683,8 @@ fn plan_transition_diagnostics(
                 + next.analysis.bpm * next.speed_ratio)
                 * 0.5)
                 .clamp(MIN_BPM, MAX_BPM);
-            let requested_frames = transition_frame_count(current, next, options.transition_bars);
+            let requested_frames =
+                transition_frame_count(current, next, options.transition_bars);
             let actual_frames = transition_frames[index];
             let duration_seconds = actual_frames as f32 / OUTPUT_SAMPLE_RATE as f32;
             let mut decisions = vec![
@@ -1478,7 +1696,7 @@ fn plan_transition_diagnostics(
                     "Tempo target {:.2} BPM; pitch preserved by built-in WSOLA.",
                     effective_bpm
                 ),
-                "Equal-power overlap selected.".to_owned(),
+                "Composed instrumental bridge selected instead of a long incoming-track fade.".to_owned(),
             ];
             if actual_frames < requested_frames {
                 decisions.push(format!(
@@ -1490,7 +1708,7 @@ fn plan_transition_diagnostics(
             if options.bass_swap {
                 decisions.push("Bass swap at transition midpoint.".to_owned());
             }
-            decisions.push("Restrained filter sweep selected.".to_owned());
+            decisions.push("Original beat, percussion, pluck, bass, and string bridge generated for the handoff.".to_owned());
             let mut warnings = Vec::new();
             if current.analysis.musical_key.is_none() || next.analysis.musical_key.is_none() {
                 warnings.push(
@@ -1498,8 +1716,13 @@ fn plan_transition_diagnostics(
                         .to_owned(),
                 );
             }
+            decisions.push(
+                "Center-channel vocal guard selected: one lead vocal is prioritized at a time."
+                    .to_owned(),
+            );
             warnings.push(
-                "Vocal overlap risk unavailable: no approved vocal/stem model bundled.".to_owned(),
+                "Vocal guard uses deterministic center-channel activity detection; isolated stems are not bundled."
+                    .to_owned(),
             );
             if current.analysis.bpm_confidence < 0.15 || next.analysis.bpm_confidence < 0.15 {
                 warnings.push("Low BPM confidence; transition may need manual review.".to_owned());
@@ -1507,10 +1730,10 @@ fn plan_transition_diagnostics(
             TransitionDiagnostic {
                 from_title: current.track.title.clone(),
                 to_title: next.track.title.clone(),
-                style: if options.bass_swap {
-                    "bass_swap".to_owned()
+                style: if transition_should_hit_hard(current, next) {
+                    "composed_bridge_drop".to_owned()
                 } else {
-                    "equal_power_eq_blend".to_owned()
+                    "composed_bridge_handoff".to_owned()
                 },
                 phrase_bars: options.transition_bars,
                 duration_seconds,

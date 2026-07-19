@@ -212,7 +212,7 @@ Use **DJ mix...** in Library panel to mix current playlist, or select at least t
 DJ Mix Builder offers two engines:
 
 - **Crossfade** keeps original playback speed and joins selected sections with a simple equal-power overlap.
-- **Smart DJ** analyzes BPM, beat phase, downbeat phase, silence, energy, EBU R128 loudness, sample peak, and true peak. It selects phrase-aligned sections, applies pitch-preserving tempo sync through the built-in deterministic WSOLA engine, then performs beat-repeat loops, progressively tighter stutters, filter sweeps, echo throws, synthetic risers and impacts, optional bass swaps, and adaptive seamless or high-impact transitions. Short usable sections are looped and transformed instead of rejected.
+- **Smart DJ** analyzes BPM, beat phase, downbeat phase, silence, energy, EBU R128 loudness, sample peak, and true peak. It selects phrase-aligned sections, applies pitch-preserving tempo sync through the built-in deterministic WSOLA engine, then composes an original beat-synced instrumental bridge from synthesized drums, bass, plucked piano-like notes, string-like tones, loops, stutters, echo throws, and optional bass swaps. The complete incoming song is held back until the phrase handoff or drop instead of slowly growing underneath the outgoing song. Short usable sections are looped and transformed instead of rejected.
 
 Requested transition length is treated as a target. When selected sections cannot fit the full overlap, Audio Orbit shortens the transition automatically and reserves middle-track audio for both incoming and outgoing transitions. If no overlap remains, export continues with a clean cut instead of failing.
 
@@ -311,3 +311,10 @@ Audio Orbit renders local and live radio waveform bars through a RustFFT-backed 
 ## Development runner
 
 Use `cargo dev` from the repository root. Development state stays in `.cache/app-data`, independent from executable build location. Mutagen workflows exclude root `/.cache/` and `/target/`, so Windows build artifacts and development state remain local to Windows mirror. The repository contains `.cargo/config.toml`, so Cargo uses the built-in polling dev runner instead of requiring the external `cargo-watch` subcommand. On Windows, `scripts/dev.ps1` runs the same project-local runner directly with `cargo run --bin audio-orbit-dev --`.
+
+### DJ mix export responsiveness
+
+DJ mix rendering runs on a named background worker thread. The export dialog shows an animated activity indicator, current processing stage, elapsed time, percentage, and cancellation control while the main player and library UI remain responsive.
+
+
+- Smart DJ prevents two centered lead vocals from dominating simultaneously. The middle of the transition is owned by a generated instrumental bridge; the incoming full mix is revealed only at the phrase handoff or drop.

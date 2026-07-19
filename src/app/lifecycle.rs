@@ -36,6 +36,10 @@ impl AudioOrbitApp {
             return Duration::from_millis(500);
         }
 
+        if self.dj_mix_is_running() {
+            return Duration::from_millis(80);
+        }
+
         if self.waveform_loading_animation_is_active() {
             return WAVEFORM_LOADING_REPAINT_INTERVAL;
         }

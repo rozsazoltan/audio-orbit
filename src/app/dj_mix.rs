@@ -83,6 +83,8 @@ impl AudioOrbitApp {
             report_path: None,
             diagnostics_summary: None,
             completed: false,
+            started_at: None,
+            last_progress_at: None,
         });
     }
 
@@ -112,6 +114,7 @@ impl AudioOrbitApp {
                     if let Some(modal) = self.dj_mix_modal.as_mut() {
                         modal.stage = stage;
                         modal.progress = progress;
+                        modal.last_progress_at = Some(Instant::now());
                     }
                 }
                 DjMixEvent::Completed {
@@ -133,6 +136,7 @@ impl AudioOrbitApp {
                         modal.report_path = Some(report_path);
                         modal.diagnostics_summary = Some(diagnostics_summary);
                         modal.completed = true;
+                        modal.last_progress_at = Some(Instant::now());
                     }
                     self.status_message = format!(
                         "DJ mix saved: {}{}{}",
@@ -226,8 +230,30 @@ impl AudioOrbitApp {
             modal.report_path = None;
             modal.diagnostics_summary = None;
             modal.completed = false;
+            modal.started_at = Some(Instant::now());
+            modal.last_progress_at = Some(Instant::now());
         }
-        thread::spawn(move || dj_mix::export_mix(request, sender, worker_cancel));
+        let spawn_result = thread::Builder::new()
+            .name("audio-orbit-dj-export".to_owned())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    dj_mix::export_mix(request, sender.clone(), worker_cancel)
+                }));
+                if result.is_err() {
+                    let _ = sender.send(DjMixEvent::Failed(
+                        "DJ mix worker crashed unexpectedly.".to_owned(),
+                    ));
+                }
+            });
+        if let Err(error) = spawn_result {
+            self.dj_mix_event_receiver = None;
+            self.dj_mix_cancel_flag = None;
+            if let Some(modal) = self.dj_mix_modal.as_mut() {
+                modal.stage = "Failed".to_owned();
+                modal.started_at = None;
+            }
+            self.error_message = Some(format!("Failed to start DJ mix worker: {error}"));
+        }
     }
 
     fn default_dj_mix_file_name(&self) -> String {
@@ -385,12 +411,24 @@ impl AudioOrbitApp {
                                             egui::Layout::top_down(egui::Align::Min),
                                             |ui| {
                                                 if show_progress {
-                                                    ui.label(&modal.stage);
+                                                    ui.horizontal(|ui| {
+                                                        if running {
+                                                            ui.spinner();
+                                                        }
+                                                        ui.label(&modal.stage);
+                                                        if let Some(started_at) = modal.started_at {
+                                                            let elapsed = started_at.elapsed().as_secs();
+                                                            ui.small(format!("{}:{:02}", elapsed / 60, elapsed % 60));
+                                                        }
+                                                    });
                                                     ui.add(
                                                         egui::ProgressBar::new(modal.progress)
                                                             .animate(running)
                                                             .show_percentage(),
                                                     );
+                                                    if running {
+                                                        ui.small("Background worker active — playback and library remain usable.");
+                                                    }
                                                 }
                                             },
                                         );

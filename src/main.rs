@@ -411,6 +411,8 @@ struct DjMixModalState {
     report_path: Option<PathBuf>,
     diagnostics_summary: Option<String>,
     completed: bool,
+    started_at: Option<Instant>,
+    last_progress_at: Option<Instant>,
 }
 
 #[derive(Clone, Debug)]
