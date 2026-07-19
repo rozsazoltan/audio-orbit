@@ -12,6 +12,7 @@ mod icon;
 mod media_keys;
 mod single_instance;
 mod spectrum_waveform;
+mod time_stretch;
 mod ui_icons;
 mod updater;
 

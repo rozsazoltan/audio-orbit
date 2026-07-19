@@ -1,10 +1,12 @@
-use crate::{app_data_dir, DjMixEvent, DjMixOptions, DjMixStyle, DjMixTrack, DjTrackSectionMode};
+use crate::{
+    app_data_dir, time_stretch::pitch_preserving_stretch, DjMixEvent, DjMixOptions, DjMixStyle,
+    DjMixTrack, DjTrackSectionMode,
+};
 use anyhow::{anyhow, Context, Result};
 use ebur128::{EbuR128, Mode};
 use rodio::{source::UniformSourceIterator, Decoder, Source};
 use serde::{Deserialize, Serialize};
 use shine_rs::{Mp3Encoder, Mp3EncoderConfig, StereoMode};
-use signalsmith_stretch::Stretch;
 use std::{
     cmp::Ordering,
     collections::BTreeMap,
@@ -21,7 +23,7 @@ use std::{
 
 const ENGINE_SCHEMA_VERSION: u32 = 2;
 const ANALYZER_VERSION: &str = "audio-orbit-envelope-ebur128-v2";
-const ENGINE_VERSION: &str = "human-dj-v1";
+const ENGINE_VERSION: &str = "human-dj-v2-wsola";
 const OUTPUT_SAMPLE_RATE: u32 = 44_100;
 const OUTPUT_CHANNELS: u16 = 2;
 const ANALYSIS_RATE_HZ: usize = 100;
@@ -531,27 +533,15 @@ fn render_planned_section(
     }
 
     ensure_not_cancelled(cancel)?;
-    let mut interleaved = Vec::with_capacity(decoded.len() * 2);
-    for frame in decoded {
-        interleaved.push(frame[0]);
-        interleaved.push(frame[1]);
-    }
-    let output_samples = ((interleaved.len() as f32 / track.speed_ratio).round() as usize)
-        .max(OUTPUT_CHANNELS as usize);
-    let output_samples = output_samples - output_samples % OUTPUT_CHANNELS as usize;
-    let mut output = vec![0.0f32; output_samples];
-    let mut stretch = Stretch::preset_default(OUTPUT_CHANNELS as u32, OUTPUT_SAMPLE_RATE);
-    stretch.set_transpose_factor_semitones(0.0, None);
-    if !stretch.exact(interleaved, &mut output) {
+    let output = pitch_preserving_stretch(&decoded, track.speed_ratio);
+    ensure_not_cancelled(cancel)?;
+    if output.is_empty() {
         return Err(anyhow!(
-            "Signalsmith Stretch failed for {}",
+            "Pitch-preserving time stretch failed for {}",
             track.track.title
         ));
     }
-    Ok(output
-        .chunks_exact(2)
-        .map(|frame| [frame[0], frame[1]])
-        .collect())
+    Ok(output)
 }
 
 fn decode_section(
@@ -1349,7 +1339,7 @@ fn plan_transition_diagnostics(
                     options.transition_bars
                 ),
                 format!(
-                    "Tempo target {:.2} BPM; pitch preserved by Signalsmith Stretch.",
+                    "Tempo target {:.2} BPM; pitch preserved by built-in WSOLA.",
                     effective_bpm
                 ),
                 "Equal-power overlap selected.".to_owned(),
@@ -1456,7 +1446,7 @@ fn build_report(
                 .to_owned(),
             "Key, vocal, genre, and stem analysis remain disabled until dependency/model licensing and packaging are approved."
                 .to_owned(),
-            "Signalsmith Stretch output may differ slightly across platforms; transition plan is deterministic."
+            "Built-in WSOLA time stretching and transition planning are deterministic."
                 .to_owned(),
         ],
     }

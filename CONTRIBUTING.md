@@ -21,7 +21,7 @@ mise install
 mise run hooks:install
 ```
 
-`mise install` also installs pinned Clang 18.1.8. Project environment sets `LIBCLANG_PATH` to mise-managed native library directory, so `signalsmith-stretch` can generate bindings on Windows, Linux, and macOS without separate LLVM setup. Run Cargo commands from mise-activated shell or through `mise exec -- cargo ...`.
+DJ tempo stretching uses built-in pure-Rust WSOLA implementation, so local builds need no Clang, LLVM, `libclang`, C++ compiler, or `LIBCLANG_PATH` setup.
 
 Available validation commands:
 

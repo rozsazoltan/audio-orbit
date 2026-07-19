@@ -1,5 +1,4 @@
 [tools]
-clang = "18.1.8"
 hk = "1.51.0"
 pkl = "0.31.1"
 rust = { version = "stable", components = ["rustfmt", "clippy"] }
@@ -9,7 +8,6 @@ rust = { version = "stable", components = ["rustfmt", "clippy"] }
 [env]
 CARGO_INCREMENTAL = "0"
 CARGO_TERM_COLOR = "always"
-LIBCLANG_PATH = { value = "{% if os() == 'windows' %}{{ tools.clang.path }}/Library/bin{% else %}{{ tools.clang.path }}/lib{% endif %}", tools = true }
 
 [tasks."hooks:install"]
 description = "Install repository Git hooks through hk and mise"

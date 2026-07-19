@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Local CI parity (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes g++ libasound2-dev pkg-config
+
+      - name: Install project tools
+        uses: jdx/mise-action@v3
+        with:
+          version: 2026.7.10
+          install: true
+          cache: true
+
+      - name: Validate mise tasks
+        run: mise tasks validate --errors-only
+
+      - name: Run local CI suite
+        run: mise run ci

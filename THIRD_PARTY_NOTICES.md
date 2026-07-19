@@ -1,21 +1,6 @@
 # Third-Party Notices
 
-Audio Orbit remains licensed under AGPL-3.0-or-later. This file records direct DJ-engine components added by this change. Full transitive dependency inventory must still be generated and reviewed from `Cargo.lock` before release.
-
-## Signalsmith Stretch Rust wrapper
-
-- Package: `signalsmith-stretch 0.1.3`
-- Source: https://github.com/colinmarc/signalsmith-stretch-rs
-- License: MIT
-- Copyright: 2024 Colin Marc
-- Integration: statically compiled C++ wrapper generated with `bindgen`
-
-## Signalsmith Stretch
-
-- Source: https://github.com/Signalsmith-Audio/signalsmith-stretch
-- License: MIT
-- Copyright: 2022 Geraint Luff / Signalsmith Audio Ltd.
-- Integration: source bundled by `signalsmith-stretch` crate
+Audio Orbit remains licensed under AGPL-3.0-or-later. This file records direct third-party DJ-engine components. Full transitive dependency inventory must still be generated and reviewed from `Cargo.lock` before release.
 
 ## ebur128
 

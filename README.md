@@ -212,7 +212,7 @@ Use **DJ mix...** in Library panel to mix current playlist, or select at least t
 DJ Mix Builder offers two engines:
 
 - **Crossfade** keeps original playback speed and joins selected sections with a simple equal-power overlap.
-- **Smart DJ** analyzes BPM, beat phase, downbeat phase, silence, energy, EBU R128 loudness, sample peak, and true peak. It selects phrase-aligned sections, applies pitch-preserving tempo sync through Signalsmith Stretch, then renders equal-power transitions with restrained filtering and optional bass swap.
+- **Smart DJ** analyzes BPM, beat phase, downbeat phase, silence, energy, EBU R128 loudness, sample peak, and true peak. It selects phrase-aligned sections, applies pitch-preserving tempo sync through the built-in deterministic WSOLA engine, then renders equal-power transitions with restrained filtering and optional bass swap.
 
 Set target mix length from 1 to 180 minutes. Each track supports:
 
@@ -292,7 +292,7 @@ Automatic synchronization is scoped to selected folder playlist. Windows wakes A
 Copyright (C) 2020–present [Zoltán Rózsa](https://github.com/rozsazoltan)
 
 
-DJ Mix Builder uses `signalsmith-stretch` and bundled Signalsmith Stretch C++ code under MIT for offline pitch-preserving time stretch, `ebur128` under MIT for EBU R128 measurement, and `shine-rs` under LGPL-2.0 for MP3 encoding. Redistribution notices are tracked in `THIRD_PARTY_NOTICES.md`. Audio Orbit remains licensed under AGPL-3.0-or-later.
+DJ Mix Builder uses a built-in pure-Rust WSOLA engine for offline pitch-preserving time stretch, `ebur128` under MIT for EBU R128 measurement, and `shine-rs` under LGPL-2.0 for MP3 encoding. Redistribution notices are tracked in `THIRD_PARTY_NOTICES.md`. Audio Orbit remains licensed under AGPL-3.0-or-later.
 
 Audio Orbit renders local and live radio waveform bars through a RustFFT-backed amplitude analysis path. The visual design intentionally follows AIMP-like progress bars: neutral gray for the upcoming waveform, blue for the played region, and yellow markers for silence-skip sections. The analyzer still uses spectral information internally to shape a stable loudness envelope, but the UI does not draw colored bass/mid/treble stacks.
 
