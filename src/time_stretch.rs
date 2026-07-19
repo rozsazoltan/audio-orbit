@@ -8,10 +8,7 @@ const CANDIDATE_STRIDE: usize = 8;
 ///
 /// Smart DJ limits tempo changes to ±6%, where short-window waveform matching produces
 /// stable results without native libraries or generated bindings.
-pub(crate) fn pitch_preserving_stretch(
-    input: &[[f32; 2]],
-    speed_ratio: f32,
-) -> Vec<[f32; 2]> {
+pub(crate) fn pitch_preserving_stretch(input: &[[f32; 2]], speed_ratio: f32) -> Vec<[f32; 2]> {
     if input.is_empty() {
         return Vec::new();
     }
@@ -114,13 +111,7 @@ fn best_matching_position(
 
     let mut candidate = search_start;
     loop {
-        let score = similarity_score(
-            output,
-            output_position,
-            input,
-            candidate,
-            overlap_length,
-        );
+        let score = similarity_score(output, output_position, input, candidate, overlap_length);
         let distance = candidate.abs_diff(expected_position);
         if score > best_score + f64::EPSILON
             || ((score - best_score).abs() <= f64::EPSILON && distance < best_distance)
@@ -133,9 +124,7 @@ fn best_matching_position(
         if candidate >= search_end {
             break;
         }
-        candidate = candidate
-            .saturating_add(CANDIDATE_STRIDE)
-            .min(search_end);
+        candidate = candidate.saturating_add(CANDIDATE_STRIDE).min(search_end);
     }
 
     let refine_start = best_position.saturating_sub(CANDIDATE_STRIDE);
@@ -146,13 +135,7 @@ fn best_matching_position(
         if candidate < search_start {
             continue;
         }
-        let score = similarity_score(
-            output,
-            output_position,
-            input,
-            candidate,
-            overlap_length,
-        );
+        let score = similarity_score(output, output_position, input, candidate, overlap_length);
         let distance = candidate.abs_diff(expected_position);
         if score > best_score + f64::EPSILON
             || ((score - best_score).abs() <= f64::EPSILON && distance < best_distance)

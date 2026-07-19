@@ -1341,8 +1341,7 @@ fn plan_transition_diagnostics(
                 + next.analysis.bpm * next.speed_ratio)
                 * 0.5)
                 .clamp(MIN_BPM, MAX_BPM);
-            let requested_frames =
-                transition_frame_count(current, next, options.transition_bars);
+            let requested_frames = transition_frame_count(current, next, options.transition_bars);
             let actual_frames = transition_frames[index];
             let duration_seconds = actual_frames as f32 / OUTPUT_SAMPLE_RATE as f32;
             let mut decisions = vec![
@@ -1522,9 +1521,7 @@ fn allocate_transition_frame_counts(section_frames: &[usize], requested: &[usize
             requested[index],
             following_requested,
         );
-        let overlap = requested[index]
-            .min(remaining[index])
-            .min(next_budget);
+        let overlap = requested[index].min(remaining[index]).min(next_budget);
         overlaps.push(overlap);
         remaining[index] = remaining[index].saturating_sub(overlap);
         remaining[index + 1] = section_frames[index + 1].saturating_sub(overlap);
