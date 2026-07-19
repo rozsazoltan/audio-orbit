@@ -1,6 +1,6 @@
 use crate::{
-    app_data_dir, time_stretch::pitch_preserving_stretch, DjMixEvent, DjMixOptions, DjMixStyle,
-    DjMixTrack, DjTrackSectionMode,
+    app_data_dir, time_stretch::pitch_preserving_stretch, DjBridgeMode, DjMixEvent, DjMixOptions,
+    DjMixStyle, DjMixTrack, DjTrackSectionMode,
 };
 use anyhow::{anyhow, Context, Result};
 use ebur128::{EbuR128, Mode};
@@ -10,20 +10,25 @@ use shine_rs::{Mp3Encoder, Mp3EncoderConfig, StereoMode};
 use std::{
     cmp::Ordering,
     collections::BTreeMap,
+    env,
+    ffi::{OsStr, OsString},
     fs::{self, File},
+    hash::{Hash, Hasher},
     io::{BufReader, BufWriter, Write},
     path::{Path, PathBuf},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering as AtomicOrdering},
         mpsc::Sender,
         Arc,
     },
-    time::{Instant, UNIX_EPOCH},
+    thread,
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
-const ENGINE_SCHEMA_VERSION: u32 = 2;
-const ANALYZER_VERSION: &str = "audio-orbit-envelope-ebur128-v2";
-const ENGINE_VERSION: &str = "performance-dj-v5-composed-bridge-wsola";
+const ENGINE_SCHEMA_VERSION: u32 = 3;
+const ANALYZER_VERSION: &str = "audio-orbit+optional-essentia-v3";
+const ENGINE_VERSION: &str = "human-dj-v7-essentia-rubberband-demucs";
 const OUTPUT_SAMPLE_RATE: u32 = 44_100;
 const OUTPUT_CHANNELS: u16 = 2;
 const ANALYSIS_RATE_HZ: usize = 100;
@@ -39,9 +44,193 @@ const MIN_SECTION_SECONDS: f32 = 24.0;
 const MAX_AUTO_SECTION_SECONDS: f32 = 150.0;
 
 #[derive(Clone, Debug)]
+struct ExternalCommand {
+    program: PathBuf,
+    prefix_args: Vec<OsString>,
+    display_name: &'static str,
+}
+
+impl ExternalCommand {
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        command.args(&self.prefix_args);
+        command
+    }
+
+    fn label(&self) -> String {
+        format!("{} ({})", self.display_name, self.program.display())
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ProfessionalToolchain {
+    essentia: Option<ExternalCommand>,
+    rubber_band: Option<ExternalCommand>,
+    demucs: Option<ExternalCommand>,
+}
+
+impl ProfessionalToolchain {
+    fn detect(enabled: bool) -> Self {
+        if !enabled {
+            return Self::default();
+        }
+        Self {
+            essentia: resolve_external_command(
+                "AUDIO_ORBIT_ESSENTIA_PATH",
+                &[
+                    "essentia_streaming_extractor_music.exe",
+                    "essentia_streaming_extractor_music",
+                ],
+                &[],
+                "Essentia",
+            ),
+            rubber_band: resolve_external_command(
+                "AUDIO_ORBIT_RUBBERBAND_PATH",
+                &[
+                    "rubberband-r3.exe",
+                    "rubberband.exe",
+                    "rubberband-r3",
+                    "rubberband",
+                ],
+                &[],
+                "Rubber Band R3",
+            ),
+            demucs: resolve_demucs_command(),
+        }
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "Professional tools: Essentia {} · Rubber Band {} · Demucs {}",
+            availability_mark(self.essentia.is_some()),
+            availability_mark(self.rubber_band.is_some()),
+            availability_mark(self.demucs.is_some()),
+        )
+    }
+
+    fn report(&self) -> ProfessionalToolReport {
+        ProfessionalToolReport {
+            essentia: self
+                .essentia
+                .as_ref()
+                .map(ExternalCommand::label)
+                .unwrap_or_else(|| "not available; built-in rhythm analyzer used".to_owned()),
+            rubber_band: self
+                .rubber_band
+                .as_ref()
+                .map(ExternalCommand::label)
+                .unwrap_or_else(|| "not available; built-in WSOLA used".to_owned()),
+            demucs: self
+                .demucs
+                .as_ref()
+                .map(ExternalCommand::label)
+                .unwrap_or_else(|| "not available; full-mix fallback used".to_owned()),
+        }
+    }
+}
+
+pub(crate) fn professional_tool_status_summary() -> String {
+    ProfessionalToolchain::detect(true).summary()
+}
+
+fn availability_mark(available: bool) -> &'static str {
+    if available {
+        "detected"
+    } else {
+        "missing"
+    }
+}
+
+fn resolve_demucs_command() -> Option<ExternalCommand> {
+    if let Some(command) = resolve_external_command(
+        "AUDIO_ORBIT_DEMUCS_PATH",
+        &["demucs.exe", "demucs"],
+        &[],
+        "Demucs",
+    ) {
+        return Some(command);
+    }
+    let python = env::var_os("AUDIO_ORBIT_DEMUCS_PYTHON")
+        .and_then(|value| resolve_executable(OsStr::new(&value)))?;
+    Some(ExternalCommand {
+        program: python,
+        prefix_args: vec![OsString::from("-m"), OsString::from("demucs")],
+        display_name: "Demucs",
+    })
+}
+
+fn resolve_external_command(
+    env_name: &str,
+    candidates: &[&str],
+    prefix_args: &[&str],
+    display_name: &'static str,
+) -> Option<ExternalCommand> {
+    let program = env::var_os(env_name)
+        .and_then(|value| resolve_executable(OsStr::new(&value)))
+        .or_else(|| {
+            candidates
+                .iter()
+                .find_map(|candidate| resolve_executable(OsStr::new(*candidate)))
+        })?;
+    Some(ExternalCommand {
+        program,
+        prefix_args: prefix_args
+            .iter()
+            .map(|value| OsString::from(*value))
+            .collect(),
+        display_name,
+    })
+}
+
+fn resolve_executable(candidate: &OsStr) -> Option<PathBuf> {
+    let candidate_path = PathBuf::from(candidate);
+    if candidate_path.components().count() > 1 || candidate_path.is_absolute() {
+        return candidate_path.is_file().then_some(candidate_path);
+    }
+
+    let path = env::var_os("PATH")?;
+    let extensions = executable_extensions(&candidate_path);
+    for directory in env::split_paths(&path) {
+        for extension in &extensions {
+            let mut file_name = candidate_path.clone();
+            if !extension.is_empty() && file_name.extension().is_none() {
+                file_name.set_extension(extension.trim_start_matches('.'));
+            }
+            let full = directory.join(file_name);
+            if full.is_file() {
+                return Some(full);
+            }
+        }
+    }
+    None
+}
+
+fn executable_extensions(candidate: &Path) -> Vec<String> {
+    if candidate.extension().is_some() {
+        return vec![String::new()];
+    }
+    #[cfg(windows)]
+    {
+        let mut values = env::var("PATHEXT")
+            .unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".to_owned())
+            .split(';')
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        values.push(String::new());
+        values
+    }
+    #[cfg(not(windows))]
+    {
+        vec![String::new()]
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct ExportRequest {
     pub tracks: Vec<DjMixTrack>,
     pub options: DjMixOptions,
+    pub custom_bridge_path: Option<PathBuf>,
     pub output_path: PathBuf,
 }
 
@@ -58,10 +247,12 @@ struct TrackAnalysis {
     true_peak: f64,
     duration_seconds: f32,
     energy_curve: Vec<f32>,
+    beat_positions_seconds: Vec<f32>,
     sections: Vec<DetectedSection>,
     musical_key: Option<String>,
     key_confidence: Option<f32>,
     vocal_profile: AnalysisAvailability,
+    analysis_backend: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -141,6 +332,14 @@ struct MixReport {
     tracks: Vec<TrackDiagnostic>,
     transitions: Vec<TransitionDiagnostic>,
     warnings: Vec<String>,
+    professional_tools: ProfessionalToolReport,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct ProfessionalToolReport {
+    essentia: String,
+    rubber_band: String,
+    demucs: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -164,6 +363,7 @@ struct TrackDiagnostic {
     musical_key: Option<String>,
     key_confidence: Option<f32>,
     vocal_analysis: String,
+    analysis_backend: String,
     selected_section: String,
     section_start_seconds: f32,
     section_end_seconds: f32,
@@ -368,6 +568,9 @@ fn export_mix_inner(
         fs::create_dir_all(parent)?;
     }
 
+    let tools = ProfessionalToolchain::detect(request.options.professional_tools);
+    send_progress(sender, tools.summary(), 0.01);
+
     let mut timings = RenderTimings::default();
     let analysis_started = Instant::now();
     let mut cache = load_analysis_cache();
@@ -379,7 +582,7 @@ fn export_mix_inner(
             format!("Analyzing {}", track.title),
             index as f32 / (request.tracks.len() as f32 * 2.5),
         );
-        let analysis = cached_or_analyze(track, &mut cache, cancel)?;
+        let analysis = cached_or_analyze(track, &mut cache, &tools, cancel)?;
         analyzed.push((track.clone(), analysis));
     }
     save_analysis_cache(&cache);
@@ -387,12 +590,21 @@ fn export_mix_inner(
 
     let planning_started = Instant::now();
     let planned = plan_tracks(analyzed, request.options)?;
-    let transitions = plan_transition_diagnostics(&planned, request.options);
+    let transitions = plan_transition_diagnostics(&planned, request.options, &tools);
     timings.planning = planning_started.elapsed().as_millis();
 
     let rendering_started = Instant::now();
     let mut writer = Mp3StreamWriter::create(temporary_path, request.options.bitrate_kbps)?;
-    render_planned_mix(&planned, request.options, &mut writer, sender, cancel)?;
+    let custom_bridge = load_custom_bridge(request, sender, cancel)?;
+    render_planned_mix(
+        &planned,
+        request.options,
+        custom_bridge.as_ref(),
+        &tools,
+        &mut writer,
+        sender,
+        cancel,
+    )?;
     ensure_not_cancelled(cancel)?;
     timings.rendering = rendering_started.elapsed().as_millis();
 
@@ -407,6 +619,7 @@ fn export_mix_inner(
         request.options,
         measurement.clone(),
         timings.clone(),
+        tools.report(),
     );
     let report_bytes = serde_json::to_vec_pretty(&report)
         .context("Failed to serialize DJ transition diagnostics")?;
@@ -439,12 +652,85 @@ fn validate_options(options: DjMixOptions) -> Result<()> {
     if !matches!(options.bitrate_kbps, 192 | 256 | 320) {
         return Err(anyhow!("DJ MP3 bitrate must be 192, 256, or 320 kbps."));
     }
+    if !(0.25..=60.0).contains(&options.bridge_loop_seconds) {
+        return Err(anyhow!(
+            "Custom bridge loop length must be between 0.25 and 60 seconds."
+        ));
+    }
+    if !(0.15..=1.0).contains(&options.bridge_level) {
+        return Err(anyhow!("Bridge level must be between 0.15 and 1.0."));
+    }
     Ok(())
+}
+
+struct RenderedSection {
+    mix: Vec<[f32; 2]>,
+    stems: Option<StemSet>,
+}
+
+struct StemSet {
+    drums: Vec<[f32; 2]>,
+    bass: Vec<[f32; 2]>,
+    other: Vec<[f32; 2]>,
+    vocals: Vec<[f32; 2]>,
+}
+
+impl StemSet {
+    fn frame(&self, stem: StemKind, index: usize) -> [f32; 2] {
+        let frames = match stem {
+            StemKind::Drums => &self.drums,
+            StemKind::Bass => &self.bass,
+            StemKind::Other => &self.other,
+            StemKind::Vocals => &self.vocals,
+        };
+        frames.get(index).copied().unwrap_or([0.0, 0.0])
+    }
+
+    fn target_len(&self) -> usize {
+        self.drums
+            .len()
+            .max(self.bass.len())
+            .max(self.other.len())
+            .max(self.vocals.len())
+    }
+
+    fn normalize_lengths(&mut self) {
+        let target = self.target_len();
+        fit_frames(&mut self.drums, target);
+        fit_frames(&mut self.bass, target);
+        fit_frames(&mut self.other, target);
+        fit_frames(&mut self.vocals, target);
+    }
+
+    fn recombine(&self) -> Vec<[f32; 2]> {
+        (0..self.target_len())
+            .map(|index| {
+                let drums = self.frame(StemKind::Drums, index);
+                let bass = self.frame(StemKind::Bass, index);
+                let other = self.frame(StemKind::Other, index);
+                let vocals = self.frame(StemKind::Vocals, index);
+                [
+                    drums[0] + bass[0] + other[0] + vocals[0],
+                    drums[1] + bass[1] + other[1] + vocals[1],
+                ]
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StemKind {
+    Drums,
+    Bass,
+    Other,
+    Vocals,
 }
 
 fn render_planned_mix(
     tracks: &[PlannedTrack],
     options: DjMixOptions,
+    custom_bridge: Option<&CustomBridgeAudio>,
+    tools: &ProfessionalToolchain,
     writer: &mut Mp3StreamWriter,
     sender: &Sender<DjMixEvent>,
     cancel: &AtomicBool,
@@ -452,12 +738,8 @@ fn render_planned_mix(
     let first = tracks
         .first()
         .ok_or_else(|| anyhow!("DJ plan contains no tracks."))?;
-    send_progress(
-        sender,
-        format!("Decoding and preparing {}", first.track.title),
-        0.40,
-    );
-    let mut current_audio = render_planned_section(first, options.style, cancel)?;
+    send_progress(sender, format!("Preparing {}", first.track.title), 0.40);
+    let mut current_audio = render_planned_section(first, options, tools, sender, cancel)?;
     let planned_transitions = planned_transition_frame_counts(tracks, options);
 
     for pair_index in 0..tracks.len() - 1 {
@@ -470,7 +752,7 @@ fn render_planned_mix(
                 "{} {} → {}",
                 match options.style {
                     DjMixStyle::Crossfade => "Crossfading",
-                    DjMixStyle::SmartDj => "Human DJ mixing",
+                    DjMixStyle::SmartDj => "Planning human transition",
                 },
                 current.track.title,
                 next.track.title
@@ -478,37 +760,32 @@ fn render_planned_mix(
             0.45 + pair_index as f32 / ((tracks.len() - 1) as f32 * 2.0),
         );
 
-        send_progress(
-            sender,
-            format!("Decoding and preparing {}", next.track.title),
-            0.45 + pair_index as f32 / ((tracks.len() - 1) as f32 * 2.0),
-        );
-        let next_audio = render_planned_section(next, options.style, cancel)?;
+        let next_audio = render_planned_section(next, options, tools, sender, cancel)?;
         let requested_transition = planned_transitions[pair_index];
         let following_transition = planned_transitions
             .get(pair_index + 1)
             .copied()
             .unwrap_or(0);
         let next_budget = incoming_transition_budget(
-            next_audio.len(),
+            next_audio.mix.len(),
             requested_transition,
             following_transition,
         );
         let overlap = requested_transition
-            .min(current_audio.len())
+            .min(current_audio.mix.len())
             .min(next_budget);
         if overlap == 0 {
-            write_frames(&current_audio, current.gain, writer, cancel)?;
+            write_frames(&current_audio.mix, current.gain, writer, cancel)?;
             current_audio = next_audio;
             continue;
         }
 
-        let body_len = current_audio.len().saturating_sub(overlap);
-        write_frames(&current_audio[..body_len], current.gain, writer, cancel)?;
+        let body_len = current_audio.mix.len().saturating_sub(overlap);
+        write_frames(&current_audio.mix[..body_len], current.gain, writer, cancel)?;
         match options.style {
             DjMixStyle::Crossfade => write_crossfade_transition(
-                &current_audio[body_len..],
-                &next_audio[..overlap],
+                &current_audio.mix[body_len..],
+                &next_audio.mix[..overlap],
                 current.gain,
                 next.gain,
                 options.bass_swap,
@@ -516,42 +793,130 @@ fn render_planned_mix(
                 cancel,
             )?,
             DjMixStyle::SmartDj => write_performance_transition(
-                &current_audio[body_len..],
-                &next_audio[..overlap],
+                &current_audio.mix[body_len..],
+                &next_audio.mix[..overlap],
+                current_audio.stems.as_ref(),
+                body_len,
+                next_audio.stems.as_ref(),
                 current,
                 next,
                 options.bass_swap,
+                options.bridge_mode,
+                options.bridge_level,
+                custom_bridge,
                 writer,
                 cancel,
             )?,
         }
-        current_audio = next_audio[overlap..].to_vec();
+        current_audio.mix = next_audio.mix[overlap..].to_vec();
+        current_audio.stems = next_audio.stems.map(|mut stems| {
+            stems.drums = stems.drums.into_iter().skip(overlap).collect();
+            stems.bass = stems.bass.into_iter().skip(overlap).collect();
+            stems.other = stems.other.into_iter().skip(overlap).collect();
+            stems.vocals = stems.vocals.into_iter().skip(overlap).collect();
+            stems
+        });
     }
 
     let last = tracks
         .last()
         .ok_or_else(|| anyhow!("DJ plan contains no tracks."))?;
-    write_frames(&current_audio, last.gain, writer, cancel)?;
+    write_frames(&current_audio.mix, last.gain, writer, cancel)?;
     Ok(())
 }
 
 fn render_planned_section(
     track: &PlannedTrack,
-    style: DjMixStyle,
+    options: DjMixOptions,
+    tools: &ProfessionalToolchain,
+    sender: &Sender<DjMixEvent>,
     cancel: &AtomicBool,
-) -> Result<Vec<[f32; 2]>> {
+) -> Result<RenderedSection> {
+    send_progress(sender, format!("Decoding {}", track.track.title), 0.42);
     let decoded = decode_section(
         &track.track.path,
         track.section_start_seconds,
         track.section_end_seconds,
         cancel,
     )?;
-    if style == DjMixStyle::Crossfade || (track.speed_ratio - 1.0).abs() < 0.0005 {
-        return Ok(decoded);
+
+    let mut stems = if options.style == DjMixStyle::SmartDj
+        && options.professional_tools
+        && options.stem_separation
+        && tools.demucs.is_some()
+    {
+        send_progress(
+            sender,
+            format!(
+                "Separating drums, bass, vocals and music: {}",
+                track.track.title
+            ),
+            0.43,
+        );
+        match separate_with_demucs(track, &decoded, tools, cancel) {
+            Ok(stems) => stems,
+            Err(error) if cancel.load(AtomicOrdering::Relaxed) => return Err(error),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    if options.style == DjMixStyle::Crossfade || (track.speed_ratio - 1.0).abs() < 0.0005 {
+        if let Some(stems) = stems.as_mut() {
+            stems.normalize_lengths();
+        }
+        return Ok(RenderedSection {
+            mix: stems.as_ref().map(StemSet::recombine).unwrap_or(decoded),
+            stems,
+        });
     }
 
     ensure_not_cancelled(cancel)?;
-    let output = pitch_preserving_stretch(&decoded, track.speed_ratio);
+    let cache_tag = section_cache_tag(track)?;
+    if let Some(stems) = stems.as_mut() {
+        send_progress(
+            sender,
+            format!("Studio tempo match per stem: {}", track.track.title),
+            0.44,
+        );
+        stems.drums = stretch_audio(
+            &stems.drums,
+            track.speed_ratio,
+            tools,
+            &format!("{cache_tag}-drums"),
+            cancel,
+        )?;
+        stems.bass = stretch_audio(
+            &stems.bass,
+            track.speed_ratio,
+            tools,
+            &format!("{cache_tag}-bass"),
+            cancel,
+        )?;
+        stems.other = stretch_audio(
+            &stems.other,
+            track.speed_ratio,
+            tools,
+            &format!("{cache_tag}-other"),
+            cancel,
+        )?;
+        stems.vocals = stretch_audio(
+            &stems.vocals,
+            track.speed_ratio,
+            tools,
+            &format!("{cache_tag}-vocals"),
+            cancel,
+        )?;
+        stems.normalize_lengths();
+        let mix = stems.recombine();
+        if mix.is_empty() {
+            return Err(anyhow!("Tempo matching failed for {}", track.track.title));
+        }
+        return Ok(RenderedSection { mix, stems });
+    }
+
+    let output = stretch_audio(&decoded, track.speed_ratio, tools, &cache_tag, cancel)?;
     ensure_not_cancelled(cancel)?;
     if output.is_empty() {
         return Err(anyhow!(
@@ -559,7 +924,216 @@ fn render_planned_section(
             track.track.title
         ));
     }
+    Ok(RenderedSection {
+        mix: output,
+        stems: None,
+    })
+}
+
+fn section_cache_tag(track: &PlannedTrack) -> Result<String> {
+    let start = track.section_start_seconds.to_le_bytes();
+    let end = track.section_end_seconds.to_le_bytes();
+    let key = file_cache_key(
+        &track.track.path,
+        &[ENGINE_VERSION.as_bytes(), &start, &end],
+    )?;
+    Ok(format!("{key:016x}-{:.6}", track.speed_ratio))
+}
+
+fn separate_with_demucs(
+    track: &PlannedTrack,
+    decoded: &[[f32; 2]],
+    tools: &ProfessionalToolchain,
+    cancel: &AtomicBool,
+) -> Result<Option<StemSet>> {
+    let Some(demucs) = tools.demucs.as_ref() else {
+        return Ok(None);
+    };
+    let cache_tag = section_cache_tag(track)?;
+    let cache_dir = professional_cache_dir().join("demucs").join(cache_tag);
+    fs::create_dir_all(&cache_dir)?;
+    let input_path = cache_dir.join("section.wav");
+    if !input_path.is_file() {
+        write_pcm16_wav(&input_path, decoded)?;
+    }
+
+    let mut stem_paths = locate_demucs_stems(&cache_dir);
+    if stem_paths.is_none() {
+        let mut command = demucs.command();
+        command
+            .arg("-n")
+            .arg("htdemucs")
+            .arg("--out")
+            .arg(&cache_dir)
+            .arg("--shifts")
+            .arg("0")
+            .arg("--overlap")
+            .arg("0.25")
+            .arg(&input_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let status = run_command_cancellable(command, cancel)?;
+        if !status.success() {
+            return Ok(None);
+        }
+        stem_paths = locate_demucs_stems(&cache_dir);
+    }
+    let Some([drums_path, bass_path, other_path, vocals_path]) = stem_paths else {
+        return Ok(None);
+    };
+    Ok(Some(StemSet {
+        drums: decode_entire_audio(&drums_path, cancel)?,
+        bass: decode_entire_audio(&bass_path, cancel)?,
+        other: decode_entire_audio(&other_path, cancel)?,
+        vocals: decode_entire_audio(&vocals_path, cancel)?,
+    }))
+}
+
+fn locate_demucs_stems(root: &Path) -> Option<[PathBuf; 4]> {
+    Some([
+        find_file_named(root, "drums.wav")?,
+        find_file_named(root, "bass.wav")?,
+        find_file_named(root, "other.wav")?,
+        find_file_named(root, "vocals.wav")?,
+    ])
+}
+
+fn find_file_named(root: &Path, file_name: &str) -> Option<PathBuf> {
+    let entries = fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_file_named(&path, file_name) {
+                return Some(found);
+            }
+        } else if path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case(file_name))
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn stretch_audio(
+    frames: &[[f32; 2]],
+    speed_ratio: f32,
+    tools: &ProfessionalToolchain,
+    cache_tag: &str,
+    cancel: &AtomicBool,
+) -> Result<Vec<[f32; 2]>> {
+    ensure_not_cancelled(cancel)?;
+    if frames.is_empty() || (speed_ratio - 1.0).abs() < 0.0005 {
+        return Ok(frames.to_vec());
+    }
+    if let Some(rubber_band) = tools.rubber_band.as_ref() {
+        match stretch_with_rubber_band(frames, speed_ratio, rubber_band, cache_tag, cancel) {
+            Ok(output) if !output.is_empty() => return Ok(output),
+            Err(error) if cancel.load(AtomicOrdering::Relaxed) => return Err(error),
+            _ => {}
+        }
+    }
+    ensure_not_cancelled(cancel)?;
+    Ok(pitch_preserving_stretch(frames, speed_ratio))
+}
+
+fn stretch_with_rubber_band(
+    frames: &[[f32; 2]],
+    speed_ratio: f32,
+    rubber_band: &ExternalCommand,
+    cache_tag: &str,
+    cancel: &AtomicBool,
+) -> Result<Vec<[f32; 2]>> {
+    let cache_dir = professional_cache_dir().join("rubber-band");
+    fs::create_dir_all(&cache_dir)?;
+    let safe_tag = cache_tag
+        .chars()
+        .map(|value| {
+            if value.is_ascii_alphanumeric() || matches!(value, '-' | '_') {
+                value
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let input_path = cache_dir.join(format!("{safe_tag}-input.wav"));
+    let output_path = cache_dir.join(format!("{safe_tag}-output.wav"));
+    if !output_path.is_file() {
+        write_pcm16_wav(&input_path, frames)?;
+        let mut command = rubber_band.command();
+        command
+            .arg("-3")
+            .arg("--centre-focus")
+            .arg("--quiet")
+            .arg("--tempo")
+            .arg(format!("{speed_ratio:.8}"))
+            .arg(&input_path)
+            .arg(&output_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let status = run_command_cancellable(command, cancel)?;
+        if !status.success() {
+            return Err(anyhow!("Rubber Band exited with {status}"));
+        }
+    }
+    decode_entire_audio(&output_path, cancel)
+}
+
+fn write_pcm16_wav(path: &Path, frames: &[[f32; 2]]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let data_bytes = frames.len() as u32 * OUTPUT_CHANNELS as u32 * 2;
+    let byte_rate = OUTPUT_SAMPLE_RATE * OUTPUT_CHANNELS as u32 * 2;
+    let block_align = OUTPUT_CHANNELS * 2;
+    let mut file = BufWriter::new(File::create(path)?);
+    file.write_all(b"RIFF")?;
+    file.write_all(&(36u32.saturating_add(data_bytes)).to_le_bytes())?;
+    file.write_all(b"WAVEfmt ")?;
+    file.write_all(&16u32.to_le_bytes())?;
+    file.write_all(&1u16.to_le_bytes())?;
+    file.write_all(&OUTPUT_CHANNELS.to_le_bytes())?;
+    file.write_all(&OUTPUT_SAMPLE_RATE.to_le_bytes())?;
+    file.write_all(&byte_rate.to_le_bytes())?;
+    file.write_all(&block_align.to_le_bytes())?;
+    file.write_all(&16u16.to_le_bytes())?;
+    file.write_all(b"data")?;
+    file.write_all(&data_bytes.to_le_bytes())?;
+    for frame in frames {
+        file.write_all(&float_to_i16(frame[0]).to_le_bytes())?;
+        file.write_all(&float_to_i16(frame[1]).to_le_bytes())?;
+    }
+    file.flush()?;
+    Ok(())
+}
+
+fn decode_entire_audio(path: &Path, cancel: &AtomicBool) -> Result<Vec<[f32; 2]>> {
+    let file = File::open(path)
+        .with_context(|| format!("Failed to open audio file: {}", path.display()))?;
+    let decoder = Decoder::new(BufReader::new(file))
+        .with_context(|| format!("Failed to decode audio file: {}", path.display()))?;
+    let mut source =
+        UniformSourceIterator::<_, f32>::new(decoder, OUTPUT_CHANNELS, OUTPUT_SAMPLE_RATE);
+    let mut output = Vec::new();
+    let mut index = 0usize;
+    while let Some(frame) = read_stereo_frame(&mut source) {
+        if index % (OUTPUT_SAMPLE_RATE as usize / 2) == 0 {
+            ensure_not_cancelled(cancel)?;
+        }
+        output.push(frame);
+        index += 1;
+    }
     Ok(output)
+}
+
+fn fit_frames(frames: &mut Vec<[f32; 2]>, target: usize) {
+    if frames.len() > target {
+        frames.truncate(target);
+    } else if frames.len() < target {
+        frames.resize(target, [0.0, 0.0]);
+    }
 }
 
 fn decode_section(
@@ -666,9 +1240,15 @@ fn write_crossfade_transition(
 fn write_performance_transition(
     outgoing: &[[f32; 2]],
     incoming: &[[f32; 2]],
+    outgoing_stems: Option<&StemSet>,
+    outgoing_stem_offset: usize,
+    incoming_stems: Option<&StemSet>,
     current: &PlannedTrack,
     next: &PlannedTrack,
     bass_swap: bool,
+    bridge_mode: DjBridgeMode,
+    bridge_level: f32,
+    custom_bridge: Option<&CustomBridgeAudio>,
     writer: &mut Mp3StreamWriter,
     cancel: &AtomicBool,
 ) -> Result<()> {
@@ -685,101 +1265,113 @@ fn write_performance_transition(
     );
     let bpm = ((current.analysis.bpm + next.analysis.bpm) * 0.5).clamp(MIN_BPM, MAX_BPM);
     let beat_frames = ((60.0 / bpm) * OUTPUT_SAMPLE_RATE as f32).round().max(1.0) as usize;
-    let loop_frames = beat_frames
-        .min(frames)
-        .max((OUTPUT_SAMPLE_RATE / 8) as usize);
+    let loop_frames = beat_frames.saturating_mul(4).max(256).min(frames);
     let strong_change = transition_should_hit_hard(current, next);
-    let mut outgoing_low = LowPassStereo::new(180.0);
-    let mut incoming_low = LowPassStereo::new(180.0);
+    let stems_available = outgoing_stems.is_some() && incoming_stems.is_some();
+    let recipe = TransitionRecipe::resolve(
+        bridge_mode,
+        transition_seed(current, next),
+        strong_change,
+        stems_available,
+        keys_are_compatible(current, next),
+    );
+
     let mut outgoing_sweep = LowPassStereo::new(18_000.0);
-    let mut incoming_sweep = LowPassStereo::new(350.0);
-    let mut delay = StereoDelay::new((beat_frames / 2).max(1), 0.38);
+    let mut incoming_sweep = LowPassStereo::new(320.0);
+    let mut harmonic_sweep = LowPassStereo::new(7_500.0);
+    let mut delay = StereoDelay::new((beat_frames / 2).max(1), 0.42);
+    let mut percussion = TransitionPercussion::new(bpm, transition_seed(current, next));
     let mut outgoing_vocal_guard = CenterVocalGuard::new();
     let mut incoming_vocal_guard = CenterVocalGuard::new();
     let vocal_plan = plan_vocal_handoff(&outgoing[..frames], &incoming[..frames]);
-    let seed = transition_seed(current, next);
-    let mut bridge = MusicalBridge::new(bpm, seed, strong_change);
 
     for index in 0..frames {
         if index % (OUTPUT_SAMPLE_RATE as usize / 2) == 0 {
             ensure_not_cancelled(cancel)?;
         }
         let progress = normalized_progress(index, frames);
-        let repeat_divisor = if progress < 0.42 {
-            1
-        } else if progress < 0.62 {
-            2
-        } else {
-            4
-        };
-        let repeat_len = (loop_frames / repeat_divisor).max(64);
-        let loop_start = frames.saturating_sub(loop_frames);
-        let loop_index = loop_start + ((index.saturating_sub(loop_start)) % repeat_len);
-        let source_index = if index >= loop_start {
-            loop_index.min(frames - 1)
-        } else {
-            index
-        };
-
         if index % 64 == 0 {
-            outgoing_sweep.set_cutoff(18_000.0 - progress.powf(1.6) * 17_300.0);
-            incoming_sweep.set_cutoff(450.0 + progress.powf(1.5) * 17_500.0);
+            outgoing_sweep.set_cutoff(18_000.0 - smoothstep(0.28, 0.78, progress) * 16_900.0);
+            incoming_sweep.set_cutoff(300.0 + smoothstep(0.58, 0.90, progress) * 17_600.0);
+            harmonic_sweep.set_cutoff(2_800.0 + smoothstep(0.25, 0.70, progress) * 9_000.0);
         }
 
-        let mut out = multiply_frame(outgoing[source_index], current.gain * peak_scale);
-        let mut input = multiply_frame(incoming[index], next.gain * peak_scale);
-        let filtered_out = outgoing_sweep.process(out);
-        let filtered_in = incoming_sweep.process(input);
-        out = mix_frame(out, filtered_out, (progress * 1.3).clamp(0.0, 0.94));
-        input = mix_frame(
-            input,
-            filtered_in,
-            ((1.0 - progress) * 1.35).clamp(0.0, 0.96),
-        );
-
-        if bass_swap {
-            apply_bass_swap(
-                &mut out,
-                &mut input,
-                progress,
-                &mut outgoing_low,
-                &mut incoming_low,
+        let mut mixed = if let (Some(out_stems), Some(in_stems)) = (outgoing_stems, incoming_stems)
+        {
+            let gates = recipe.stem_gates(progress, strong_change, bass_swap);
+            mix_stem_transition_frame(
+                out_stems,
+                outgoing_stem_offset + index,
+                in_stems,
+                index,
+                gates,
+                current.gain * peak_scale,
+                next.gain * peak_scale,
+            )
+        } else {
+            let mut out = multiply_frame(outgoing[index], current.gain * peak_scale);
+            let mut input = multiply_frame(incoming[index], next.gain * peak_scale);
+            let (outgoing_vocal_duck, incoming_vocal_duck) =
+                vocal_plan.duck_amounts(index, progress);
+            out = outgoing_vocal_guard.process(out, outgoing_vocal_duck);
+            input = incoming_vocal_guard.process(input, incoming_vocal_duck);
+            out = mix_frame(
+                out,
+                outgoing_sweep.process(out),
+                smoothstep(0.28, 0.72, progress) * 0.88,
             );
-        }
+            input = mix_frame(
+                incoming_sweep.process(input),
+                input,
+                smoothstep(0.66, 0.90, progress),
+            );
+            let out_gate =
+                1.0 - smoothstep(0.42, if strong_change { 0.66 } else { 0.74 }, progress);
+            let in_gate = smoothstep(if strong_change { 0.72 } else { 0.66 }, 0.88, progress);
+            [
+                out[0] * out_gate + input[0] * in_gate,
+                out[1] * out_gate + input[1] * in_gate,
+            ]
+        };
 
-        let (outgoing_vocal_duck, incoming_vocal_duck) = vocal_plan.duck_amounts(index, progress);
-        out = outgoing_vocal_guard.process(out, outgoing_vocal_duck);
-        input = incoming_vocal_guard.process(input, incoming_vocal_duck);
-
-        let delayed = delay.process(out);
-        let echo_mix = ((progress - 0.30) / 0.42).clamp(0.0, 0.38);
-        out = [
-            out[0] + delayed[0] * echo_mix,
-            out[1] + delayed[1] * echo_mix,
-        ];
-
-        // Senior-style handoff: the next complete song does not sit underneath and slowly grow.
-        // The outgoing phrase exits, an original rhythmic/melodic bridge owns the middle,
-        // then the incoming track is revealed on a phrase boundary or drop.
-        let out_gate = 1.0 - smoothstep(0.40, if strong_change { 0.64 } else { 0.72 }, progress);
-        let in_gate = smoothstep(
-            if strong_change { 0.76 } else { 0.68 },
-            if strong_change { 0.84 } else { 0.88 },
-            progress,
+        let deck_bridge = transition_deck_bridge(
+            recipe,
+            outgoing,
+            incoming,
+            outgoing_stems,
+            outgoing_stem_offset,
+            incoming_stems,
+            index,
+            frames,
+            loop_frames,
+            &mut harmonic_sweep,
         );
-        let mut mixed = [
-            out[0] * out_gate + input[0] * in_gate,
-            out[1] * out_gate + input[1] * in_gate,
-        ];
-
-        let bridge_frame = bridge.render(index, progress);
-        let bridge_gate =
-            smoothstep(0.22, 0.38, progress) * (1.0 - smoothstep(0.80, 0.94, progress));
+        let custom = custom_bridge
+            .filter(|_| bridge_mode == DjBridgeMode::Custom)
+            .map(|audio| audio.render(index, progress));
+        let bridge_frame = custom.unwrap_or(deck_bridge);
+        let bridge_gate = recipe.bridge_gate(progress, strong_change) * bridge_level;
         mixed[0] += bridge_frame[0] * bridge_gate;
         mixed[1] += bridge_frame[1] * bridge_gate;
 
-        if strong_change && progress > 0.72 && progress < 0.76 {
-            let cut = 1.0 - smoothstep(0.72, 0.755, progress);
+        let percussion_frame = percussion.render(index, progress, strong_change);
+        let percussion_gate = recipe.percussion_gate(progress);
+        mixed[0] += percussion_frame[0] * percussion_gate;
+        mixed[1] += percussion_frame[1] * percussion_gate;
+
+        if recipe.uses_echo_out() {
+            let echo_source = multiply_frame(outgoing[index], current.gain * peak_scale);
+            let delayed = delay.process(echo_source);
+            let echo_gate =
+                smoothstep(0.36, 0.55, progress) * (1.0 - smoothstep(0.76, 0.90, progress));
+            mixed[0] += delayed[0] * echo_gate * 0.46;
+            mixed[1] += delayed[1] * echo_gate * 0.46;
+        }
+
+        if recipe.has_drop_cut() && progress > 0.69 && progress < 0.735 {
+            let down = 1.0 - smoothstep(0.69, 0.715, progress);
+            let up = smoothstep(0.715, 0.735, progress);
+            let cut = down.max(up).clamp(0.0, 1.0);
             mixed[0] *= cut;
             mixed[1] *= cut;
         }
@@ -794,99 +1386,407 @@ fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
     x * x * (3.0 - 2.0 * x)
 }
 
-struct MusicalBridge {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransitionRecipe {
+    DrumSwap,
+    HarmonicBridge,
+    EchoDrop,
+    StemMashup,
+    CustomBridge,
+}
+
+impl TransitionRecipe {
+    fn resolve(
+        mode: DjBridgeMode,
+        seed: u32,
+        strong: bool,
+        stems_available: bool,
+        harmonic_match: bool,
+    ) -> Self {
+        match mode {
+            DjBridgeMode::DrumSwap => Self::DrumSwap,
+            DjBridgeMode::HarmonicBridge => Self::HarmonicBridge,
+            DjBridgeMode::EchoDrop => Self::EchoDrop,
+            DjBridgeMode::StemMashup => Self::StemMashup,
+            DjBridgeMode::Custom => Self::CustomBridge,
+            DjBridgeMode::Auto if strong => Self::EchoDrop,
+            DjBridgeMode::Auto if stems_available && harmonic_match => {
+                if seed % 2 == 0 {
+                    Self::HarmonicBridge
+                } else {
+                    Self::StemMashup
+                }
+            }
+            DjBridgeMode::Auto if stems_available => Self::DrumSwap,
+            DjBridgeMode::Auto => match seed % 3 {
+                0 => Self::DrumSwap,
+                1 => Self::EchoDrop,
+                _ => Self::HarmonicBridge,
+            },
+        }
+    }
+
+    fn stem_gates(self, progress: f32, strong: bool, bass_swap: bool) -> StemGates {
+        let bass_point = if bass_swap { 0.54 } else { 0.66 };
+        match self {
+            Self::DrumSwap => StemGates {
+                out_drums: 1.0 - smoothstep(0.34, 0.58, progress),
+                out_bass: 1.0 - smoothstep(bass_point - 0.06, bass_point, progress),
+                out_other: 1.0 - smoothstep(0.58, 0.80, progress),
+                out_vocals: 1.0 - smoothstep(0.32, 0.52, progress),
+                in_drums: smoothstep(0.22, 0.46, progress),
+                in_bass: smoothstep(bass_point, bass_point + 0.10, progress),
+                in_other: smoothstep(0.62, 0.84, progress),
+                in_vocals: smoothstep(0.82, 0.96, progress),
+            },
+            Self::HarmonicBridge => StemGates {
+                out_drums: 1.0 - smoothstep(0.42, 0.68, progress),
+                out_bass: 1.0 - smoothstep(0.46, 0.58, progress),
+                out_other: 1.0 - smoothstep(0.66, 0.88, progress),
+                out_vocals: 1.0 - smoothstep(0.26, 0.46, progress),
+                in_drums: smoothstep(0.42, 0.68, progress),
+                in_bass: smoothstep(0.58, 0.70, progress),
+                in_other: smoothstep(0.58, 0.86, progress),
+                in_vocals: smoothstep(0.84, 0.98, progress),
+            },
+            Self::EchoDrop => StemGates {
+                out_drums: 1.0 - smoothstep(0.42, 0.68, progress),
+                out_bass: 1.0 - smoothstep(0.46, 0.62, progress),
+                out_other: 1.0 - smoothstep(0.50, 0.70, progress),
+                out_vocals: 1.0 - smoothstep(0.38, 0.58, progress),
+                in_drums: smoothstep(0.72, 0.79, progress),
+                in_bass: smoothstep(0.74, 0.82, progress),
+                in_other: smoothstep(0.74, 0.84, progress),
+                in_vocals: smoothstep(0.84, 0.96, progress),
+            },
+            Self::StemMashup | Self::CustomBridge => StemGates {
+                out_drums: 1.0 - smoothstep(0.48, 0.72, progress),
+                out_bass: 1.0 - smoothstep(0.48, 0.58, progress),
+                out_other: 1.0 - smoothstep(0.68, 0.88, progress),
+                out_vocals: 1.0 - smoothstep(0.30, 0.50, progress),
+                in_drums: smoothstep(0.26, 0.48, progress),
+                in_bass: smoothstep(0.58, 0.70, progress),
+                in_other: smoothstep(0.60, 0.84, progress),
+                in_vocals: smoothstep(if strong { 0.86 } else { 0.82 }, 0.96, progress),
+            },
+        }
+    }
+
+    fn bridge_gate(self, progress: f32, strong: bool) -> f32 {
+        let start = match self {
+            Self::EchoDrop => 0.28,
+            _ => 0.18,
+        };
+        let end = if strong { 0.88 } else { 0.92 };
+        smoothstep(start, start + 0.12, progress) * (1.0 - smoothstep(end, 0.98, progress))
+    }
+
+    fn percussion_gate(self, progress: f32) -> f32 {
+        match self {
+            Self::HarmonicBridge => 0.34 * smoothstep(0.24, 0.44, progress),
+            Self::EchoDrop => 0.72 * smoothstep(0.32, 0.68, progress),
+            _ => 0.48 * smoothstep(0.20, 0.44, progress),
+        }
+    }
+
+    fn uses_echo_out(self) -> bool {
+        matches!(self, Self::EchoDrop | Self::CustomBridge)
+    }
+
+    fn has_drop_cut(self) -> bool {
+        matches!(self, Self::EchoDrop)
+    }
+
+    fn diagnostic_name(self) -> &'static str {
+        match self {
+            Self::DrumSwap => "drum_swap",
+            Self::HarmonicBridge => "harmonic_bridge",
+            Self::EchoDrop => "echo_drop",
+            Self::StemMashup => "stem_mashup",
+            Self::CustomBridge => "custom_bridge",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StemGates {
+    out_drums: f32,
+    out_bass: f32,
+    out_other: f32,
+    out_vocals: f32,
+    in_drums: f32,
+    in_bass: f32,
+    in_other: f32,
+    in_vocals: f32,
+}
+
+fn mix_stem_transition_frame(
+    outgoing: &StemSet,
+    outgoing_index: usize,
+    incoming: &StemSet,
+    incoming_index: usize,
+    gates: StemGates,
+    outgoing_gain: f32,
+    incoming_gain: f32,
+) -> [f32; 2] {
+    let mut mixed = [0.0, 0.0];
+    add_scaled(
+        &mut mixed,
+        outgoing.frame(StemKind::Drums, outgoing_index),
+        outgoing_gain * gates.out_drums,
+    );
+    add_scaled(
+        &mut mixed,
+        outgoing.frame(StemKind::Bass, outgoing_index),
+        outgoing_gain * gates.out_bass,
+    );
+    add_scaled(
+        &mut mixed,
+        outgoing.frame(StemKind::Other, outgoing_index),
+        outgoing_gain * gates.out_other,
+    );
+    add_scaled(
+        &mut mixed,
+        outgoing.frame(StemKind::Vocals, outgoing_index),
+        outgoing_gain * gates.out_vocals,
+    );
+    add_scaled(
+        &mut mixed,
+        incoming.frame(StemKind::Drums, incoming_index),
+        incoming_gain * gates.in_drums,
+    );
+    add_scaled(
+        &mut mixed,
+        incoming.frame(StemKind::Bass, incoming_index),
+        incoming_gain * gates.in_bass,
+    );
+    add_scaled(
+        &mut mixed,
+        incoming.frame(StemKind::Other, incoming_index),
+        incoming_gain * gates.in_other,
+    );
+    add_scaled(
+        &mut mixed,
+        incoming.frame(StemKind::Vocals, incoming_index),
+        incoming_gain * gates.in_vocals,
+    );
+    mixed
+}
+
+fn add_scaled(target: &mut [f32; 2], frame: [f32; 2], gain: f32) {
+    target[0] += frame[0] * gain;
+    target[1] += frame[1] * gain;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transition_deck_bridge(
+    recipe: TransitionRecipe,
+    outgoing: &[[f32; 2]],
+    incoming: &[[f32; 2]],
+    outgoing_stems: Option<&StemSet>,
+    outgoing_stem_offset: usize,
+    incoming_stems: Option<&StemSet>,
+    index: usize,
+    frames: usize,
+    loop_frames: usize,
+    harmonic_filter: &mut LowPassStereo,
+) -> [f32; 2] {
+    let progress = normalized_progress(index, frames);
+    let loop_position = index % loop_frames.max(1);
+    if let (Some(out_stems), Some(in_stems)) = (outgoing_stems, incoming_stems) {
+        let out_loop_start = outgoing_stem_offset + frames.saturating_sub(loop_frames);
+        let out_index = out_loop_start + loop_position;
+        let in_index = loop_position;
+        let out_drums = out_stems.frame(StemKind::Drums, out_index);
+        let in_drums = in_stems.frame(StemKind::Drums, in_index);
+        let out_other = out_stems.frame(StemKind::Other, out_index);
+        let in_other = in_stems.frame(StemKind::Other, in_index);
+        return match recipe {
+            TransitionRecipe::DrumSwap => [
+                out_drums[0] * (1.0 - progress) + in_drums[0] * progress,
+                out_drums[1] * (1.0 - progress) + in_drums[1] * progress,
+            ],
+            TransitionRecipe::HarmonicBridge => {
+                let harmonic = [
+                    out_other[0] * (1.0 - progress) + in_other[0] * progress,
+                    out_other[1] * (1.0 - progress) + in_other[1] * progress,
+                ];
+                harmonic_filter.process(harmonic)
+            }
+            TransitionRecipe::EchoDrop => [out_drums[0] * 0.42, out_drums[1] * 0.42],
+            TransitionRecipe::StemMashup | TransitionRecipe::CustomBridge => [
+                out_other[0] * (1.0 - progress) + in_drums[0] * progress,
+                out_other[1] * (1.0 - progress) + in_drums[1] * progress,
+            ],
+        };
+    }
+
+    let out_loop_start = frames.saturating_sub(loop_frames);
+    let out_index = (out_loop_start + loop_position).min(outgoing.len().saturating_sub(1));
+    let in_index = loop_position.min(incoming.len().saturating_sub(1));
+    let out = outgoing.get(out_index).copied().unwrap_or([0.0, 0.0]);
+    let input = incoming.get(in_index).copied().unwrap_or([0.0, 0.0]);
+    let blend = [
+        out[0] * (1.0 - progress) + input[0] * progress,
+        out[1] * (1.0 - progress) + input[1] * progress,
+    ];
+    harmonic_filter.process(blend)
+}
+
+fn keys_are_compatible(current: &PlannedTrack, next: &PlannedTrack) -> bool {
+    analysis_keys_are_compatible(&current.analysis, &next.analysis)
+}
+
+fn analysis_keys_are_compatible(left: &TrackAnalysis, right: &TrackAnalysis) -> bool {
+    let (Some(left_key), Some(right_key)) =
+        (left.musical_key.as_deref(), right.musical_key.as_deref())
+    else {
+        return false;
+    };
+    harmonic_keys_are_compatible(left_key, right_key)
+}
+
+fn harmonic_keys_are_compatible(left: &str, right: &str) -> bool {
+    let (Some((left_pitch, left_mode)), Some((right_pitch, right_mode))) =
+        (parse_musical_key(left), parse_musical_key(right))
+    else {
+        return left.eq_ignore_ascii_case(right);
+    };
+    if left_pitch == right_pitch && left_mode == right_mode {
+        return true;
+    }
+
+    match (left_mode, right_mode) {
+        (KeyMode::Major, KeyMode::Minor) => (right_pitch + 3).rem_euclid(12) == left_pitch,
+        (KeyMode::Minor, KeyMode::Major) => (left_pitch + 3).rem_euclid(12) == right_pitch,
+        _ => {
+            let interval = (right_pitch - left_pitch).rem_euclid(12);
+            matches!(interval, 0 | 5 | 7)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyMode {
+    Major,
+    Minor,
+    Unknown,
+}
+
+fn parse_musical_key(key: &str) -> Option<(i32, KeyMode)> {
+    let mut tokens = key.split_whitespace();
+    let pitch = key_pitch_class(tokens.next()?)?;
+    let mode = match tokens.next().map(str::to_ascii_lowercase).as_deref() {
+        Some("major" | "maj") => KeyMode::Major,
+        Some("minor" | "min") => KeyMode::Minor,
+        _ => KeyMode::Unknown,
+    };
+    Some((pitch, mode))
+}
+
+fn key_pitch_class(token: &str) -> Option<i32> {
+    match token {
+        "C" => Some(0),
+        "C#" | "Db" => Some(1),
+        "D" => Some(2),
+        "D#" | "Eb" => Some(3),
+        "E" => Some(4),
+        "F" => Some(5),
+        "F#" | "Gb" => Some(6),
+        "G" => Some(7),
+        "G#" | "Ab" => Some(8),
+        "A" => Some(9),
+        "A#" | "Bb" => Some(10),
+        "B" => Some(11),
+        _ => None,
+    }
+}
+
+struct CustomBridgeAudio {
+    frames: Vec<[f32; 2]>,
+}
+
+impl CustomBridgeAudio {
+    fn render(&self, frame_index: usize, progress: f32) -> [f32; 2] {
+        if self.frames.is_empty() {
+            return [0.0, 0.0];
+        }
+        let position = frame_index % self.frames.len();
+        let frame = self.frames[position];
+        let loop_edge = position as f32 / self.frames.len() as f32;
+        let edge_fade =
+            smoothstep(0.0, 0.035, loop_edge) * (1.0 - smoothstep(0.965, 1.0, loop_edge));
+        let movement = 0.94 + 0.06 * (std::f32::consts::TAU * progress).sin();
+        [
+            frame[0] * edge_fade * movement,
+            frame[1] * edge_fade * movement,
+        ]
+    }
+}
+
+fn load_custom_bridge(
+    request: &ExportRequest,
+    sender: &Sender<DjMixEvent>,
+    cancel: &AtomicBool,
+) -> Result<Option<CustomBridgeAudio>> {
+    if request.options.bridge_mode != DjBridgeMode::Custom {
+        return Ok(None);
+    }
+    let path = request
+        .custom_bridge_path
+        .as_ref()
+        .ok_or_else(|| anyhow!("Custom bridge mode requires an audio file."))?;
+    send_progress(sender, "Preparing custom bridge audio".to_owned(), 0.39);
+    let start = request.options.bridge_start_seconds.max(0.0);
+    let end = start + request.options.bridge_loop_seconds.clamp(0.25, 60.0);
+    let frames = decode_section(path, start, end, cancel)
+        .with_context(|| format!("Failed to prepare custom bridge: {}", path.display()))?;
+    Ok(Some(CustomBridgeAudio { frames }))
+}
+
+struct TransitionPercussion {
     bpm: f32,
     seed: u32,
-    strong: bool,
     kick_phase: f32,
-    bass_phase: f32,
-    pluck_phase: f32,
-    string_phase: f32,
-    previous_step: usize,
-    pluck_envelope: f32,
-    string_filter: f32,
     noise_state: u32,
 }
 
-impl MusicalBridge {
-    fn new(bpm: f32, seed: u32, strong: bool) -> Self {
+impl TransitionPercussion {
+    fn new(bpm: f32, seed: u32) -> Self {
         Self {
             bpm,
             seed,
-            strong,
             kick_phase: 0.0,
-            bass_phase: 0.0,
-            pluck_phase: 0.0,
-            string_phase: 0.0,
-            previous_step: usize::MAX,
-            pluck_envelope: 0.0,
-            string_filter: 0.0,
             noise_state: seed ^ 0xA5A5_17C3,
         }
     }
 
-    fn render(&mut self, frame_index: usize, progress: f32) -> [f32; 2] {
+    fn render(&mut self, frame_index: usize, progress: f32, strong: bool) -> [f32; 2] {
         let seconds = frame_index as f32 / OUTPUT_SAMPLE_RATE as f32;
         let beats = seconds * self.bpm / 60.0;
-        let step = (beats * 2.0).floor() as usize;
         let beat_phase = beats.fract();
         let half_beat_phase = (beats * 2.0).fract();
-        if step != self.previous_step {
-            self.previous_step = step;
-            self.pluck_envelope = if step % 2 == 0 { 1.0 } else { 0.68 };
-        }
-
-        let root_midi = 43 + (self.seed % 8) as i32;
-        let scale = [0, 3, 5, 7, 10, 12, 15, 17];
-        let note = root_midi + scale[(step + ((self.seed >> 8) as usize)) % scale.len()];
-        let note_hz = 440.0 * 2.0f32.powf((note as f32 - 69.0) / 12.0);
-        let bass_hz = 440.0 * 2.0f32.powf((root_midi as f32 - 69.0) / 12.0);
-
-        let kick_env = (-beat_phase * 18.0).exp();
-        let kick_hz = 48.0 + 75.0 * (-beat_phase * 24.0).exp();
+        let kick_env = (-beat_phase * 19.0).exp();
+        let kick_hz = 46.0 + 76.0 * (-beat_phase * 25.0).exp();
         self.kick_phase = (self.kick_phase + kick_hz / OUTPUT_SAMPLE_RATE as f32).fract();
-        let kick = (std::f32::consts::TAU * self.kick_phase).sin() * kick_env * 0.30;
-
-        self.bass_phase = (self.bass_phase + bass_hz / OUTPUT_SAMPLE_RATE as f32).fract();
-        let bass = (std::f32::consts::TAU * self.bass_phase).sin()
-            * (0.08 + 0.05 * (1.0 - half_beat_phase))
-            * (1.0 - kick_env * 0.65);
-
-        self.pluck_phase = (self.pluck_phase + note_hz / OUTPUT_SAMPLE_RATE as f32).fract();
-        self.pluck_envelope *= 0.99972;
-        let fundamental = (std::f32::consts::TAU * self.pluck_phase).sin();
-        let harmonic = (std::f32::consts::TAU * self.pluck_phase * 2.0).sin() * 0.34;
-        let pluck = (fundamental + harmonic) * self.pluck_envelope * 0.13;
-
-        let string_hz = note_hz * 0.5;
-        self.string_phase = (self.string_phase + string_hz / OUTPUT_SAMPLE_RATE as f32).fract();
-        let bow = (std::f32::consts::TAU * self.string_phase).sin()
-            + (std::f32::consts::TAU * self.string_phase * 2.01).sin() * 0.28;
-        self.string_filter += 0.018 * (bow - self.string_filter);
-        let string_rise =
-            smoothstep(0.34, 0.66, progress) * (1.0 - smoothstep(0.68, 0.88, progress));
-        let string = self.string_filter * string_rise * 0.10;
-
+        let kick = (std::f32::consts::TAU * self.kick_phase).sin() * kick_env * 0.20;
         let noise = transition_noise(&mut self.noise_state);
-        let hat_env = if half_beat_phase < 0.10 {
-            (1.0 - half_beat_phase / 0.10) * 0.055
+        let hat = if half_beat_phase < 0.08 {
+            noise * (1.0 - half_beat_phase / 0.08) * 0.042
         } else {
             0.0
         };
-        let hat = noise * hat_env;
-        let snare_position = (beats + 0.5).fract();
-        let snare_env = if snare_position < 0.12 {
-            (1.0 - snare_position / 0.12).powi(2)
+        let snare_phase = (beats + 0.5).fract();
+        let snare = if snare_phase < 0.10 {
+            noise * (1.0 - snare_phase / 0.10).powi(2) * if strong { 0.09 } else { 0.055 }
         } else {
             0.0
         };
-        let snare = noise * snare_env * if self.strong { 0.12 } else { 0.075 };
-
-        let stereo_motion = (std::f32::consts::TAU * seconds * 0.23).sin() * 0.18;
-        let tonal = kick + bass + pluck + string;
+        let roll = smoothstep(0.56, 0.78, progress);
+        let pan = (((self.seed & 0xff) as f32 / 255.0) - 0.5) * 0.18;
         [
-            tonal * (1.0 - stereo_motion) + hat + snare,
-            tonal * (1.0 + stereo_motion) - hat * 0.72 + snare,
+            kick + hat * (1.0 - pan) + snare * roll,
+            kick + hat * (1.0 + pan) + snare * roll,
         ]
     }
 }
@@ -1113,6 +2013,7 @@ impl LowPassStereo {
 fn cached_or_analyze(
     track: &DjMixTrack,
     cache: &mut AnalysisCache,
+    tools: &ProfessionalToolchain,
     cancel: &AtomicBool,
 ) -> Result<TrackAnalysis> {
     let metadata = fs::metadata(&track.path)
@@ -1123,33 +2024,42 @@ fn cached_or_analyze(
         .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
         .map(|value| value.as_nanos())
         .unwrap_or(0);
+    let analyzer_version = if tools.essentia.is_some() {
+        format!("{ANALYZER_VERSION}+essentia")
+    } else {
+        format!("{ANALYZER_VERSION}+builtin")
+    };
     let key = track.path.to_string_lossy().to_string();
     if cache.schema_version == ENGINE_SCHEMA_VERSION {
         if let Some(entry) = cache.tracks.get(&key) {
             if entry.file_len == metadata.len()
                 && entry.modified_nanos == modified_nanos
-                && entry.analyzer_version == ANALYZER_VERSION
+                && entry.analyzer_version == analyzer_version
             {
                 return Ok(entry.analysis.clone());
             }
         }
     }
 
-    let analysis = analyze_track(&track.path, cancel)?;
+    let analysis = analyze_track(&track.path, tools, cancel)?;
     cache.schema_version = ENGINE_SCHEMA_VERSION;
     cache.tracks.insert(
         key,
         CachedTrackAnalysis {
             file_len: metadata.len(),
             modified_nanos,
-            analyzer_version: ANALYZER_VERSION.to_owned(),
+            analyzer_version,
             analysis: analysis.clone(),
         },
     );
     Ok(analysis)
 }
 
-fn analyze_track(path: &Path, cancel: &AtomicBool) -> Result<TrackAnalysis> {
+fn analyze_track(
+    path: &Path,
+    tools: &ProfessionalToolchain,
+    cancel: &AtomicBool,
+) -> Result<TrackAnalysis> {
     let file = File::open(path)
         .with_context(|| format!("Failed to open audio file: {}", path.display()))?;
     let decoder = Decoder::new(BufReader::new(file))
@@ -1220,9 +2130,9 @@ fn analyze_track(path: &Path, cancel: &AtomicBool) -> Result<TrackAnalysis> {
     if energy_count > 0 {
         energy_curve.push((energy_sum / energy_count as f32).sqrt());
     }
-    if frames_read < OUTPUT_SAMPLE_RATE as usize * 8 {
+    if frames_read == 0 {
         return Err(anyhow!(
-            "Track is too short for DJ analysis: {}",
+            "Track contains no decodable audio: {}",
             path.display()
         ));
     }
@@ -1263,7 +2173,15 @@ fn analyze_track(path: &Path, cancel: &AtomicBool) -> Result<TrackAnalysis> {
         trailing_silence_seconds,
     );
 
-    Ok(TrackAnalysis {
+    let mut beat_positions_seconds = Vec::new();
+    let beat_period = 60.0 / bpm.max(1.0);
+    let mut beat = beat_offset_seconds.max(0.0);
+    while beat <= duration_seconds {
+        beat_positions_seconds.push(beat);
+        beat += beat_period;
+    }
+
+    let mut analysis = TrackAnalysis {
         bpm,
         bpm_confidence,
         beat_offset_seconds,
@@ -1278,13 +2196,295 @@ fn analyze_track(path: &Path, cancel: &AtomicBool) -> Result<TrackAnalysis> {
         true_peak: maximum_peak(&loudness, true).unwrap_or(0.0),
         duration_seconds,
         energy_curve,
+        beat_positions_seconds,
         sections,
         musical_key: None,
         key_confidence: None,
         vocal_profile: AnalysisAvailability::Unavailable {
-            reason: "No approved vocal/stem model is bundled.".to_owned(),
+            reason: "Stem separation is evaluated during export when Demucs is available."
+                .to_owned(),
         },
+        analysis_backend: "built-in rhythm envelope + ebur128".to_owned(),
+    };
+
+    if let Some(essentia) = tools.essentia.as_ref() {
+        match analyze_with_essentia(path, essentia, cancel) {
+            Ok(external) => apply_essentia_analysis(&mut analysis, external),
+            Err(error) if cancel.load(AtomicOrdering::Relaxed) => return Err(error),
+            Err(_) => {}
+        }
+    }
+    Ok(analysis)
+}
+
+#[derive(Clone, Debug)]
+struct EssentiaTrackAnalysis {
+    bpm: Option<f32>,
+    confidence: Option<f32>,
+    beats: Vec<f32>,
+    key: Option<String>,
+    key_strength: Option<f32>,
+}
+
+fn analyze_with_essentia(
+    path: &Path,
+    essentia: &ExternalCommand,
+    cancel: &AtomicBool,
+) -> Result<EssentiaTrackAnalysis> {
+    let cache_dir = professional_cache_dir().join("essentia");
+    fs::create_dir_all(&cache_dir)?;
+    let cache_key = file_cache_key(path, &[ANALYZER_VERSION.as_bytes()])?;
+    let output_path = cache_dir.join(format!("{cache_key:016x}.json"));
+    let profile_path = cache_dir.join("audio-orbit-music-extractor.yaml");
+    if !profile_path.is_file() {
+        fs::write(
+            &profile_path,
+            concat!(
+                "outputFormat: json\n",
+                "outputFrames: 0\n",
+                "requireMbid: false\n",
+                "indent: 2\n",
+                "analysisSampleRate: 44100.0\n",
+                "rhythm:\n",
+                "  method: multifeature\n",
+                "  minTempo: 70\n",
+                "  maxTempo: 180\n",
+                "tonal:\n",
+                "  frameSize: 4096\n",
+                "  hopSize: 2048\n",
+                "  zeroPadding: 0\n",
+                "  windowType: blackmanharris62\n",
+                "  silentFrames: noise\n",
+                "highlevel:\n",
+                "  compute: 0\n",
+            ),
+        )?;
+    }
+
+    if !output_path.is_file() {
+        let mut command = essentia.command();
+        command
+            .arg(path)
+            .arg(&output_path)
+            .arg(&profile_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let status = run_command_cancellable(command, cancel)
+            .context("Essentia music analysis failed to start")?;
+        if !status.success() {
+            return Err(anyhow!("Essentia exited with {status}"));
+        }
+    }
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&output_path).with_context(|| {
+            format!("Failed to read Essentia output: {}", output_path.display())
+        })?)
+        .context("Failed to parse Essentia JSON output")?;
+    let bpm = json_number(&value, &["rhythm.bpm"]);
+    let confidence = json_number(&value, &["rhythm.confidence", "rhythm.beats_confidence"]);
+    let beats = json_number_array(&value, &["rhythm.beats_position", "rhythm.beats_positions"]);
+    let key_name = json_string(
+        &value,
+        &[
+            "tonal.key_edma.key",
+            "tonal.key_temperley.key",
+            "tonal.key_krumhansl.key",
+        ],
+    );
+    let scale = json_string(
+        &value,
+        &[
+            "tonal.key_edma.scale",
+            "tonal.key_temperley.scale",
+            "tonal.key_krumhansl.scale",
+        ],
+    );
+    let key_strength = json_number(
+        &value,
+        &[
+            "tonal.key_edma.strength",
+            "tonal.key_temperley.strength",
+            "tonal.key_krumhansl.strength",
+        ],
+    );
+    let key = match (key_name, scale) {
+        (Some(key), Some(scale)) => Some(format!("{key} {scale}")),
+        (Some(key), None) => Some(key),
+        _ => None,
+    };
+    Ok(EssentiaTrackAnalysis {
+        bpm,
+        confidence,
+        beats,
+        key,
+        key_strength,
     })
+}
+
+fn apply_essentia_analysis(analysis: &mut TrackAnalysis, external: EssentiaTrackAnalysis) {
+    if let Some(bpm) = external
+        .bpm
+        .filter(|bpm| bpm.is_finite() && (MIN_BPM..=MAX_BPM).contains(bpm))
+    {
+        analysis.bpm = bpm;
+    }
+    if !external.beats.is_empty() {
+        analysis.beat_positions_seconds = external
+            .beats
+            .into_iter()
+            .filter(|beat| beat.is_finite() && *beat >= 0.0 && *beat <= analysis.duration_seconds)
+            .collect();
+        if let Some(first) = analysis.beat_positions_seconds.first().copied() {
+            analysis.beat_offset_seconds = first;
+            analysis.downbeat_offset_seconds = estimate_downbeat_from_beats(
+                &analysis.beat_positions_seconds,
+                &analysis.energy_curve,
+            );
+        }
+    }
+    analysis.bpm_confidence = external
+        .confidence
+        .filter(|value| value.is_finite())
+        .unwrap_or_else(|| beat_grid_confidence(&analysis.beat_positions_seconds))
+        .clamp(0.0, 1.0);
+    analysis.musical_key = external.key;
+    analysis.key_confidence = external.key_strength.map(|value| value.clamp(0.0, 1.0));
+    analysis.analysis_backend = "Essentia music extractor + ebur128".to_owned();
+}
+
+fn estimate_downbeat_from_beats(beats: &[f32], energy_curve: &[f32]) -> f32 {
+    if beats.is_empty() {
+        return 0.0;
+    }
+    let mut best_phase = 0usize;
+    let mut best_score = f32::NEG_INFINITY;
+    for phase in 0..4 {
+        let mut score = 0.0f32;
+        let mut count = 0usize;
+        for beat in beats.iter().skip(phase).step_by(4) {
+            let index = seconds_to_energy_index(*beat).min(energy_curve.len().saturating_sub(1));
+            if let Some(value) = energy_curve.get(index) {
+                score += *value;
+                count += 1;
+            }
+        }
+        if count > 0 {
+            score /= count as f32;
+        }
+        if score > best_score {
+            best_score = score;
+            best_phase = phase;
+        }
+    }
+    beats.get(best_phase).copied().unwrap_or(beats[0])
+}
+
+fn beat_grid_confidence(beats: &[f32]) -> f32 {
+    if beats.len() < 4 {
+        return 0.0;
+    }
+    let intervals = beats
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .collect::<Vec<_>>();
+    let mean = intervals.iter().sum::<f32>() / intervals.len() as f32;
+    if mean <= 0.0 {
+        return 0.0;
+    }
+    let variance = intervals
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f32>()
+        / intervals.len() as f32;
+    (1.0 - variance.sqrt() / mean).clamp(0.0, 1.0)
+}
+
+fn json_value<'a>(root: &'a serde_json::Value, dotted_path: &str) -> Option<&'a serde_json::Value> {
+    if let Some(value) = root.get(dotted_path) {
+        return Some(value);
+    }
+    let mut current = root;
+    for part in dotted_path.split('.') {
+        current = current.get(part)?;
+    }
+    Some(current)
+}
+
+fn json_number(root: &serde_json::Value, paths: &[&str]) -> Option<f32> {
+    paths.iter().find_map(|path| {
+        let value = json_value(root, path)?;
+        value.as_f64().map(|number| number as f32).or_else(|| {
+            value
+                .as_array()?
+                .first()?
+                .as_f64()
+                .map(|number| number as f32)
+        })
+    })
+}
+
+fn json_string(root: &serde_json::Value, paths: &[&str]) -> Option<String> {
+    paths
+        .iter()
+        .find_map(|path| json_value(root, path)?.as_str().map(ToOwned::to_owned))
+}
+
+fn json_number_array(root: &serde_json::Value, paths: &[&str]) -> Vec<f32> {
+    paths
+        .iter()
+        .find_map(|path| {
+            json_value(root, path)?.as_array().map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_f64().map(|number| number as f32))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .unwrap_or_default()
+}
+
+fn run_command_cancellable(mut command: Command, cancel: &AtomicBool) -> Result<ExitStatus> {
+    let mut child = command.spawn()?;
+    wait_for_child(&mut child, cancel)
+}
+
+fn wait_for_child(child: &mut Child, cancel: &AtomicBool) -> Result<ExitStatus> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if cancel.load(AtomicOrdering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow!("DJ mix export cancelled."));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn professional_cache_dir() -> PathBuf {
+    app_data_dir()
+        .unwrap_or_else(env::temp_dir)
+        .join("dj-professional-cache")
+}
+
+fn file_cache_key(path: &Path, extra: &[&[u8]]) -> Result<u64> {
+    let metadata = fs::metadata(path)?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.to_string_lossy().hash(&mut hasher);
+    metadata.len().hash(&mut hasher);
+    modified.hash(&mut hasher);
+    for value in extra {
+        value.hash(&mut hasher);
+    }
+    Ok(hasher.finish())
 }
 
 fn silence_threshold(envelope: &[f32]) -> f32 {
@@ -1548,11 +2748,10 @@ fn select_track_section(
         DjTrackSectionMode::FavoriteRange => {
             let start = track.favorite_start_seconds.max(playable_start);
             let end = track.favorite_end_seconds.min(playable_end);
-            if end - start < MIN_SECTION_SECONDS * 0.5 {
+            if end <= start || end - start < 0.25 {
                 return Err(anyhow!(
-                    "Favorite range for '{}' must be at least {:.0} seconds and inside track duration.",
-                    track.title,
-                    MIN_SECTION_SECONDS * 0.5
+                    "Favorite range for '{}' must contain at least 0.25 seconds inside track duration.",
+                    track.title
                 ));
             }
             let aligned_start =
@@ -1643,16 +2842,16 @@ fn smart_order(mut tracks: Vec<(DjMixTrack, TrackAnalysis)>) -> Vec<(DjMixTrack,
     let mut ordered = Vec::with_capacity(tracks.len());
     ordered.push(tracks.remove(0));
     while !tracks.is_empty() {
-        let previous_bpm = ordered
+        let previous = &ordered
             .last()
-            .map(|(_, analysis)| analysis.bpm)
-            .unwrap_or(DEFAULT_BPM);
+            .expect("ordered DJ plan always contains the first track")
+            .1;
         let next_index = tracks
             .iter()
             .enumerate()
             .min_by(|(_, left), (_, right)| {
-                compatibility_cost(previous_bpm, &left.1)
-                    .partial_cmp(&compatibility_cost(previous_bpm, &right.1))
+                compatibility_cost(previous, &left.1)
+                    .partial_cmp(&compatibility_cost(previous, &right.1))
                     .unwrap_or(Ordering::Equal)
             })
             .map(|(index, _)| index)
@@ -1662,15 +2861,34 @@ fn smart_order(mut tracks: Vec<(DjMixTrack, TrackAnalysis)>) -> Vec<(DjMixTrack,
     ordered
 }
 
-fn compatibility_cost(previous_bpm: f32, analysis: &TrackAnalysis) -> f32 {
-    let bpm_cost = (analysis.bpm - previous_bpm).abs();
-    let confidence_penalty = (1.0 - analysis.bpm_confidence) * 8.0;
-    bpm_cost + confidence_penalty
+fn compatibility_cost(previous: &TrackAnalysis, candidate: &TrackAnalysis) -> f32 {
+    let bpm_cost = (candidate.bpm - previous.bpm).abs();
+    let confidence_penalty = (1.0 - candidate.bpm_confidence) * 8.0;
+    let harmonic_penalty = match (
+        previous.musical_key.as_deref(),
+        candidate.musical_key.as_deref(),
+    ) {
+        (Some(_), Some(_)) if analysis_keys_are_compatible(previous, candidate) => 0.0,
+        (Some(_), Some(_)) => 9.0,
+        _ => 3.0,
+    };
+    let previous_energy = representative_energy(previous);
+    let candidate_energy = representative_energy(candidate);
+    let energy_penalty = (candidate_energy - previous_energy).abs() * 12.0;
+    bpm_cost + confidence_penalty + harmonic_penalty + energy_penalty
+}
+
+fn representative_energy(analysis: &TrackAnalysis) -> f32 {
+    if analysis.energy_curve.is_empty() {
+        return 0.0;
+    }
+    analysis.energy_curve.iter().copied().sum::<f32>() / analysis.energy_curve.len() as f32
 }
 
 fn plan_transition_diagnostics(
     tracks: &[PlannedTrack],
     options: DjMixOptions,
+    tools: &ProfessionalToolchain,
 ) -> Vec<TransitionDiagnostic> {
     let transition_frames = planned_transition_frame_counts(tracks, options);
     tracks
@@ -1687,16 +2905,25 @@ fn plan_transition_diagnostics(
                 transition_frame_count(current, next, options.transition_bars);
             let actual_frames = transition_frames[index];
             let duration_seconds = actual_frames as f32 / OUTPUT_SAMPLE_RATE as f32;
+            let recipe = TransitionRecipe::resolve(
+                options.bridge_mode,
+                transition_seed(current, next),
+                transition_should_hit_hard(current, next),
+                options.professional_tools && options.stem_separation && tools.demucs.is_some(),
+                keys_are_compatible(current, next),
+            );
+            let mut warnings = Vec::new();
             let mut decisions = vec![
                 format!(
                     "Aligned to {}-bar phrase boundary.",
                     options.transition_bars
                 ),
                 format!(
-                    "Tempo target {:.2} BPM; pitch preserved by built-in WSOLA.",
+                    "Tempo target {:.2} BPM; Rubber Band R3 is preferred with built-in WSOLA fallback.",
                     effective_bpm
                 ),
-                "Composed instrumental bridge selected instead of a long incoming-track fade.".to_owned(),
+                format!("Transition recipe: {}.", recipe.diagnostic_name()),
+                "Outgoing and incoming lead vocals are never intentionally layered; the handoff is instrumental between vocal phrases.".to_owned(),
             ];
             if actual_frames < requested_frames {
                 decisions.push(format!(
@@ -1706,35 +2933,38 @@ fn plan_transition_diagnostics(
                 ));
             }
             if options.bass_swap {
-                decisions.push("Bass swap at transition midpoint.".to_owned());
+                decisions.push("Only one bass stem owns the low end around the handoff.".to_owned());
             }
-            decisions.push("Original beat, percussion, pluck, bass, and string bridge generated for the handoff.".to_owned());
-            let mut warnings = Vec::new();
-            if current.analysis.musical_key.is_none() || next.analysis.musical_key.is_none() {
+            if options.stem_separation && tools.demucs.is_some() {
+                decisions.push(
+                    "Demucs detected: renderer attempts drums, bass, accompaniment and vocal separation with independent phrase gates."
+                        .to_owned(),
+                );
+            } else if options.stem_separation {
                 warnings.push(
-                    "Harmonic compatibility unavailable: no approved key analyzer bundled."
+                    "Stem-aware mixing requested, but Demucs was not detected; full-mix vocal guard used."
                         .to_owned(),
                 );
             }
-            decisions.push(
-                "Center-channel vocal guard selected: one lead vocal is prioritized at a time."
-                    .to_owned(),
-            );
-            warnings.push(
-                "Vocal guard uses deterministic center-channel activity detection; isolated stems are not bundled."
-                    .to_owned(),
-            );
+            if current.analysis.musical_key.is_none() || next.analysis.musical_key.is_none() {
+                warnings.push(
+                    "Harmonic compatibility unavailable; automatic mode avoids assuming a key match."
+                        .to_owned(),
+                );
+            }
             if current.analysis.bpm_confidence < 0.15 || next.analysis.bpm_confidence < 0.15 {
                 warnings.push("Low BPM confidence; transition may need manual review.".to_owned());
+            }
+            if !options.professional_tools {
+                warnings.push(
+                    "Professional tools disabled; built-in analysis, WSOLA and full-mix fallback used."
+                        .to_owned(),
+                );
             }
             TransitionDiagnostic {
                 from_title: current.track.title.clone(),
                 to_title: next.track.title.clone(),
-                style: if transition_should_hit_hard(current, next) {
-                    "composed_bridge_drop".to_owned()
-                } else {
-                    "composed_bridge_handoff".to_owned()
-                },
+                style: recipe.diagnostic_name().to_owned(),
                 phrase_bars: options.transition_bars,
                 duration_seconds,
                 effective_bpm,
@@ -1760,6 +2990,7 @@ fn build_report(
     options: DjMixOptions,
     measurement: OutputMeasurement,
     timings: RenderTimings,
+    professional_tools: ProfessionalToolReport,
 ) -> MixReport {
     let planned_duration_seconds = tracks
         .iter()
@@ -1785,6 +3016,7 @@ fn build_report(
             musical_key: track.analysis.musical_key.clone(),
             key_confidence: track.analysis.key_confidence,
             vocal_analysis: analysis_availability_label(&track.analysis.vocal_profile),
+            analysis_backend: track.analysis.analysis_backend.clone(),
             selected_section: format!("{:?}", track.track.section_mode),
             section_start_seconds: track.section_start_seconds,
             section_end_seconds: track.section_end_seconds,
@@ -1808,13 +3040,14 @@ fn build_report(
         tracks: track_diagnostics,
         transitions,
         warnings: vec![
-            "Section labels are deterministic energy heuristics, not ML semantic classification."
+            "Section labels remain deterministic energy heuristics; Essentia supplies beat and key descriptors, not semantic song structure."
                 .to_owned(),
-            "Key, vocal, genre, and stem analysis remain disabled until dependency/model licensing and packaging are approved."
+            "Essentia, Rubber Band and Demucs are optional user-installed executables and are not bundled with Audio Orbit."
                 .to_owned(),
-            "Built-in WSOLA time stretching and transition planning are deterministic."
+            "When an external tool fails or is missing, export continues with deterministic built-in fallbacks."
                 .to_owned(),
         ],
+        professional_tools,
     }
 }
 
@@ -2212,7 +3445,8 @@ mod tests {
         ));
         write_generated_click_fixture(&path, 120.0, 12.0).expect("write fixture");
         let cancel = AtomicBool::new(false);
-        let analysis = analyze_track(&path, &cancel).expect("analyze fixture");
+        let analysis = analyze_track(&path, &ProfessionalToolchain::default(), &cancel)
+            .expect("analyze fixture");
         let _ = fs::remove_file(path);
         assert!(
             (analysis.bpm - 120.0).abs() < 2.0,
@@ -2250,14 +3484,33 @@ mod tests {
     }
 
     #[test]
-    fn favorite_range_rejects_invalid_selection() {
+    fn favorite_range_accepts_short_usable_selection() {
         let mut track = DjMixTrack::new(PathBuf::from("favorite"), "favorite".to_owned());
         track.section_mode = DjTrackSectionMode::FavoriteRange;
         track.favorite_start_seconds = 50.0;
         track.favorite_end_seconds = 55.0;
         let analysis = test_analysis(120.0);
         let result = select_track_section(&track, &analysis, 60.0, 16);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn favorite_range_rejects_empty_selection() {
+        let mut track = DjMixTrack::new(PathBuf::from("favorite"), "favorite".to_owned());
+        track.section_mode = DjTrackSectionMode::FavoriteRange;
+        track.favorite_start_seconds = 55.0;
+        track.favorite_end_seconds = 55.0;
+        let analysis = test_analysis(120.0);
+        let result = select_track_section(&track, &analysis, 60.0, 16);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn harmonic_key_rules_accept_same_relative_and_fifth_keys() {
+        assert!(harmonic_keys_are_compatible("C major", "C major"));
+        assert!(harmonic_keys_are_compatible("C major", "A minor"));
+        assert!(harmonic_keys_are_compatible("C major", "G major"));
+        assert!(!harmonic_keys_are_compatible("C major", "F# major"));
     }
 
     #[test]
@@ -2391,6 +3644,7 @@ mod tests {
             true_peak: 0.55,
             duration_seconds: 180.0,
             energy_curve: vec![0.1; 360],
+            beat_positions_seconds: (0..360).map(|beat| beat as f32 * 0.5).collect(),
             sections: vec![DetectedSection {
                 kind: SectionKind::Main,
                 start_seconds: 16.0,
@@ -2403,6 +3657,7 @@ mod tests {
             vocal_profile: AnalysisAvailability::Unavailable {
                 reason: "test".to_owned(),
             },
+            analysis_backend: "test".to_owned(),
         }
     }
 

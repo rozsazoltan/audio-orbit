@@ -77,11 +77,13 @@ impl AudioOrbitApp {
         self.dj_mix_modal = Some(DjMixModalState {
             tracks,
             options: DjMixOptions::default(),
+            custom_bridge_path: None,
             stage: "Ready".to_owned(),
             progress: 0.0,
             output_path: None,
             report_path: None,
             diagnostics_summary: None,
+            professional_tool_status: dj_mix::professional_tool_status_summary(),
             completed: false,
             started_at: None,
             last_progress_at: None,
@@ -213,9 +215,21 @@ impl AudioOrbitApp {
             return;
         };
 
+        if modal.options.bridge_mode == DjBridgeMode::Custom
+            && modal
+                .custom_bridge_path
+                .as_ref()
+                .map(|path| !path.is_file())
+                .unwrap_or(true)
+        {
+            self.error_message = Some("Choose an available custom bridge audio file.".to_owned());
+            return;
+        }
+
         let request = dj_mix::ExportRequest {
             tracks: modal.tracks.clone(),
             options: modal.options,
+            custom_bridge_path: modal.custom_bridge_path.clone(),
             output_path,
         };
         let (sender, receiver) = mpsc::channel();
@@ -304,6 +318,8 @@ impl AudioOrbitApp {
         let mut cancel_requested = false;
         let mut reveal_path = None;
         let mut play_path = None;
+        let mut choose_bridge_requested = false;
+        let mut clear_bridge_requested = false;
 
         egui::Area::new(egui::Id::new("dj_mix_modal"))
             .order(egui::Order::Foreground)
@@ -317,7 +333,7 @@ impl AudioOrbitApp {
                         outer_padding.x,
                         Icon::Music,
                         "DJ Mix Builder",
-                        "Build one deterministic MP3 mix from selected tracks. Keep simple crossfades or use Smart DJ for phrase-aligned section selection, pitch-preserving tempo sync, beat repeats, loop tightening, filter sweeps, echoes, risers, impacts, and adaptive seamless or high-impact transitions.",
+                        "Build an offline DJ set with phrase-aware planning, stem-aware handoffs, professional analysis/time-stretch tools when installed, and deterministic fallbacks.",
                     ) {
                         if running {
                             cancel_requested = true;
@@ -354,7 +370,7 @@ impl AudioOrbitApp {
                                         });
                                         ui.small(match modal.options.style {
                                             DjMixStyle::Crossfade => "Simple equal-power overlap. No tempo change, loop roll, echo, or filter performance.",
-                                            DjMixStyle::SmartDj => "Deterministic offline performance-DJ engine: phrase selection, pitch-preserving BPM sync, beat-repeat loops, stutter builds, filter automation, echo throws, synthetic risers and impacts, optional bass swap, and adaptive seamless or high-impact drops.",
+                                            DjMixStyle::SmartDj => "Human-style transition planner. Uses Essentia for beat/key analysis, Rubber Band R3 for studio-quality tempo matching, and Demucs stems when those tools are installed; otherwise it falls back safely.",
                                         });
                                         ui.add_space(6.0);
                                         ui.horizontal_wrapped(|ui| {
@@ -362,6 +378,8 @@ impl AudioOrbitApp {
                                                 ui.checkbox(&mut modal.options.smart_order, "Smart BPM order");
                                                 ui.checkbox(&mut modal.options.normalize_loudness, "Loudness leveling");
                                                 ui.checkbox(&mut modal.options.bass_swap, "Bass swap");
+                                                ui.checkbox(&mut modal.options.professional_tools, "Professional tools");
+                                                ui.checkbox(&mut modal.options.stem_separation, "Stem-aware mixing");
                                             });
                                         });
                                         ui.horizontal_wrapped(|ui| {
@@ -387,6 +405,54 @@ impl AudioOrbitApp {
                                                 });
                                             }
                                         });
+                                        if modal.options.style == DjMixStyle::SmartDj {
+                                            ui.add_space(6.0);
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.label("Bridge:");
+                                                ui.add_enabled_ui(!running, |ui| {
+                                                    ui.selectable_value(&mut modal.options.bridge_mode, DjBridgeMode::Auto, "Auto human");
+                                                    ui.selectable_value(&mut modal.options.bridge_mode, DjBridgeMode::DrumSwap, "Drum swap");
+                                                    ui.selectable_value(&mut modal.options.bridge_mode, DjBridgeMode::HarmonicBridge, "Harmonic bridge");
+                                                    ui.selectable_value(&mut modal.options.bridge_mode, DjBridgeMode::EchoDrop, "Echo drop");
+                                                    ui.selectable_value(&mut modal.options.bridge_mode, DjBridgeMode::StemMashup, "Stem mashup");
+                                                    ui.selectable_value(&mut modal.options.bridge_mode, DjBridgeMode::Custom, "Custom audio");
+                                                });
+                                            });
+                                            ui.small("Auto chooses a phrase-level recipe. With Demucs, drums, bass, vocals, and accompaniment are handed over separately instead of fading two complete songs together.");
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.small(&modal.professional_tool_status);
+                                                if ui.add_enabled(!running, egui::Button::new("Refresh tools")).clicked() {
+                                                    modal.professional_tool_status = dj_mix::professional_tool_status_summary();
+                                                }
+                                            });
+                                            if modal.options.bridge_mode == DjBridgeMode::Custom {
+                                                ui.horizontal_wrapped(|ui| {
+                                                    let label = modal.custom_bridge_path.as_ref()
+                                                        .and_then(|path| path.file_name())
+                                                        .map(|name| name.to_string_lossy().into_owned())
+                                                        .unwrap_or_else(|| "No custom bridge selected".to_owned());
+                                                    ui.label(ellipsize_chars(&label, 54));
+                                                    if ui.add_enabled(!running, egui::Button::new("Choose MP3/audio...")).clicked() {
+                                                        choose_bridge_requested = true;
+                                                    }
+                                                    if modal.custom_bridge_path.is_some()
+                                                        && ui.add_enabled(!running, egui::Button::new("Clear")).clicked()
+                                                    {
+                                                        clear_bridge_requested = true;
+                                                    }
+                                                });
+                                                ui.horizontal_wrapped(|ui| {
+                                                    ui.label("Loop from:");
+                                                    ui.add_enabled(!running, egui::DragValue::new(&mut modal.options.bridge_start_seconds).range(0.0..=86_400.0).speed(0.5).suffix(" s"));
+                                                    ui.label("Loop length:");
+                                                    ui.add_enabled(!running, egui::DragValue::new(&mut modal.options.bridge_loop_seconds).range(0.25..=60.0).speed(0.25).suffix(" s"));
+                                                });
+                                            }
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.label("Bridge level:");
+                                                ui.add_enabled(!running, egui::Slider::new(&mut modal.options.bridge_level, 0.15..=1.0).show_value(true));
+                                            });
+                                        }
                                         ui.horizontal_wrapped(|ui| {
                                             ui.label("Target length:");
                                             ui.add_enabled(
@@ -398,7 +464,7 @@ impl AudioOrbitApp {
                                             );
                                             ui.small("Auto highlight sections are shortened to approach target.");
                                         });
-                                        ui.small("Both engines render outside playback callback. Only active section and transition buffers remain in RAM.");
+                                        ui.small("Export runs on a background worker. External tools are optional and never bundled; missing tools trigger deterministic built-in fallbacks.");
                                     });
 
                                     ui.add_space(8.0);
@@ -432,7 +498,7 @@ impl AudioOrbitApp {
                                                 }
                                             },
                                         );
-                                        ui.small("Choose target length and section mode per track, then export MP3. A deterministic .dj-plan.json report is saved beside it.");
+                                        ui.small("Choose target length and section mode per track, then export MP3. The .dj-plan.json report records tool backends and transition recipes.");
                                         if let Some(summary) = &modal.diagnostics_summary {
                                             ui.small(summary);
                                         }
@@ -605,6 +671,17 @@ impl AudioOrbitApp {
             });
         self.render_modal_info_footer_fixed(context, "dj_mix_modal_info_footer", screen_rect);
 
+        if clear_bridge_requested {
+            modal.custom_bridge_path = None;
+        }
+        if choose_bridge_requested {
+            if let Some(path) = FileDialog::new()
+                .add_filter("Audio bridge", &["mp3", "wav", "flac", "ogg"])
+                .pick_file()
+            {
+                modal.custom_bridge_path = Some(path);
+            }
+        }
         self.dj_mix_modal = Some(modal);
         if cancel_requested {
             self.cancel_dj_mix_export();

@@ -22,7 +22,7 @@ mise run setup
 
 This installs all tools pinned in `mise.toml`. It installs repository Git hooks through hk when `.git` worktree exists; source ZIPs skip hook installation without failing.
 
-DJ tempo stretching uses built-in pure-Rust WSOLA implementation, so local builds need no Clang, LLVM, `libclang`, C++ compiler, or `LIBCLANG_PATH` setup.
+DJ export always has built-in pure-Rust rhythm analysis and WSOLA fallback, so normal builds need no Clang, LLVM, `libclang`, C++ compiler, or `LIBCLANG_PATH`. Optional runtime integrations with Essentia Music Extractor, Rubber Band R3, and Demucs are detected as external executables and are never linked or bundled.
 
 Available validation commands:
 

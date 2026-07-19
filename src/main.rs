@@ -376,12 +376,28 @@ enum DjMixStyle {
     SmartDj,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DjBridgeMode {
+    Auto,
+    DrumSwap,
+    HarmonicBridge,
+    EchoDrop,
+    StemMashup,
+    Custom,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct DjMixOptions {
     style: DjMixStyle,
     smart_order: bool,
     normalize_loudness: bool,
     bass_swap: bool,
+    professional_tools: bool,
+    stem_separation: bool,
+    bridge_mode: DjBridgeMode,
+    bridge_start_seconds: f32,
+    bridge_loop_seconds: f32,
+    bridge_level: f32,
     transition_bars: u32,
     target_minutes: f32,
     bitrate_kbps: u32,
@@ -394,6 +410,12 @@ impl Default for DjMixOptions {
             smart_order: true,
             normalize_loudness: true,
             bass_swap: true,
+            professional_tools: true,
+            stem_separation: true,
+            bridge_mode: DjBridgeMode::Auto,
+            bridge_start_seconds: 0.0,
+            bridge_loop_seconds: 4.0,
+            bridge_level: 0.72,
             transition_bars: 16,
             target_minutes: 15.0,
             bitrate_kbps: 256,
@@ -405,11 +427,13 @@ impl Default for DjMixOptions {
 struct DjMixModalState {
     tracks: Vec<DjMixTrack>,
     options: DjMixOptions,
+    custom_bridge_path: Option<PathBuf>,
     stage: String,
     progress: f32,
     output_path: Option<PathBuf>,
     report_path: Option<PathBuf>,
     diagnostics_summary: Option<String>,
+    professional_tool_status: String,
     completed: bool,
     started_at: Option<Instant>,
     last_progress_at: Option<Instant>,

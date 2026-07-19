@@ -212,19 +212,46 @@ Use **DJ mix...** in Library panel to mix current playlist, or select at least t
 DJ Mix Builder offers two engines:
 
 - **Crossfade** keeps original playback speed and joins selected sections with a simple equal-power overlap.
-- **Smart DJ** analyzes BPM, beat phase, downbeat phase, silence, energy, EBU R128 loudness, sample peak, and true peak. It selects phrase-aligned sections, applies pitch-preserving tempo sync through the built-in deterministic WSOLA engine, then composes an original beat-synced instrumental bridge from synthesized drums, bass, plucked piano-like notes, string-like tones, loops, stutters, echo throws, and optional bass swaps. The complete incoming song is held back until the phrase handoff or drop instead of slowly growing underneath the outgoing song. Short usable sections are looped and transformed instead of rejected.
+- **Smart DJ** plans phrase-level handoffs instead of fading two complete songs through each other. It analyzes rhythm, downbeats, energy, loudness, and harmonic compatibility; chooses a drum swap, harmonic bridge, echo drop, stem mashup, or custom bridge; keeps one bass owner; and prevents simultaneous lead-vocal handoffs.
 
-Requested transition length is treated as a target. When selected sections cannot fit the full overlap, Audio Orbit shortens the transition automatically and reserves middle-track audio for both incoming and outgoing transitions. If no overlap remains, export continues with a clean cut instead of failing.
+Smart DJ can use an optional professional toolchain already installed on the machine:
+
+- **Essentia Music Extractor** for BPM, beat positions, confidence, and musical key.
+- **Rubber Band R3** for high-quality pitch-preserving tempo matching.
+- **Demucs** for drums, bass, accompaniment, and vocal stems.
+
+No external binary or model is bundled. Audio Orbit detects tools on `PATH` and supports explicit paths through:
+
+```text
+AUDIO_ORBIT_ESSENTIA_PATH
+AUDIO_ORBIT_RUBBERBAND_PATH
+AUDIO_ORBIT_DEMUCS_PATH
+AUDIO_ORBIT_DEMUCS_PYTHON
+```
+
+Use **Refresh tools** after changing `PATH` or these variables. Missing or failed tools fall back independently to built-in rhythm analysis, deterministic WSOLA tempo matching, full-mix vocal guarding, and deck-derived loops. Export therefore remains functional without the optional toolchain.
+
+Automatic bridge recipes:
+
+- **Drum swap** introduces the next groove while the outgoing musical phrase finishes.
+- **Harmonic bridge** is selected only for compatible detected keys and uses accompaniment stems or filtered deck material.
+- **Echo drop** removes the outgoing phrase with an echo throw and performs a short controlled drop reveal.
+- **Stem mashup** combines selected drums/accompaniment while vocals and bass remain mutually exclusive.
+- **Custom audio** repeats a chosen MP3/WAV/FLAC/OGG range from a configurable start timestamp and loop length.
+
+The complete incoming track does not sit underneath the outgoing track for a long fade. With stems, drums, bass, accompaniment, and vocals receive independent phrase gates. Without stems, a short filtered handoff and center-vocal guard are used. Controlled musical beds remain where they add continuity; deliberate silence appears only in an echo-drop recipe.
+
+Requested transition length is a target. When selected sections cannot fit it, Audio Orbit shortens the transition automatically, loops available beat material where useful, and reserves middle-track audio for both neighboring transitions. Favorite ranges as short as 0.25 seconds are accepted; only unavailable or effectively empty decoded audio fails.
 
 Set target mix length from 1 to 180 minutes. Each track supports:
 
 - **Auto highlight**: select a deterministic energetic section and align its boundaries to 8/16/32-bar phrases.
 - **Full track**: keep complete playable track after detected leading/trailing silence.
-- **Favorite range**: use manually entered start and end seconds, then phrase-align safe boundaries.
+- **Favorite range**: use a manually entered range and phrase-align safe boundaries.
 
-Smart order keeps first track and chooses following tracks by BPM compatibility and analysis confidence. Tempo change is capped at ±6%. Loudness leveling targets approximately -14 LUFS while peak-aware gain and output limiting prevent clipping. MP3 output uses 192/256/320 kbps.
+Smart order keeps the first track and scores following tracks by BPM distance, analysis confidence, harmonic compatibility, and energy continuity. Tempo change is capped at ±6%. Loudness leveling targets approximately -14 LUFS while peak-aware gain and output limiting prevent clipping. MP3 output uses 192/256/320 kbps.
 
-Export runs in background with progress and cancellation. Expensive decoding, analysis, planning, time stretching, and encoding never run in real-time playback callback. Analysis cache is versioned and invalidated by source file size, modification time, and analyzer version.
+Export runs in a background worker with stage text, progress, elapsed time, and cancellation. External processes are also cancellable. Analysis, separated stems, and professional tempo-stretch outputs are cached under the application data directory. Cache keys include source path, file size, modification time, selected section, analyzer version, and tempo ratio.
 
 Every completed export creates:
 
@@ -233,9 +260,7 @@ mix-name.mp3
 mix-name.dj-plan.json
 ```
 
-Diagnostics report contains selected sections, BPM/downbeat estimates, tempo ratios, gain decisions, transition reasons, measured output loudness/peaks, timing data, and explicit warnings for unavailable key/vocal/model analysis. Use **Show diagnostics** to reveal report. Use **Play** to add generated MP3 to **Temporary playback** and start it immediately.
-
-Current production slice intentionally does not claim reliable musical-key, vocal-overlap, genre, drop-swap, double-drop, or stem-aware decisions. Those require separately approved analyzers/models and packaging. See `docs/dj-engine-audit.md` and `docs/dj-engine-dependencies.md`.
+Diagnostics record selected sections, analysis backend, BPM/downbeat estimates, key confidence, tempo ratios, gain decisions, actual transition recipes, detected professional tools, fallback warnings, measured output loudness/peaks, and timing data. Use **Show diagnostics** to reveal the report. Use **Play** to add the generated MP3 to **Temporary playback** and start it immediately.
 
 ### Open audio files and configure file associations
 
@@ -302,7 +327,7 @@ Automatic synchronization is scoped to selected folder playlist. Windows wakes A
 Copyright (C) 2020–present [Zoltán Rózsa](https://github.com/rozsazoltan)
 
 
-DJ Mix Builder uses a built-in pure-Rust WSOLA engine for offline pitch-preserving time stretch, `ebur128` under MIT for EBU R128 measurement, and `shine-rs` under LGPL-2.0 for MP3 encoding. Redistribution notices are tracked in `THIRD_PARTY_NOTICES.md`. Audio Orbit remains licensed under AGPL-3.0-or-later.
+DJ Mix Builder uses built-in pure-Rust rhythm analysis and WSOLA fallback, `ebur128` under MIT for EBU R128 measurement, and `shine-rs` under LGPL-2.0 for MP3 encoding. Optional Essentia, Rubber Band, and Demucs executables are invoked only when separately installed. Redistribution notices are tracked in `THIRD_PARTY_NOTICES.md`. Audio Orbit remains licensed under AGPL-3.0-or-later.
 
 Audio Orbit renders local and live radio waveform bars through a RustFFT-backed amplitude analysis path. The visual design intentionally follows AIMP-like progress bars: neutral gray for the upcoming waveform, blue for the played region, and yellow markers for silence-skip sections. The analyzer still uses spectral information internally to shape a stable loudness envelope, but the UI does not draw colored bass/mid/treble stacks.
 
@@ -317,4 +342,6 @@ Use `cargo dev` from the repository root. Development state stays in `.cache/app
 DJ mix rendering runs on a named background worker thread. The export dialog shows an animated activity indicator, current processing stage, elapsed time, percentage, and cancellation control while the main player and library UI remain responsive.
 
 
-- Smart DJ prevents two centered lead vocals from dominating simultaneously. The middle of the transition is owned by a generated instrumental bridge; the incoming full mix is revealed only at the phrase handoff or drop.
+### DJ transition behavior
+
+Smart DJ chooses phrase-aware drum swaps, harmonic bridges, echo drops, stem mashups, or custom looped bridge audio. When Demucs stems are available, it gives drums, bass, accompaniment, and vocals separate handoff curves. Without stems, the full-mix fallback uses short filtered deck handoffs and vocal guarding rather than a long two-song fade.
