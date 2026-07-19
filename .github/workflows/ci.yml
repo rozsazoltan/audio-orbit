@@ -32,8 +32,5 @@ jobs:
           install: true
           cache: true
 
-      - name: Check pre-commit hook
-        run: mise run hooks:pre-commit
-
-      - name: Check pre-push hook
-        run: mise run hooks:pre-push
+      - name: Run Windows quality gates
+        run: mise run ci

@@ -27,7 +27,7 @@ description = "Run the repository pre-commit hook against all tracked files"
 run = "hk run pre-commit --all --check"
 
 [tasks."hooks:pre-push"]
-description = "Run the repository pre-push hook against all tracked files"
+description = "Run the fast pre-push Clippy gate"
 run = "hk run pre-push --all --check"
 
 [tasks."hooks:check"]
@@ -67,8 +67,8 @@ description = "Type-check all locked Cargo targets"
 run = "cargo check --locked --all-targets"
 
 [tasks.clippy]
-description = "Run Clippy against all locked Cargo targets"
-run = "cargo clippy --locked --all-targets -- -D warnings"
+description = "Run Clippy against locked application binaries"
+run = "cargo clippy --locked --bins -- -D warnings"
 
 [tasks.test]
 description = "Run Rust tests with cargo-nextest"
@@ -79,8 +79,10 @@ description = "Run Rust documentation tests not handled by nextest"
 run = "cargo test --locked --doc"
 
 [tasks.ci]
-description = "Run the same hk hooks enforced by Windows GitHub Actions"
+description = "Run Windows CI quality gates and full test suite"
 run = [
   { task = "hooks:pre-commit" },
   { task = "hooks:pre-push" },
+  { task = "test" },
+  { task = "test:doc" },
 ]

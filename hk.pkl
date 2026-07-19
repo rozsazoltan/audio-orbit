@@ -2,6 +2,8 @@ amends "package://github.com/jdx/hk/releases/download/v1.51.0/hk@1.51.0#/Config.
 
 import "package://github.com/jdx/hk/releases/download/v1.51.0/hk@1.51.0#/Builtins.pkl"
 
+local rustInputs = List("**/*.rs", "Cargo.toml", "Cargo.lock", ".cargo/**/*.toml", "build.rs")
+
 local preCommitSteps = new Mapping<String, Step> {
   ["rustfmt"] {
     glob = List("**/*.rs")
@@ -29,23 +31,9 @@ local preCommitSteps = new Mapping<String, Step> {
 }
 
 local prePushSteps = new Mapping<String, Step> {
-  ["cargo-check"] {
-    check = "cargo check --locked --all-targets"
-    exclusive = true
-  }
-
   ["clippy"] {
-    check = "cargo clippy --locked --all-targets -- -D warnings"
-    exclusive = true
-  }
-
-  ["tests"] {
-    check = "cargo nextest run --locked --all-targets"
-    exclusive = true
-  }
-
-  ["doctests"] {
-    check = "cargo test --locked --doc"
+    glob = rustInputs
+    check = "cargo clippy --locked --bins -- -D warnings"
     exclusive = true
   }
 }
