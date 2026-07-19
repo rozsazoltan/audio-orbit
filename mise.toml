@@ -9,6 +9,13 @@ rust = { version = "stable", components = ["rustfmt", "clippy"] }
 CARGO_INCREMENTAL = "0"
 CARGO_TERM_COLOR = "always"
 
+[tasks.setup]
+description = "Install configured tools and repository Git hooks"
+run = [
+  "mise install",
+  { task = "hooks:install" },
+]
+
 [tasks."hooks:install"]
 description = "Install repository Git hooks through hk and mise"
 env = { HK_MISE = "1" }

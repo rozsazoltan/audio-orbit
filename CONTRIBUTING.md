@@ -17,9 +17,10 @@ Project is currently Windows-only. It uses [mise](https://mise.jdx.dev/) for Rus
 Install configured tools and repository hooks:
 
 ```sh
-mise install
-mise run hooks:install
+mise run setup
 ```
+
+This installs all tools pinned in `mise.toml` and installs repository Git hooks through hk.
 
 DJ tempo stretching uses built-in pure-Rust WSOLA implementation, so local builds need no Clang, LLVM, `libclang`, C++ compiler, or `LIBCLANG_PATH` setup.
 
