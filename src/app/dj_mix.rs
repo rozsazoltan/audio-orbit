@@ -7,6 +7,15 @@ impl AudioOrbitApp {
     }
 
     pub(crate) fn open_dj_mix_builder_for_current_playlist(&mut self) {
+        if self
+            .current_playlist()
+            .map(|playlist| playlist.kind == PlaylistKind::Temporary)
+            .unwrap_or(false)
+        {
+            self.error_message = Some("Temporary playback is read-only.".to_owned());
+            return;
+        }
+
         let tracks = self
             .current_playlist()
             .map(|playlist| {
@@ -25,6 +34,15 @@ impl AudioOrbitApp {
     }
 
     pub(crate) fn open_dj_mix_builder_for_selection(&mut self, context_index: usize) {
+        if self
+            .current_playlist()
+            .map(|playlist| playlist.kind == PlaylistKind::Temporary)
+            .unwrap_or(false)
+        {
+            self.error_message = Some("Temporary playback is read-only.".to_owned());
+            return;
+        }
+
         let selected_paths = self
             .action_track_paths_for_context(context_index)
             .into_iter()
@@ -242,6 +260,7 @@ impl AudioOrbitApp {
         let mut start_requested = false;
         let mut cancel_requested = false;
         let mut reveal_path = None;
+        let mut play_path = None;
 
         egui::Area::new(egui::Id::new("dj_mix_modal"))
             .order(egui::Order::Foreground)
@@ -255,7 +274,7 @@ impl AudioOrbitApp {
                         outer_padding.x,
                         Icon::Music,
                         "DJ Mix Builder",
-                        "Build one low-memory MP3 mix from selected tracks. BPM analysis, classic pitch sync, beat-aligned equal-power transitions, bass swap, and loudness leveling run in background.",
+                        "Build one low-memory MP3 mix from selected tracks. Keep simple crossfades or let built-in Rust Smart DJ engine plan beatmatched transitions with filter sweeps, loop rolls, echo tails, and bass swaps.",
                     ) {
                         if running {
                             cancel_requested = true;
@@ -275,6 +294,26 @@ impl AudioOrbitApp {
                                 .show(ui, |ui| {
                                     ui.set_width(ui.available_width());
                                     Self::render_modal_section(ui, |ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label("Mix engine:");
+                                            ui.add_enabled_ui(!running, |ui| {
+                                                ui.selectable_value(
+                                                    &mut modal.options.style,
+                                                    DjMixStyle::Crossfade,
+                                                    "Crossfade",
+                                                );
+                                                ui.selectable_value(
+                                                    &mut modal.options.style,
+                                                    DjMixStyle::SmartDj,
+                                                    "Smart DJ",
+                                                );
+                                            });
+                                        });
+                                        ui.small(match modal.options.style {
+                                            DjMixStyle::Crossfade => "Simple equal-power overlap. No tempo change, loop roll, echo, or filter performance.",
+                                            DjMixStyle::SmartDj => "Autonomous Rust DJ engine: pairwise BPM sync up to ±6%, beat alignment with phrase-length transitions, filter sweep, loop roll, echo tail, and optional bass swap.",
+                                        });
+                                        ui.add_space(6.0);
                                         ui.horizontal_wrapped(|ui| {
                                             ui.add_enabled_ui(!running, |ui| {
                                                 ui.checkbox(&mut modal.options.smart_order, "Smart BPM order");
@@ -305,16 +344,27 @@ impl AudioOrbitApp {
                                                 });
                                             }
                                         });
-                                        ui.small("Classic pitch sync changes speed and pitch by at most ±4%. Smart order keeps BPM gaps small. Full tracks never load into RAM.");
+                                        ui.small("Both engines render as a stream. Only active transition buffers remain in RAM.");
                                     });
 
                                     ui.add_space(8.0);
                                     Self::render_modal_section(ui, |ui| {
-                                        ui.label(&modal.stage);
-                                        ui.add(
-                                            egui::ProgressBar::new(modal.progress)
-                                                .animate(running)
-                                                .show_percentage(),
+                                        let show_progress = running
+                                            || modal.completed
+                                            || modal.stage != "Ready";
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(ui.available_width(), 48.0),
+                                            egui::Layout::top_down(egui::Align::Min),
+                                            |ui| {
+                                                if show_progress {
+                                                    ui.label(&modal.stage);
+                                                    ui.add(
+                                                        egui::ProgressBar::new(modal.progress)
+                                                            .animate(running)
+                                                            .show_percentage(),
+                                                    );
+                                                }
+                                            },
                                         );
                                         ui.small("Choose options, then click Export DJ mix... and select the output MP3 file.");
                                         if modal.tracks.len() < 2 {
@@ -327,6 +377,9 @@ impl AudioOrbitApp {
                                                 }
                                             } else if modal.completed {
                                                 if let Some(path) = modal.output_path.clone() {
+                                                    if ui.button(ui_icons::label(Icon::Play, "Play")).clicked() {
+                                                        play_path = Some(path.clone());
+                                                    }
                                                     if ui.button(ui_icons::label(Icon::FolderOpen, "Show MP3")).clicked() {
                                                         reveal_path = Some(path);
                                                     }
@@ -435,6 +488,11 @@ impl AudioOrbitApp {
         self.dj_mix_modal = Some(modal);
         if cancel_requested {
             self.cancel_dj_mix_export();
+        }
+        if let Some(path) = play_path {
+            self.dj_mix_modal = None;
+            self.open_audio_files_in_temporary_playlist(vec![path], true);
+            return;
         }
         if let Some(path) = reveal_path {
             if let Err(error) = reveal_in_file_manager(&path) {

@@ -15,6 +15,7 @@ use std::{
 use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
 
 pub const FAVORITES_PLAYLIST_NAME: &str = "Favorites";
+pub const TEMPORARY_PLAYLIST_NAME: &str = "Temporary playback";
 const BACKUP_STATE_ENTRY: &str = "audio-orbit/state.json";
 const BACKUP_META_ENTRY: &str = "audio-orbit/backup.json";
 
@@ -85,6 +86,7 @@ pub enum PlaylistKind {
     Favorites,
     Manual,
     Folder,
+    Temporary,
 }
 
 impl Default for PlaylistKind {
@@ -99,6 +101,7 @@ impl PlaylistKind {
             Self::Favorites => Icon::Heart,
             Self::Manual => Icon::ListMusic,
             Self::Folder => Icon::Folder,
+            Self::Temporary => Icon::ListMusic,
         };
 
         char::from(icon).to_string()
@@ -109,15 +112,16 @@ impl PlaylistKind {
             Self::Favorites => "Favorites",
             Self::Manual => "Manual playlist",
             Self::Folder => "Folder playlist",
+            Self::Temporary => "Temporary playback",
         }
     }
 
     pub fn accepts_manual_tracks(&self) -> bool {
-        !matches!(self, Self::Folder)
+        matches!(self, Self::Favorites | Self::Manual)
     }
 
     pub fn can_delete(&self) -> bool {
-        !matches!(self, Self::Favorites)
+        !matches!(self, Self::Favorites | Self::Temporary)
     }
 }
 
@@ -318,6 +322,34 @@ impl Playlist {
             repeat_selection: Vec::new(),
             kind: PlaylistKind::Favorites,
         }
+    }
+
+    pub fn temporary() -> Self {
+        Self {
+            name: TEMPORARY_PLAYLIST_NAME.to_owned(),
+            tracks: Vec::new(),
+            source_folder: None,
+            folder_depth: 0,
+            selected_group: None,
+            repeat_selection: Vec::new(),
+            kind: PlaylistKind::Temporary,
+        }
+    }
+
+    pub fn add_temporary_files(&mut self, files: Vec<PathBuf>) -> Vec<PathBuf> {
+        if self.kind != PlaylistKind::Temporary {
+            return Vec::new();
+        }
+
+        let mut added = Vec::new();
+        for path in files {
+            if self.tracks.iter().any(|track| same_path(&track.path, &path)) {
+                continue;
+            }
+            self.tracks.push(Track::from_path(path.clone(), None, 0));
+            added.push(path);
+        }
+        added
     }
 
     pub fn from_folder(
@@ -1030,9 +1062,62 @@ pub fn load_state() -> SavedState {
     SavedState::default()
 }
 
+fn persisted_state(state: &SavedState) -> SavedState {
+    let mut persisted = state.clone();
+    let temporary_index = persisted
+        .playlists
+        .iter()
+        .position(|playlist| playlist.kind == PlaylistKind::Temporary);
+
+    if let Some(index) = temporary_index {
+        persisted.playlists.remove(index);
+
+        if persisted.selected_playlist_index == index {
+            persisted.selected_playlist_index = persisted
+                .playlists
+                .iter()
+                .position(|playlist| playlist.kind == PlaylistKind::Manual)
+                .unwrap_or(0);
+        } else if persisted.selected_playlist_index > index {
+            persisted.selected_playlist_index -= 1;
+        }
+
+        if persisted
+            .last_played_track
+            .as_ref()
+            .map(|track| track.playlist_index == index)
+            .unwrap_or(false)
+        {
+            persisted.last_played_track = None;
+        } else if let Some(track) = persisted.last_played_track.as_mut() {
+            if track.playlist_index > index {
+                track.playlist_index -= 1;
+            }
+        }
+
+        if persisted.playback_session.playlist_index == Some(index) {
+            persisted.playback_session = PlaybackSession::default();
+        } else if let Some(playlist_index) = persisted.playback_session.playlist_index.as_mut() {
+            if *playlist_index > index {
+                *playlist_index -= 1;
+            }
+        }
+    }
+
+    if persisted.playlists.is_empty() {
+        persisted.playlists.push(Playlist::favorites());
+        persisted.playlists.push(Playlist::new("Local music"));
+    }
+    if persisted.selected_playlist_index >= persisted.playlists.len() {
+        persisted.selected_playlist_index = 0;
+    }
+
+    persisted
+}
+
 pub fn save_state(state: &SavedState) -> Result<()> {
     let path = state_path().context("could not resolve the application data path")?;
-    write_state_to_path(state, &path)
+    write_state_to_path(&persisted_state(state), &path)
 }
 
 pub fn export_state_zip(state: &SavedState, path: &Path) -> Result<()> {
@@ -1055,7 +1140,7 @@ pub fn export_state_zip(state: &SavedState, path: &Path) -> Result<()> {
     zip.write_all(serde_json::to_string_pretty(&meta)?.as_bytes())?;
 
     zip.start_file(BACKUP_STATE_ENTRY, options)?;
-    zip.write_all(serde_json::to_string_pretty(state)?.as_bytes())?;
+    zip.write_all(serde_json::to_string_pretty(&persisted_state(state))?.as_bytes())?;
     zip.finish()?;
     Ok(())
 }
@@ -1605,5 +1690,30 @@ mod tests {
         ]));
         assert_eq!(restored.restored, 1);
         assert_eq!(restored.missing_total, 0);
+    }
+
+    #[test]
+    fn temporary_playlist_is_runtime_only_and_read_only() {
+        let mut state = SavedState::default();
+        state.playlists.push(Playlist::temporary());
+        state.selected_playlist_index = state.playlists.len() - 1;
+        state.last_played_track = Some(LastPlayedTrack {
+            playlist_index: state.selected_playlist_index,
+            track_path: PathBuf::from("C:/Music/mix.mp3"),
+        });
+        state.playback_session.playlist_index = Some(state.selected_playlist_index);
+        state.playback_session.track_path = Some(PathBuf::from("C:/Music/mix.mp3"));
+        state.playback_session.was_active = true;
+
+        let persisted = persisted_state(&state);
+
+        assert!(persisted
+            .playlists
+            .iter()
+            .all(|playlist| playlist.kind != PlaylistKind::Temporary));
+        assert!(persisted.last_played_track.is_none());
+        assert!(persisted.playback_session.playlist_index.is_none());
+        assert!(!PlaylistKind::Temporary.accepts_manual_tracks());
+        assert!(!PlaylistKind::Temporary.can_delete());
     }
 }

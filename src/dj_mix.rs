@@ -1,4 +1,4 @@
-use crate::{app_data_dir, DjMixEvent, DjMixOptions, DjMixTrack};
+use crate::{app_data_dir, DjMixEvent, DjMixOptions, DjMixStyle, DjMixTrack};
 use anyhow::{anyhow, Context, Result};
 use rodio::{source::UniformSourceIterator, Decoder, Source};
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ const ANALYSIS_SECONDS: usize = 120;
 const MIN_BPM: f32 = 70.0;
 const MAX_BPM: f32 = 180.0;
 const DEFAULT_BPM: f32 = 120.0;
-const MAX_TEMPO_CHANGE: f32 = 0.04;
+const MAX_SMART_TEMPO_CHANGE: f32 = 0.06;
 const MAX_TRANSITION_SECONDS: f32 = 28.0;
 const MAX_INTRO_SKIP_SECONDS: f32 = 10.0;
 const TARGET_RMS: f32 = 0.16;
@@ -279,7 +279,7 @@ fn render_planned_mix(
     cancel: &AtomicBool,
 ) -> Result<()> {
     let mut current_stream = StereoTrackStream::open(&tracks[0].track.path, tracks[0].speed_ratio)?;
-    let first_skip = aligned_intro_skip(&tracks[0]);
+    let first_skip = track_intro_skip(&tracks[0], options.style);
     current_stream.skip_seconds(first_skip);
 
     for pair_index in 0..tracks.len() - 1 {
@@ -288,11 +288,20 @@ fn render_planned_mix(
         let next = &tracks[pair_index + 1];
         send_progress(
             sender,
-            format!("Mixing {} → {}", current.track.title, next.track.title),
+            format!(
+                "{} {} → {}",
+                match options.style {
+                    DjMixStyle::Crossfade => "Crossfading",
+                    DjMixStyle::SmartDj => "Smart DJ mixing",
+                },
+                current.track.title,
+                next.track.title
+            ),
             0.5 + pair_index as f32 / ((tracks.len() - 1) as f32 * 2.0),
         );
 
-        let transition_frames = transition_frame_count(current, next, options.transition_beats);
+        let transition_frames =
+            transition_frame_count(current, next, options.transition_beats, options.style);
         let current_tail = write_body_keep_tail(
             &mut current_stream,
             transition_frames,
@@ -302,7 +311,7 @@ fn render_planned_mix(
         )?;
 
         let mut next_stream = StereoTrackStream::open(&next.track.path, next.speed_ratio)?;
-        next_stream.skip_seconds(aligned_intro_skip(next));
+        next_stream.skip_seconds(track_intro_skip(next, options.style));
         let mut next_intro = Vec::with_capacity(current_tail.len());
         for _ in 0..current_tail.len() {
             if let Some(frame) = next_stream.next_frame() {
@@ -320,15 +329,26 @@ fn render_planned_mix(
         }
         let outgoing = &current_tail[current_tail.len().saturating_sub(overlap)..];
         let incoming = &next_intro[next_intro.len().saturating_sub(overlap)..];
-        write_transition(
-            outgoing,
-            incoming,
-            current.gain,
-            next.gain,
-            options.bass_swap,
-            writer,
-            cancel,
-        )?;
+        match options.style {
+            DjMixStyle::Crossfade => write_crossfade_transition(
+                outgoing,
+                incoming,
+                current.gain,
+                next.gain,
+                options.bass_swap,
+                writer,
+                cancel,
+            )?,
+            DjMixStyle::SmartDj => write_smart_dj_transition(
+                outgoing,
+                incoming,
+                current,
+                next,
+                options.bass_swap,
+                writer,
+                cancel,
+            )?,
+        }
 
         current_stream = next_stream;
     }
@@ -367,7 +387,7 @@ fn write_body_keep_tail(
     Ok(tail.into_iter().collect())
 }
 
-fn write_transition(
+fn write_crossfade_transition(
     outgoing: &[[f32; 2]],
     incoming: &[[f32; 2]],
     outgoing_gain: f32,
@@ -420,6 +440,118 @@ fn write_transition(
     Ok(())
 }
 
+fn write_smart_dj_transition(
+    outgoing: &[[f32; 2]],
+    incoming: &[[f32; 2]],
+    current: &PlannedTrack,
+    next: &PlannedTrack,
+    bass_swap: bool,
+    writer: &mut Mp3StreamWriter,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    let frames = outgoing.len().min(incoming.len());
+    if frames == 0 {
+        return Ok(());
+    }
+
+    let current_bpm = (current.analysis.bpm * current.speed_ratio).clamp(MIN_BPM, MAX_BPM);
+    let next_bpm = (next.analysis.bpm * next.speed_ratio).clamp(MIN_BPM, MAX_BPM);
+    let mix_bpm = ((current_bpm + next_bpm) * 0.5).clamp(MIN_BPM, MAX_BPM);
+    let beat_frames = ((OUTPUT_SAMPLE_RATE as f32 * 60.0 / mix_bpm).round() as usize).max(1);
+    let roll_start = frames.saturating_sub(beat_frames.saturating_mul(4));
+    let half_beat = (beat_frames / 2).max(1);
+    let tight_roll_start = frames.saturating_sub(beat_frames.saturating_mul(2));
+    let echo_delay = half_beat;
+
+    let mut outgoing_low = LowPassStereo::new(180.0);
+    let mut incoming_low = LowPassStereo::new(700.0);
+    let mut outgoing_sweep = LowPassStereo::new(120.0);
+    let mut incoming_sweep = LowPassStereo::new(700.0);
+
+    for index in 0..frames {
+        if index % (OUTPUT_SAMPLE_RATE as usize / 2) == 0 {
+            ensure_not_cancelled(cancel)?;
+        }
+
+        let progress = if frames <= 1 {
+            1.0
+        } else {
+            index as f32 / (frames - 1) as f32
+        };
+
+        if index % 64 == 0 {
+            let out_sweep_progress = ((progress - 0.30) / 0.70).clamp(0.0, 1.0);
+            let in_sweep_progress = (progress / 0.78).clamp(0.0, 1.0);
+            outgoing_sweep.set_cutoff(120.0 + out_sweep_progress.powi(2) * 3_200.0);
+            incoming_sweep.set_cutoff(650.0 + in_sweep_progress.powi(2) * 17_000.0);
+        }
+
+        let outgoing_index = if index < roll_start {
+            index
+        } else if index < tight_roll_start {
+            roll_start + (index - roll_start) % beat_frames
+        } else {
+            tight_roll_start + (index - tight_roll_start) % half_beat
+        }
+        .min(frames - 1);
+
+        let mut out = scale_frame(outgoing[outgoing_index], current.gain);
+        let mut input = scale_frame(incoming[index], next.gain);
+
+        let out_sweep_amount = ((progress - 0.28) / 0.72).clamp(0.0, 1.0);
+        let out_low_sweep = outgoing_sweep.process(out);
+        let out_high = [out[0] - out_low_sweep[0], out[1] - out_low_sweep[1]];
+        out = [
+            out[0] * (1.0 - out_sweep_amount) + out_high[0] * out_sweep_amount,
+            out[1] * (1.0 - out_sweep_amount) + out_high[1] * out_sweep_amount,
+        ];
+
+        let in_sweep_amount = (1.0 - progress / 0.78).clamp(0.0, 1.0);
+        let filtered_input = incoming_sweep.process(input);
+        input = [
+            input[0] * (1.0 - in_sweep_amount) + filtered_input[0] * in_sweep_amount,
+            input[1] * (1.0 - in_sweep_amount) + filtered_input[1] * in_sweep_amount,
+        ];
+
+        if bass_swap {
+            let out_low = outgoing_low.process(out);
+            let in_low = incoming_low.process(input);
+            let out_low_gain = (1.0 - ((progress - 0.22) / 0.38).clamp(0.0, 1.0)).powi(2);
+            let in_low_gain = (((progress - 0.42) / 0.36).clamp(0.0, 1.0)).powi(2);
+            out = [
+                out[0] - out_low[0] + out_low[0] * out_low_gain,
+                out[1] - out_low[1] + out_low[1] * out_low_gain,
+            ];
+            input = [
+                input[0] - in_low[0] + in_low[0] * in_low_gain,
+                input[1] - in_low[1] + in_low[1] * in_low_gain,
+            ];
+        }
+
+        let out_fade_progress = ((progress - 0.18) / 0.82).clamp(0.0, 1.0);
+        let in_fade_progress = (progress / 0.82).clamp(0.0, 1.0);
+        let out_fade = ((1.0 - out_fade_progress) * std::f32::consts::FRAC_PI_2).sin();
+        let in_fade = (in_fade_progress * std::f32::consts::FRAC_PI_2).sin();
+
+        let echo = if progress > 0.62 && outgoing_index >= echo_delay {
+            let echo_progress = ((progress - 0.62) / 0.38).clamp(0.0, 1.0);
+            let echo_frame = scale_frame(outgoing[outgoing_index - echo_delay], current.gain);
+            [
+                echo_frame[0] * echo_progress * 0.22,
+                echo_frame[1] * echo_progress * 0.22,
+            ]
+        } else {
+            [0.0, 0.0]
+        };
+
+        writer.write_frame([
+            soft_clip(out[0] * out_fade + input[0] * in_fade + echo[0]),
+            soft_clip(out[1] * out_fade + input[1] * in_fade + echo[1]),
+        ])?;
+    }
+    Ok(())
+}
+
 struct LowPassStereo {
     alpha: f32,
     state: [f32; 2],
@@ -439,6 +571,13 @@ impl LowPassStereo {
         self.state[0] += self.alpha * (frame[0] - self.state[0]);
         self.state[1] += self.alpha * (frame[1] - self.state[1]);
         self.state
+    }
+
+    fn set_cutoff(&mut self, cutoff_hz: f32) {
+        let cutoff_hz = cutoff_hz.clamp(20.0, OUTPUT_SAMPLE_RATE as f32 * 0.45);
+        let dt = 1.0 / OUTPUT_SAMPLE_RATE as f32;
+        let rc = 1.0 / (2.0 * std::f32::consts::PI * cutoff_hz);
+        self.alpha = dt / (rc + dt);
     }
 }
 
@@ -634,22 +773,25 @@ fn plan_tracks(
     if options.smart_order && analyzed.len() > 2 {
         analyzed = smart_order(analyzed);
     }
-    let mut bpms = analyzed
-        .iter()
+    let mut previous_effective_bpm = analyzed
+        .first()
         .map(|(_, analysis)| analysis.bpm)
         .filter(|bpm| bpm.is_finite() && *bpm > 0.0)
-        .collect::<Vec<_>>();
-    bpms.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
-    let target_bpm = bpms.get(bpms.len() / 2).copied().unwrap_or(DEFAULT_BPM);
+        .unwrap_or(DEFAULT_BPM);
 
     analyzed
         .into_iter()
-        .map(|(track, analysis)| {
-            let speed_ratio = if analysis.bpm > 0.0 {
-                (target_bpm / analysis.bpm).clamp(1.0 - MAX_TEMPO_CHANGE, 1.0 + MAX_TEMPO_CHANGE)
-            } else {
-                1.0
+        .enumerate()
+        .map(|(index, (track, analysis))| {
+            let speed_ratio = match options.style {
+                DjMixStyle::Crossfade => 1.0,
+                DjMixStyle::SmartDj if index == 0 || analysis.bpm <= 0.0 => 1.0,
+                DjMixStyle::SmartDj => (previous_effective_bpm / analysis.bpm).clamp(
+                    1.0 - MAX_SMART_TEMPO_CHANGE,
+                    1.0 + MAX_SMART_TEMPO_CHANGE,
+                ),
             };
+            previous_effective_bpm = (analysis.bpm * speed_ratio).clamp(MIN_BPM, MAX_BPM);
             let gain = if options.normalize_loudness && analysis.rms > 0.001 {
                 (TARGET_RMS / analysis.rms).clamp(0.55, 1.8)
             } else {
@@ -692,35 +834,47 @@ fn smart_order(mut tracks: Vec<(DjMixTrack, TrackAnalysis)>) -> Vec<(DjMixTrack,
     ordered
 }
 
-fn transition_frame_count(current: &PlannedTrack, next: &PlannedTrack, beats: u32) -> usize {
+fn transition_frame_count(
+    current: &PlannedTrack,
+    next: &PlannedTrack,
+    beats: u32,
+    style: DjMixStyle,
+) -> usize {
     let current_bpm = (current.analysis.bpm * current.speed_ratio).clamp(MIN_BPM, MAX_BPM);
     let next_bpm = (next.analysis.bpm * next.speed_ratio).clamp(MIN_BPM, MAX_BPM);
     let mix_bpm = (current_bpm + next_bpm) * 0.5;
     let desired_seconds = (beats.max(4) as f32 * 60.0 / mix_bpm).clamp(4.0, MAX_TRANSITION_SECONDS);
-    let actual_seconds = current
-        .analysis
-        .duration_seconds
-        .map(|duration| duration / current.speed_ratio)
-        .filter(|duration| *duration > desired_seconds + 1.0)
-        .map(|duration| {
-            let period = 60.0 / current_bpm;
-            let phase = current.analysis.beat_offset_seconds / current.speed_ratio;
-            let candidate = duration - desired_seconds;
-            let aligned_start = if candidate <= phase {
-                phase.min(candidate)
-            } else {
-                phase + ((candidate - phase) / period).floor() * period
-            };
-            (duration - aligned_start).clamp(desired_seconds, MAX_TRANSITION_SECONDS)
-        })
-        .unwrap_or(desired_seconds);
+    let actual_seconds = if style == DjMixStyle::Crossfade {
+        desired_seconds
+    } else {
+        current
+            .analysis
+            .duration_seconds
+            .map(|duration| duration / current.speed_ratio)
+            .filter(|duration| *duration > desired_seconds + 1.0)
+            .map(|duration| {
+                let period = 60.0 / current_bpm;
+                let phase = current.analysis.beat_offset_seconds / current.speed_ratio;
+                let candidate = duration - desired_seconds;
+                let aligned_start = if candidate <= phase {
+                    phase.min(candidate)
+                } else {
+                    phase + ((candidate - phase) / period).floor() * period
+                };
+                (duration - aligned_start).clamp(desired_seconds, MAX_TRANSITION_SECONDS)
+            })
+            .unwrap_or(desired_seconds)
+    };
 
     (actual_seconds * OUTPUT_SAMPLE_RATE as f32)
         .round()
         .max(1.0) as usize
 }
 
-fn aligned_intro_skip(track: &PlannedTrack) -> f32 {
+fn track_intro_skip(track: &PlannedTrack, style: DjMixStyle) -> f32 {
+    if style == DjMixStyle::Crossfade {
+        return track.analysis.leading_silence_seconds.clamp(0.0, MAX_INTRO_SKIP_SECONDS);
+    }
     let period = 60.0 / (track.analysis.bpm * track.speed_ratio).max(MIN_BPM);
     let leading = (track.analysis.leading_silence_seconds / track.speed_ratio)
         .clamp(0.0, MAX_INTRO_SKIP_SECONDS);
@@ -870,6 +1024,35 @@ mod tests {
     }
 
     #[test]
+    fn crossfade_mode_keeps_original_playback_speed() {
+        let analyzed = vec![
+            test_analysis_track("first", 100.0),
+            test_analysis_track("second", 140.0),
+        ];
+        let mut options = DjMixOptions::default();
+        options.style = DjMixStyle::Crossfade;
+        options.smart_order = false;
+        let planned = plan_tracks(analyzed, options);
+        assert!(planned
+            .iter()
+            .all(|track| (track.speed_ratio - 1.0).abs() < f32::EPSILON));
+    }
+
+    #[test]
+    fn smart_dj_mode_caps_pairwise_tempo_sync() {
+        let analyzed = vec![
+            test_analysis_track("first", 100.0),
+            test_analysis_track("second", 140.0),
+        ];
+        let mut options = DjMixOptions::default();
+        options.style = DjMixStyle::SmartDj;
+        options.smart_order = false;
+        let planned = plan_tracks(analyzed, options);
+        assert!((planned[0].speed_ratio - 1.0).abs() < f32::EPSILON);
+        assert!((planned[1].speed_ratio - (1.0 - MAX_SMART_TEMPO_CHANGE)).abs() < 0.0001);
+    }
+
+    #[test]
     fn mp3_extension_is_added_once() {
         assert_eq!(
             ensure_mp3_extension(Path::new("mix")),
@@ -902,5 +1085,21 @@ mod tests {
         let _ = fs::remove_file(path);
         assert!(bytes.len() > 1_000);
         assert_eq!(bytes[0], 0xff);
+    }
+
+    fn test_analysis_track(title: &str, bpm: f32) -> (DjMixTrack, TrackAnalysis) {
+        (
+            DjMixTrack {
+                path: PathBuf::from(title),
+                title: title.to_owned(),
+            },
+            TrackAnalysis {
+                bpm,
+                beat_offset_seconds: 0.0,
+                leading_silence_seconds: 0.0,
+                rms: 0.1,
+                duration_seconds: Some(180.0),
+            },
+        )
     }
 }

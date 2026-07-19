@@ -6,6 +6,8 @@ mod dj_mix;
 mod dsp;
 mod icon;
 mod folder_watcher;
+#[cfg(windows)]
+mod file_associations;
 mod media_keys;
 mod single_instance;
 mod spectrum_waveform;
@@ -93,7 +95,8 @@ fn main() -> eframe::Result<()> {
         return app::dev_metrics::run_dev_metrics_process(config);
     }
 
-    let _single_instance_guard = match single_instance::acquire() {
+    let startup_audio_files = command_line_audio_files();
+    let _single_instance_guard = match single_instance::acquire(&startup_audio_files) {
         Ok(Some(guard)) => guard,
         Ok(None) => return Ok(()),
         Err(error) => {
@@ -129,9 +132,21 @@ fn main() -> eframe::Result<()> {
         Box::new(move |creation_context| {
             ui_icons::install(&creation_context.egui_ctx);
             configure_app_style(&creation_context.egui_ctx);
-            Ok(Box::new(AudioOrbitApp::new(state)))
+            let mut app = AudioOrbitApp::new(state);
+            if !startup_audio_files.is_empty() {
+                app.open_audio_files_in_temporary_playlist(startup_audio_files.clone(), true);
+            }
+            Ok(Box::new(app))
         }),
     )
+}
+
+fn command_line_audio_files() -> Vec<PathBuf> {
+    std::env::args_os()
+        .skip(1)
+        .map(PathBuf::from)
+        .filter(|path| path.is_file() && is_supported_audio_file(path))
+        .collect()
 }
 
 fn configure_app_style(context: &egui::Context) {
@@ -322,8 +337,15 @@ struct DjMixTrack {
     title: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DjMixStyle {
+    Crossfade,
+    SmartDj,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct DjMixOptions {
+    style: DjMixStyle,
     smart_order: bool,
     normalize_loudness: bool,
     bass_swap: bool,
@@ -334,6 +356,7 @@ struct DjMixOptions {
 impl Default for DjMixOptions {
     fn default() -> Self {
         Self {
+            style: DjMixStyle::SmartDj,
             smart_order: true,
             normalize_loudness: true,
             bass_swap: true,
@@ -532,6 +555,9 @@ struct AudioOrbitApp {
     last_update_check: Option<updater::UpdateCheck>,
     update_check_started_at: Option<Instant>,
     update_install_started_at: Option<Instant>,
+    last_external_open_request_poll: Instant,
+    #[cfg(windows)]
+    file_associations_registered: bool,
     #[cfg(debug_assertions)]
     dev_metrics: DevMetricsPanelState,
     #[cfg(debug_assertions)]
@@ -1011,6 +1037,9 @@ fn same_text(left: &str, right: &str) -> bool {
 }
 
 fn ensure_state_is_valid(state: &mut SavedState) {
+    state
+        .playlists
+        .retain(|playlist| playlist.kind != PlaylistKind::Temporary);
     if !state.playlists.iter().any(|playlist| playlist.kind == PlaylistKind::Favorites) {
         state.playlists.insert(0, Playlist::favorites());
     }
@@ -1047,6 +1076,7 @@ fn ensure_state_is_valid(state: &mut SavedState) {
     if state.selected_playlist_index >= state.playlists.len() {
         state.selected_playlist_index = 0;
     }
+    state.playlists.push(Playlist::temporary());
 
     if state.profiles.is_empty() {
         state.profiles.push(config::DspProfile::new("Smooth orbit", DspSettings::default()));

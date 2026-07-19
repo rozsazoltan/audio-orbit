@@ -311,6 +311,7 @@ impl AudioOrbitApp {
 
         let playlist_name = playlist.name.clone();
         let is_favorites = playlist.kind == PlaylistKind::Favorites;
+        let is_temporary = playlist.kind == PlaylistKind::Temporary;
         let selected_playlist_label = format!("{} {}", playlist.kind.icon(), playlist_name);
         let selected_group_label = playlist.selected_group.clone().unwrap_or_default();
         let folder_group_count = playlist.folder_groups().len();
@@ -380,10 +381,18 @@ impl AudioOrbitApp {
                     self.save_state_silently();
                 }
 
-                if ui.small_button("Z-A").on_hover_text("Sort current playlist Z to A").clicked() {
+                let sort_descending = ui
+                    .add_enabled_ui(!is_temporary, |ui| ui.small_button("Z-A"))
+                    .inner
+                    .on_hover_text("Sort current playlist Z to A");
+                if sort_descending.clicked() {
                     self.sort_current_playlist_by_name(false);
                 }
-                if ui.small_button("A-Z").on_hover_text("Sort current playlist A to Z").clicked() {
+                let sort_ascending = ui
+                    .add_enabled_ui(!is_temporary, |ui| ui.small_button("A-Z"))
+                    .inner
+                    .on_hover_text("Sort current playlist A to Z");
+                if sort_ascending.clicked() {
                     self.sort_current_playlist_by_name(true);
                 }
                 if is_favorites
@@ -1196,6 +1205,10 @@ impl AudioOrbitApp {
             .unwrap_or(true);
         let action_paths = self.action_track_paths_for_context(index);
         let selected_count = action_paths.len();
+        let temporary_playback = self
+            .current_playlist()
+            .map(|playlist| playlist.kind == PlaylistKind::Temporary)
+            .unwrap_or(false);
         let available_dj_track_count = action_paths.iter().filter(|path| path.is_file()).count();
         let file_operation_idle = self.track_file_operations_idle();
 
@@ -1239,6 +1252,11 @@ impl AudioOrbitApp {
         {
             self.reveal_track_in_file_manager(path.clone());
             ui.close_menu();
+        }
+
+        if temporary_playback {
+            ui.small("Temporary playback is read-only.");
+            return;
         }
 
         let mut add_targets = self

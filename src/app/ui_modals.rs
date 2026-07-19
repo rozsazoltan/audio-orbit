@@ -59,6 +59,61 @@ impl AudioOrbitApp {
         });
         ui.add_space(8.0);
 
+        #[cfg(windows)]
+        {
+            Self::render_modal_section(ui, |ui| {
+                ui.heading("File associations");
+                ui.small("Register Audio Orbit for supported audio formats, then choose it in Windows Default Apps. Opened files play through temporary playback and are cleared on next app start.");
+                ui.small(format!(
+                    "Supported: {}",
+                    file_associations::SUPPORTED_AUDIO_EXTENSIONS.join(", ")
+                ));
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button(ui_icons::label(Icon::Music, "Associate audio files...")).clicked() {
+                        match std::env::current_exe()
+                            .map_err(|error| error.to_string())
+                            .and_then(|path| file_associations::register(&path))
+                        {
+                            Ok(()) => {
+                                self.file_associations_registered = true;
+                                self.status_message = "Audio Orbit registered for supported audio files.".to_owned();
+                                if let Err(error) = file_associations::open_default_apps_settings() {
+                                    self.error_message = Some(error);
+                                }
+                            }
+                            Err(error) => self.error_message = Some(error),
+                        }
+                    }
+                    if ui.button("Open Windows Default Apps").clicked() {
+                        if let Err(error) = file_associations::open_default_apps_settings() {
+                            self.error_message = Some(error);
+                        }
+                    }
+                    if ui
+                        .add_enabled(
+                            self.file_associations_registered,
+                            egui::Button::new("Remove registration"),
+                        )
+                        .clicked()
+                    {
+                        match file_associations::unregister() {
+                            Ok(()) => {
+                                self.file_associations_registered = false;
+                                self.status_message = "Audio Orbit file-association registration removed.".to_owned();
+                            }
+                            Err(error) => self.error_message = Some(error),
+                        }
+                    }
+                });
+                ui.small(if self.file_associations_registered {
+                    "Registration: installed. Windows still controls default-app selection per file type."
+                } else {
+                    "Registration: not installed."
+                });
+            });
+            ui.add_space(8.0);
+        }
+
         Self::render_modal_section(ui, |ui| {
             self.render_library_settings_section(ui);
         });

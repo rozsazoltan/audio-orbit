@@ -8,6 +8,7 @@
 pub(crate) mod dev_metrics;
 mod core;
 mod dj_mix;
+mod external_files;
 mod input;
 mod library_backup;
 mod lifecycle;

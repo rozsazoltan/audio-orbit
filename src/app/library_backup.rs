@@ -27,7 +27,7 @@ impl AudioOrbitApp {
             return;
         };
         if !playlist.accepts_manual_tracks() {
-            self.error_message = Some("Folder playlists are scanner-owned. Add files to a manual playlist or Favorites instead.".to_owned());
+            self.error_message = Some("This playlist is read-only. Add files to a manual playlist or Favorites instead.".to_owned());
             return;
         }
 
@@ -179,8 +179,21 @@ impl AudioOrbitApp {
 
         let track_count = result.files.len();
         let playlist = Playlist::from_folder(name.clone(), folder.clone(), depth, result.files);
-        self.state.playlists.push(playlist);
-        self.state.selected_playlist_index = self.state.playlists.len() - 1;
+        let insert_index = self
+            .state
+            .playlists
+            .iter()
+            .position(|playlist| playlist.kind == PlaylistKind::Temporary)
+            .unwrap_or(self.state.playlists.len());
+        self.state.playlists.insert(insert_index, playlist);
+        if self
+            .active_playlist_index
+            .map(|index| index >= insert_index)
+            .unwrap_or(false)
+        {
+            self.active_playlist_index = self.active_playlist_index.map(|index| index + 1);
+        }
+        self.state.selected_playlist_index = insert_index;
         self.restore_repeat_selection_for_current_playlist();
         self.clear_multi_track_selection();
         self.selected_track_index = self.eligible_track_indexes().first().copied();

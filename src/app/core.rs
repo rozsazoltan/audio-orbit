@@ -110,6 +110,9 @@ impl AudioOrbitApp {
                     last_update_check: None,
                     update_check_started_at: None,
                     update_install_started_at: None,
+                    last_external_open_request_poll: Instant::now(),
+                    #[cfg(windows)]
+                    file_associations_registered: file_associations::is_registered(),
                     #[cfg(debug_assertions)]
                     dev_metrics: DevMetricsPanelState::default(),
                     #[cfg(debug_assertions)]
@@ -215,6 +218,9 @@ impl AudioOrbitApp {
                 last_update_check: None,
                 update_check_started_at: None,
                 update_install_started_at: None,
+                last_external_open_request_poll: Instant::now(),
+                #[cfg(windows)]
+                file_associations_registered: file_associations::is_registered(),
                 #[cfg(debug_assertions)]
                 dev_metrics: DevMetricsPanelState::default(),
                 #[cfg(debug_assertions)]

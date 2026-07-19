@@ -22,6 +22,7 @@
   - [Manage Favorites](#manage-favorites)
   - [Manage playlist files and multi-select tracks](#manage-playlist-files-and-multi-select-tracks)
   - [Build a DJ mix](#build-a-dj-mix)
+  - [Open audio files and configure file associations](#open-audio-files-and-configure-file-associations)
   - [Export and import backups](#export-and-import-backups)
 - [Window behavior](#window-behavior)
 - [Data location](#data-location)
@@ -208,9 +209,24 @@ Use **Delete all files...** to permanently delete every file referenced by the c
 
 Use **DJ mix...** in Library panel to mix current playlist, or select at least two tracks and choose **Create DJ mix...** from track context menu. Same command appears in full-layout and player-only Music view empty-area context menus.
 
-DJ Mix Builder supports manual ordering or BPM-based smart ordering, 8/16/32-beat transitions, optional loudness leveling, optional bass swap, and 192/256/320 kbps MP3 export. Export runs in background with progress and cancellation. Audio is decoded and encoded as stream; only transition buffers stay in memory. Track analysis is cached in `.audio-orbit-data/dj-analysis-cache.json` and reused while source file size and modification time stay unchanged.
+DJ Mix Builder offers two engines:
 
-Classic pitch sync changes playback speed and pitch together by maximum ±4%, matching traditional pitch-controlled DJ playback while keeping CPU use low. Analysis and rendering use one below-normal-priority worker on Windows. Automatic BPM and beat detection can need manual track ordering for difficult intros or irregular music. Builder does not perform key-lock/time-stretch, harmonic key matching, stem separation, or manual beat-grid editing.
+- **Crossfade** keeps original playback speed and joins tracks with a simple equal-power overlap. Optional bass swap and loudness leveling remain available.
+- **Smart DJ** uses the built-in Rust DJ engine to plan pairwise BPM matching, beat-aligned transitions sized to 8, 16, or 32-beat phrases, filter sweeps, loop rolls, echo tails, and bass swaps. Classic pitch sync is capped at ±6% to keep CPU usage and artifacts controlled.
+
+Both engines support manual ordering or BPM-based smart ordering, 8/16/32-beat transitions, optional loudness leveling, optional bass swap, and 192/256/320 kbps MP3 export. Export runs in background with progress and cancellation. Audio is decoded and encoded as stream; only transition buffers stay in memory. Track analysis is cached in `.audio-orbit-data/dj-analysis-cache.json` and reused while source file size and modification time stay unchanged. Smart DJ needs no external executable or DLL.
+
+After export completes, use **Play** to add the generated MP3 to **Temporary playback** and start it immediately. **Show MP3** still reveals the saved file in File Explorer.
+
+Smart DJ classic pitch sync changes playback speed and pitch together, matching traditional pitch-controlled DJ playback while keeping CPU use low. Analysis and rendering use one below-normal-priority worker on Windows. Automatic BPM and beat detection can need manual track ordering for difficult intros or irregular music. Builder does not perform key-lock/time-stretch, harmonic key matching, stem separation, or manual beat-grid editing.
+
+### Open audio files and configure file associations
+
+Audio files passed to `audio-orbit.exe` open in the built-in **Temporary playback** playlist and start playing. This also works when Audio Orbit is already running: the new process forwards the requested files to the existing player instead of opening a second window.
+
+Temporary playback is read-only. Files cannot be added through normal playlist actions, reordered, removed, exported, deleted, or included in DJ mix operations. Its contents and playback resume state are never saved, so the playlist starts empty after every app restart.
+
+On Windows, open **Settings > File associations** and choose **Associate audio files...**. Audio Orbit registers itself for MP3, WAV, FLAC, OGG, OPUS, M4A, MP4, AAC, AIFF, AIF, APE, and WV files, then opens Windows Default Apps so the final default-app choices can be confirmed. Registration uses the current executable path and does not require administrator rights. Use **Remove registration** to remove Audio Orbit from registered audio-file applications.
 
 ### Export and import backups
 
@@ -230,7 +246,7 @@ Export creates a compressed ZIP backup of the full app state and suggests a file
 Audio Orbit remembers the window size and position when the app closes and restores the same layout on the next launch. Player-only and full-layout sizes are kept separately, and switching modes restores that mode's own saved width and height.
 
 
-Only one Audio Orbit instance can run at a time. If the app is already open, starting the executable again exits immediately instead of opening a second player window.
+Only one Audio Orbit instance can run at a time. If the app is already open and another invocation contains supported audio files, those files are forwarded to the existing window and played through Temporary playback. Invocations without audio files exit without opening another player window.
 
 ## Data location
 

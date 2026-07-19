@@ -12,6 +12,14 @@ impl AudioOrbitApp {
     }
 
     pub(crate) fn export_current_playlist_to_folder(&mut self) {
+        if self
+            .current_playlist()
+            .map(|playlist| playlist.kind == PlaylistKind::Temporary)
+            .unwrap_or(false)
+        {
+            self.error_message = Some("Temporary playback is read-only.".to_owned());
+            return;
+        }
         if !self.track_file_operations_idle() {
             self.error_message =
                 Some("Wait for current library or track file operation to finish.".to_owned());
@@ -44,6 +52,14 @@ impl AudioOrbitApp {
     }
 
     pub(crate) fn copy_track_selection_to_folder(&mut self, index: usize) {
+        if self
+            .current_playlist()
+            .map(|playlist| playlist.kind == PlaylistKind::Temporary)
+            .unwrap_or(false)
+        {
+            self.error_message = Some("Temporary playback is read-only.".to_owned());
+            return;
+        }
         if !self.track_file_operations_idle() {
             self.error_message =
                 Some("Wait for current library or track file operation to finish.".to_owned());
@@ -63,6 +79,14 @@ impl AudioOrbitApp {
     }
 
     pub(crate) fn request_delete_current_playlist_files(&mut self) {
+        if self
+            .current_playlist()
+            .map(|playlist| playlist.kind == PlaylistKind::Temporary)
+            .unwrap_or(false)
+        {
+            self.error_message = Some("Temporary playback is read-only.".to_owned());
+            return;
+        }
         if !self.track_file_operations_idle() {
             self.error_message =
                 Some("Wait for current library or track file operation to finish.".to_owned());
@@ -100,6 +124,14 @@ impl AudioOrbitApp {
     }
 
     pub(crate) fn request_delete_track_selection(&mut self, index: usize) {
+        if self
+            .current_playlist()
+            .map(|playlist| playlist.kind == PlaylistKind::Temporary)
+            .unwrap_or(false)
+        {
+            self.error_message = Some("Temporary playback is read-only.".to_owned());
+            return;
+        }
         if !self.track_file_operations_idle() {
             self.error_message =
                 Some("Wait for current library or track file operation to finish.".to_owned());
@@ -423,7 +455,23 @@ impl AudioOrbitApp {
             .iter()
             .filter(|path| playlist.add_track_path((*path).clone(), None, 0))
             .count();
-        self.state.playlists.push(playlist);
+        let insert_index = self
+            .state
+            .playlists
+            .iter()
+            .position(|playlist| playlist.kind == PlaylistKind::Temporary)
+            .unwrap_or(self.state.playlists.len());
+        self.state.playlists.insert(insert_index, playlist);
+        if self.state.selected_playlist_index >= insert_index {
+            self.state.selected_playlist_index += 1;
+        }
+        if self
+            .active_playlist_index
+            .map(|index| index >= insert_index)
+            .unwrap_or(false)
+        {
+            self.active_playlist_index = self.active_playlist_index.map(|index| index + 1);
+        }
         self.status_message = format!("Created {name} and added {added} of {requested} track(s).");
         self.error_message = None;
         self.save_state_silently();

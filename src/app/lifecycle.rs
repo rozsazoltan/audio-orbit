@@ -108,6 +108,7 @@ impl eframe::App for AudioOrbitApp {
         self.update_dev_metrics(context, repaint_interval);
         self.remember_window_geometry(context);
 
+        self.process_external_open_requests(context);
         self.process_media_key_events();
         self.process_update_events();
         self.maybe_start_auto_update_check();

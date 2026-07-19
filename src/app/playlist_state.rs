@@ -642,7 +642,7 @@ impl AudioOrbitApp {
         };
 
         if !playlist.accepts_manual_tracks() {
-            self.error_message = Some("Folder playlists are scanner-owned and cannot receive manual tracks.".to_owned());
+            self.error_message = Some("This playlist is read-only and cannot receive manual tracks.".to_owned());
             return;
         }
 
@@ -672,7 +672,7 @@ impl AudioOrbitApp {
     }
     pub(crate) fn remove_track_from_current_playlist(&mut self, track_index: usize) {
         let Some(remaining_len) = self.current_playlist_mut().and_then(|playlist| {
-            if playlist.kind == PlaylistKind::Folder {
+            if matches!(playlist.kind, PlaylistKind::Folder | PlaylistKind::Temporary) {
                 None
             } else if track_index < playlist.tracks.len() {
                 playlist.tracks.remove(track_index);
@@ -681,7 +681,7 @@ impl AudioOrbitApp {
                 None
             }
         }) else {
-            self.error_message = Some("Folder playlist entries are managed by folder rescan.".to_owned());
+            self.error_message = Some("This playlist is read-only.".to_owned());
             return;
         };
 

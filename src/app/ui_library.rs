@@ -45,7 +45,7 @@ impl AudioOrbitApp {
 
                     let row = ui.horizontal(|ui| {
                         let mut clicked_row = false;
-                        let action_width = if show_actions && playlist.kind != PlaylistKind::Favorites { 88.0 } else { 0.0 };
+                        let action_width = if show_actions && playlist.kind.can_delete() { 88.0 } else { 0.0 };
                         let name_width = (ui.available_width() - action_width).max(120.0);
 
                         if self.editing_playlist_index == Some(index) {
@@ -56,7 +56,7 @@ impl AudioOrbitApp {
                             );
                             if response.changed() {
                                 if let Some(target) = self.state.playlists.get_mut(index) {
-                                    if target.kind != PlaylistKind::Favorites {
+                                    if target.kind.can_delete() {
                                         target.name = next_name;
                                     }
                                 }
@@ -79,7 +79,7 @@ impl AudioOrbitApp {
                             );
                         }
 
-                        if show_actions && playlist.kind != PlaylistKind::Favorites {
+                        if show_actions && playlist.kind.can_delete() {
                             if ui.small_button(ui_icons::icon(Icon::Pencil)).on_hover_text("Rename").clicked() {
                                 self.editing_playlist_index = Some(index);
                             }
@@ -128,10 +128,17 @@ impl AudioOrbitApp {
             })
             .unwrap_or(0);
         let file_operation_idle = self.track_file_operations_idle();
+        let current_is_temporary = self
+            .current_playlist()
+            .map(|playlist| playlist.kind == PlaylistKind::Temporary)
+            .unwrap_or(false);
+        if current_is_temporary {
+            ui.small("Temporary playback is read-only. Files opened from Windows or completed DJ mixes stay here until app exit.");
+        }
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(
-                    current_track_count > 0 && file_operation_idle,
+                    !current_is_temporary && current_track_count > 0 && file_operation_idle,
                     egui::Button::new(ui_icons::label(Icon::Archive, "Export playlist...")),
                 )
                 .on_hover_text("Copy every playlist file into a chosen folder. Original files stay unchanged; duplicate names receive a numeric suffix.")
@@ -141,7 +148,7 @@ impl AudioOrbitApp {
             }
             if ui
                 .add_enabled(
-                    current_track_count > 0 && file_operation_idle,
+                    !current_is_temporary && current_track_count > 0 && file_operation_idle,
                     egui::Button::new(ui_icons::label(Icon::Trash2, "Delete all files...")),
                 )
                 .on_hover_text("Permanently delete every file referenced by current playlist after typed confirmation.")
@@ -151,7 +158,9 @@ impl AudioOrbitApp {
             }
             if ui
                 .add_enabled(
-                    current_available_track_count >= 2 && !self.dj_mix_is_running(),
+                    !current_is_temporary
+                        && current_available_track_count >= 2
+                        && !self.dj_mix_is_running(),
                     egui::Button::new(ui_icons::label(Icon::Music, "DJ mix...")),
                 )
                 .on_hover_text("Build one beat-aligned MP3 mix from current playlist without loading full tracks into memory.")
@@ -178,7 +187,7 @@ impl AudioOrbitApp {
                 && self.pending_track_file_operation_receiver.is_none();
             if ui
                 .add_enabled(
-                    scan_idle,
+                    scan_idle && !current_is_temporary,
                     egui::Button::new(ui_icons::label(Icon::RefreshCw, "Sync playlist")),
                 )
                 .on_hover_text("Check only selected playlist. Folder playlists scan their source folder; manual playlists check saved files only.")
@@ -262,6 +271,14 @@ impl AudioOrbitApp {
                     .count()
             })
             .unwrap_or(0);
+        let current_is_temporary = self
+            .current_playlist()
+            .map(|playlist| playlist.kind == PlaylistKind::Temporary)
+            .unwrap_or(false);
+        if current_is_temporary {
+            ui.small("Temporary playback is read-only.");
+            return;
+        }
         let can_modify_files = current_track_count > 0 && self.track_file_operations_idle();
 
         if ui

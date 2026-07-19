@@ -2,10 +2,31 @@ use crate::*;
 
 impl AudioOrbitApp {
     pub(crate) fn add_playlist(&mut self) {
-        let number = self.state.playlists.len() + 1;
+        let number = self
+            .state
+            .playlists
+            .iter()
+            .filter(|playlist| playlist.kind != PlaylistKind::Temporary)
+            .count()
+            + 1;
         self.persist_repeat_selection_for_current_playlist();
-        self.state.playlists.push(Playlist::new(format!("Playlist {number}")));
-        self.state.selected_playlist_index = self.state.playlists.len() - 1;
+        let insert_index = self
+            .state
+            .playlists
+            .iter()
+            .position(|playlist| playlist.kind == PlaylistKind::Temporary)
+            .unwrap_or(self.state.playlists.len());
+        self.state
+            .playlists
+            .insert(insert_index, Playlist::new(format!("Playlist {number}")));
+        if self
+            .active_playlist_index
+            .map(|index| index >= insert_index)
+            .unwrap_or(false)
+        {
+            self.active_playlist_index = self.active_playlist_index.map(|index| index + 1);
+        }
+        self.state.selected_playlist_index = insert_index;
         self.restore_repeat_selection_for_current_playlist();
         self.clear_multi_track_selection();
         self.selected_track_index = None;
@@ -19,7 +40,7 @@ impl AudioOrbitApp {
         };
 
         if !playlist.kind.can_delete() {
-            self.error_message = Some("Favorites is built-in and cannot be deleted.".to_owned());
+            self.error_message = Some("Built-in playlists cannot be deleted.".to_owned());
             return;
         }
 
@@ -51,13 +72,22 @@ impl AudioOrbitApp {
         self.save_state_silently();
     }
     pub(crate) fn move_playlist(&mut self, from: usize, delta: isize) {
-        if from >= self.state.playlists.len() {
+        if from >= self.state.playlists.len()
+            || self.state.playlists[from].kind == PlaylistKind::Temporary
+        {
             return;
         }
+        let last_movable_index = self
+            .state
+            .playlists
+            .iter()
+            .position(|playlist| playlist.kind == PlaylistKind::Temporary)
+            .unwrap_or(self.state.playlists.len())
+            .saturating_sub(1);
         let to = if delta < 0 {
             from.saturating_sub(1)
         } else {
-            (from + 1).min(self.state.playlists.len() - 1)
+            (from + 1).min(last_movable_index)
         };
         if from == to {
             return;
@@ -170,7 +200,7 @@ impl AudioOrbitApp {
         let Some(playlist) = self.current_playlist() else {
             return false;
         };
-        if index >= playlist.tracks.len() {
+        if index >= playlist.tracks.len() || playlist.kind == PlaylistKind::Temporary {
             return false;
         }
         let target = if delta < 0 {
@@ -206,6 +236,13 @@ impl AudioOrbitApp {
         self.restore_repeat_selection_for_current_playlist();
     }
     pub(crate) fn sort_current_playlist_by_name(&mut self, ascending: bool) {
+        if self
+            .current_playlist()
+            .map(|playlist| playlist.kind == PlaylistKind::Temporary)
+            .unwrap_or(false)
+        {
+            return;
+        }
         self.persist_repeat_selection_for_current_playlist();
         let selected_path = self.selected_track_path();
         let should_sort = self.current_playlist().map(|playlist| playlist.tracks.len() > 1).unwrap_or(false);
@@ -449,6 +486,9 @@ fn valid_track_drop_target_for_playlist(playlist: &Playlist, from: usize, to: us
         return false;
     }
     if from >= playlist.tracks.len() || to > playlist.tracks.len() {
+        return false;
+    }
+    if playlist.kind == PlaylistKind::Temporary {
         return false;
     }
     if playlist.kind != PlaylistKind::Folder {
