@@ -247,7 +247,7 @@ Set target mix length from 1 to 180 minutes. Each track supports:
 
 - **Auto highlight**: select a deterministic energetic section and align its boundaries to 8/16/32-bar phrases.
 - **Full track**: keep complete playable track after detected leading/trailing silence.
-- **Favorite range**: use a manually entered range and phrase-align safe boundaries.
+- **Favorite range**: set the usable section on a compact waveform while the track plays. Left-click plays or seeks, right-click moves the range start, and both blue edges are draggable. Numeric start/end fields remain available for exact edits; export phrase-aligns safe boundaries.
 
 Smart order keeps the first track and scores following tracks by BPM distance, analysis confidence, harmonic compatibility, and energy continuity. Tempo change is capped at ±6%. Loudness leveling targets approximately -14 LUFS while peak-aware gain and output limiting prevent clipping. MP3 output uses 192/256/320 kbps.
 

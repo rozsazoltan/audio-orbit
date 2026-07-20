@@ -874,42 +874,42 @@ fn render_planned_section(
 
     ensure_not_cancelled(cancel)?;
     let cache_tag = section_cache_tag(track)?;
-    if let Some(stems) = stems.as_mut() {
+    if let Some(stem_set) = stems.as_mut() {
         send_progress(
             sender,
             format!("Studio tempo match per stem: {}", track.track.title),
             0.44,
         );
-        stems.drums = stretch_audio(
-            &stems.drums,
+        stem_set.drums = stretch_audio(
+            &stem_set.drums,
             track.speed_ratio,
             tools,
             &format!("{cache_tag}-drums"),
             cancel,
         )?;
-        stems.bass = stretch_audio(
-            &stems.bass,
+        stem_set.bass = stretch_audio(
+            &stem_set.bass,
             track.speed_ratio,
             tools,
             &format!("{cache_tag}-bass"),
             cancel,
         )?;
-        stems.other = stretch_audio(
-            &stems.other,
+        stem_set.other = stretch_audio(
+            &stem_set.other,
             track.speed_ratio,
             tools,
             &format!("{cache_tag}-other"),
             cancel,
         )?;
-        stems.vocals = stretch_audio(
-            &stems.vocals,
+        stem_set.vocals = stretch_audio(
+            &stem_set.vocals,
             track.speed_ratio,
             tools,
             &format!("{cache_tag}-vocals"),
             cancel,
         )?;
-        stems.normalize_lengths();
-        let mix = stems.recombine();
+        stem_set.normalize_lengths();
+        let mix = stem_set.recombine();
         if mix.is_empty() {
             return Err(anyhow!("Tempo matching failed for {}", track.track.title));
         }

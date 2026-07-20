@@ -1,9 +1,222 @@
 use crate::*;
 use std::sync::atomic::Ordering;
 
+fn draw_dj_favorite_range_waveform(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    waveform: &[f32],
+    duration_seconds: f32,
+    range_start_seconds: &mut f32,
+    range_end_seconds: &mut f32,
+    playhead_seconds: Option<f32>,
+    enabled: bool,
+) -> Option<f32> {
+    let duration_seconds = duration_seconds.max(0.25);
+    let minimum_range_seconds = 0.25_f32.min(duration_seconds);
+    *range_start_seconds =
+        (*range_start_seconds).clamp(0.0, (duration_seconds - minimum_range_seconds).max(0.0));
+    *range_end_seconds = (*range_end_seconds).clamp(
+        (*range_start_seconds + minimum_range_seconds).min(duration_seconds),
+        duration_seconds,
+    );
+
+    let desired_size = egui::vec2(ui.available_width().max(180.0).floor(), 44.0);
+    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+    let seconds_from_x =
+        |x: f32| ((x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0) * duration_seconds;
+    let x_from_seconds =
+        |seconds: f32| rect.left() + rect.width() * (seconds / duration_seconds).clamp(0.0, 1.0);
+
+    let initial_start_x = x_from_seconds(*range_start_seconds);
+    let initial_end_x = x_from_seconds(*range_end_seconds);
+    let handle_width = 14.0;
+    let start_hit_rect = egui::Rect::from_min_max(
+        egui::pos2(initial_start_x - handle_width * 0.5, rect.top()),
+        egui::pos2(initial_start_x + handle_width * 0.5, rect.bottom()),
+    );
+    let end_hit_rect = egui::Rect::from_min_max(
+        egui::pos2(initial_end_x - handle_width * 0.5, rect.top()),
+        egui::pos2(initial_end_x + handle_width * 0.5, rect.bottom()),
+    );
+    let handle_sense = if enabled {
+        egui::Sense::drag()
+    } else {
+        egui::Sense::hover()
+    };
+    let start_response = ui.interact(start_hit_rect, id.with("start"), handle_sense);
+    let end_response = ui.interact(end_hit_rect, id.with("end"), handle_sense);
+
+    if enabled && start_response.dragged() {
+        if let Some(pointer) = start_response.interact_pointer_pos() {
+            *range_start_seconds = seconds_from_x(pointer.x)
+                .clamp(0.0, (*range_end_seconds - minimum_range_seconds).max(0.0));
+        }
+    }
+    if enabled && end_response.dragged() {
+        if let Some(pointer) = end_response.interact_pointer_pos() {
+            *range_end_seconds = seconds_from_x(pointer.x).clamp(
+                (*range_start_seconds + minimum_range_seconds).min(duration_seconds),
+                duration_seconds,
+            );
+        }
+    }
+
+    let handles_active = start_response.hovered()
+        || end_response.hovered()
+        || start_response.dragged()
+        || end_response.dragged();
+    if enabled && response.secondary_clicked() && !handles_active {
+        if let Some(pointer) = response.interact_pointer_pos() {
+            let new_start = seconds_from_x(pointer.x)
+                .clamp(0.0, (duration_seconds - minimum_range_seconds).max(0.0));
+            *range_start_seconds = new_start;
+            if *range_end_seconds - *range_start_seconds < minimum_range_seconds {
+                *range_end_seconds =
+                    (*range_start_seconds + minimum_range_seconds).min(duration_seconds);
+            }
+        }
+    }
+
+    let painter = ui.painter();
+    painter.rect_filled(rect, 3.0, egui::Color32::from_black_alpha(220));
+    if waveform.is_empty() {
+        painter.line_segment(
+            [
+                egui::pos2(rect.left() + 6.0, rect.center().y),
+                egui::pos2(rect.right() - 6.0, rect.center().y),
+            ],
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(74, 82, 96)),
+        );
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Play preview to load duration + waveform",
+            egui::FontId::proportional(11.0),
+            egui::Color32::from_rgb(132, 140, 154),
+        );
+    } else {
+        let column_count = (rect.width() / 3.0).floor().max(1.0) as usize + 1;
+        let values = (0..column_count)
+            .map(|column| sample_waveform_column(waveform, column, column_count))
+            .collect::<Vec<_>>();
+        let peak = values.iter().copied().fold(0.0_f32, f32::max).max(0.08);
+        let center_y = rect.center().y.round();
+        for (column, value) in values.iter().enumerate() {
+            let x = rect.left() + column as f32 * 3.0;
+            if x > rect.right() {
+                break;
+            }
+            let normalized = (*value / peak).clamp(0.025, 1.0).powf(1.05);
+            let height = (rect.height() * 0.78 * normalized)
+                .max(2.0)
+                .min(rect.height() - 6.0);
+            painter.line_segment(
+                [
+                    egui::pos2(x, center_y - height * 0.5),
+                    egui::pos2(x, center_y + height * 0.5),
+                ],
+                egui::Stroke::new(1.5, egui::Color32::from_rgb(94, 103, 118)),
+            );
+        }
+    }
+
+    let start_x = x_from_seconds(*range_start_seconds);
+    let end_x = x_from_seconds(*range_end_seconds);
+    let selected_rect = egui::Rect::from_min_max(
+        egui::pos2(start_x, rect.top()),
+        egui::pos2(end_x, rect.bottom()),
+    );
+    painter.rect_filled(
+        selected_rect,
+        0.0,
+        egui::Color32::from_rgba_unmultiplied(64, 126, 236, 48),
+    );
+    if start_x > rect.left() {
+        painter.rect_filled(
+            egui::Rect::from_min_max(rect.min, egui::pos2(start_x, rect.bottom())),
+            0.0,
+            egui::Color32::from_black_alpha(105),
+        );
+    }
+    if end_x < rect.right() {
+        painter.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(end_x, rect.top()), rect.max),
+            0.0,
+            egui::Color32::from_black_alpha(105),
+        );
+    }
+
+    let marker_color = egui::Color32::from_rgb(100, 166, 255);
+    for x in [start_x, end_x] {
+        painter.line_segment(
+            [
+                egui::pos2(x, rect.top() + 2.0),
+                egui::pos2(x, rect.bottom() - 2.0),
+            ],
+            egui::Stroke::new(2.0, marker_color),
+        );
+        painter.circle_filled(egui::pos2(x, rect.top() + 5.0), 4.0, marker_color);
+        painter.circle_filled(egui::pos2(x, rect.bottom() - 5.0), 4.0, marker_color);
+    }
+
+    if let Some(playhead_seconds) = playhead_seconds {
+        let playhead_x = x_from_seconds(playhead_seconds.clamp(0.0, duration_seconds));
+        painter.line_segment(
+            [
+                egui::pos2(playhead_x, rect.top() + 1.0),
+                egui::pos2(playhead_x, rect.bottom() - 1.0),
+            ],
+            egui::Stroke::new(1.0, egui::Color32::WHITE),
+        );
+    }
+
+    let response = response.on_hover_text(
+        "Left click: play/seek · Right click: set range start · Drag blue handles: resize range",
+    );
+    start_response.on_hover_text("Drag favorite range start");
+    end_response.on_hover_text("Drag favorite range end");
+
+    if enabled && response.clicked_by(egui::PointerButton::Primary) && !handles_active {
+        response
+            .interact_pointer_pos()
+            .map(|pointer| seconds_from_x(pointer.x))
+    } else {
+        None
+    }
+}
+
 impl AudioOrbitApp {
     pub(crate) fn dj_mix_is_running(&self) -> bool {
         self.dj_mix_event_receiver.is_some()
+    }
+
+    fn dj_preview_waveform_for_path(&self, path: &Path) -> (Vec<f32>, Option<f32>) {
+        if let Some(playback) = self
+            .last_playback
+            .as_ref()
+            .filter(|playback| same_path(&playback.path, path))
+        {
+            return (
+                playback.waveform.clone(),
+                Some(playback.original_duration_seconds),
+            );
+        }
+
+        self.state
+            .playlists
+            .iter()
+            .flat_map(|playlist| playlist.tracks.iter())
+            .find(|track| same_path(&track.path, path))
+            .map(|track| {
+                (
+                    track.waveform.clone(),
+                    track
+                        .metadata
+                        .duration_seconds
+                        .filter(|seconds| seconds.is_finite() && *seconds > 0.0),
+                )
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn open_dj_mix_builder_for_current_playlist(&mut self) {
@@ -320,6 +533,9 @@ impl AudioOrbitApp {
         let mut play_path = None;
         let mut choose_bridge_requested = false;
         let mut clear_bridge_requested = false;
+        let mut preview_play_request: Option<(PathBuf, f32)> = None;
+        let mut preview_seek_request: Option<f32> = None;
+        let mut preview_pause_resume_requested = false;
 
         egui::Area::new(egui::Id::new("dj_mix_modal"))
             .order(egui::Order::Foreground)
@@ -580,9 +796,36 @@ impl AudioOrbitApp {
                                                     let mut section_mode = modal.tracks[index].section_mode;
                                                     let mut favorite_start = modal.tracks[index].favorite_start_seconds;
                                                     let mut favorite_end = modal.tracks[index].favorite_end_seconds;
+                                                    let (waveform, known_duration) =
+                                                        self.dj_preview_waveform_for_path(&path);
+                                                    let duration_seconds = known_duration
+                                                        .unwrap_or_else(|| favorite_end.max(60.0))
+                                                        .max(0.25);
+                                                    let preview_is_active = self
+                                                        .active_track_path
+                                                        .as_ref()
+                                                        .map(|active| same_path(active, &path))
+                                                        .unwrap_or(false);
+                                                    let preview_is_playing = preview_is_active
+                                                        && self
+                                                            .player
+                                                            .as_ref()
+                                                            .map(AudioPlayer::is_playing)
+                                                            .unwrap_or(false);
+                                                    let preview_is_paused = preview_is_active
+                                                        && self
+                                                            .player
+                                                            .as_ref()
+                                                            .map(AudioPlayer::is_paused)
+                                                            .unwrap_or(false);
+                                                    let playhead_seconds = preview_is_active
+                                                        .then(|| self.displayed_playback_position_seconds());
                                                     ui.horizontal(|ui| {
                                                         ui.label(format!("{}.", index + 1));
+                                                        let track_content_width =
+                                                            (ui.available_width() - 104.0).max(220.0);
                                                         ui.vertical(|ui| {
+                                                            ui.set_max_width(track_content_width);
                                                             ui.label(ellipsize_chars(&title, 72));
                                                             ui.small(ellipsize_chars(&path.display().to_string(), 96));
                                                             ui.horizontal_wrapped(|ui| {
@@ -605,24 +848,118 @@ impl AudioOrbitApp {
                                                                 });
                                                             });
                                                             if section_mode == DjTrackSectionMode::FavoriteRange {
+                                                                let waveform_id = egui::Id::new((
+                                                                    "dj_favorite_range_waveform",
+                                                                    index,
+                                                                    path_key(&path),
+                                                                ));
+                                                                if let Some(seek_seconds) = draw_dj_favorite_range_waveform(
+                                                                    ui,
+                                                                    waveform_id,
+                                                                    &waveform,
+                                                                    duration_seconds,
+                                                                    &mut favorite_start,
+                                                                    &mut favorite_end,
+                                                                    playhead_seconds,
+                                                                    !running && known_duration.is_some(),
+                                                                ) {
+                                                                    if preview_is_active {
+                                                                        preview_seek_request = Some(seek_seconds);
+                                                                    } else {
+                                                                        preview_play_request = Some((path.clone(), seek_seconds));
+                                                                    }
+                                                                }
+                                                                ui.horizontal_wrapped(|ui| {
+                                                                    let preview_label = if preview_is_playing {
+                                                                        ui_icons::label(Icon::Pause, "Pause preview")
+                                                                    } else if preview_is_paused {
+                                                                        ui_icons::label(Icon::Play, "Resume preview")
+                                                                    } else {
+                                                                        ui_icons::label(Icon::Play, "Play range")
+                                                                    };
+                                                                    if ui
+                                                                        .add_enabled(!running, egui::Button::new(preview_label))
+                                                                        .clicked()
+                                                                    {
+                                                                        if preview_is_playing || preview_is_paused {
+                                                                            preview_pause_resume_requested = true;
+                                                                        } else {
+                                                                            preview_play_request = Some((
+                                                                                path.clone(),
+                                                                                favorite_start,
+                                                                            ));
+                                                                        }
+                                                                    }
+                                                                    if preview_is_active {
+                                                                        if ui
+                                                                            .add_enabled(
+                                                                                !running,
+                                                                                egui::Button::new("Start = playhead"),
+                                                                            )
+                                                                            .clicked()
+                                                                        {
+                                                                            let playhead = self
+                                                                                .displayed_playback_position_seconds()
+                                                                                .clamp(0.0, duration_seconds);
+                                                                            favorite_start = playhead.min(
+                                                                                (favorite_end - 0.25).max(0.0),
+                                                                            );
+                                                                        }
+                                                                        if ui
+                                                                            .add_enabled(
+                                                                                !running,
+                                                                                egui::Button::new("End = playhead"),
+                                                                            )
+                                                                            .clicked()
+                                                                        {
+                                                                            let playhead = self
+                                                                                .displayed_playback_position_seconds()
+                                                                                .clamp(0.0, duration_seconds);
+                                                                            favorite_end = playhead.max(
+                                                                                (favorite_start + 0.25)
+                                                                                    .min(duration_seconds),
+                                                                            );
+                                                                        }
+                                                                    }
+                                                                    ui.small(format!(
+                                                                        "{} – {} · {}",
+                                                                        format_duration(favorite_start),
+                                                                        format_duration(favorite_end),
+                                                                        format_duration(
+                                                                            (favorite_end - favorite_start).max(0.0),
+                                                                        ),
+                                                                    ));
+                                                                });
                                                                 ui.horizontal_wrapped(|ui| {
                                                                     ui.label("Start:");
                                                                     ui.add_enabled(
                                                                         !running,
                                                                         egui::DragValue::new(&mut favorite_start)
-                                                                            .range(0.0..=86_400.0)
-                                                                            .speed(1.0)
+                                                                            .range(0.0..=duration_seconds)
+                                                                            .speed(0.25)
                                                                             .suffix(" s"),
                                                                     );
                                                                     ui.label("End:");
                                                                     ui.add_enabled(
                                                                         !running,
                                                                         egui::DragValue::new(&mut favorite_end)
-                                                                            .range(0.0..=86_400.0)
-                                                                            .speed(1.0)
+                                                                            .range(0.0..=duration_seconds)
+                                                                            .speed(0.25)
                                                                             .suffix(" s"),
                                                                     );
                                                                 });
+                                                                if waveform.is_empty() {
+                                                                    ui.small(
+                                                                        "Play preview first. Background decoding loads the real duration and waveform without blocking the DJ window.",
+                                                                    );
+                                                                } else {
+                                                                    ui.small(
+                                                                        "Left click jumps playback. Right click moves the left edge. Drag either blue edge.",
+                                                                    );
+                                                                }
+                                                                if preview_is_playing {
+                                                                    ui.ctx().request_repaint_after(Duration::from_millis(50));
+                                                                }
                                                             }
                                                         });
                                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -649,6 +986,15 @@ impl AudioOrbitApp {
                                                             }
                                                         });
                                                     });
+                                                    favorite_start = favorite_start.clamp(
+                                                        0.0,
+                                                        (duration_seconds - 0.25).max(0.0),
+                                                    );
+                                                    favorite_end = favorite_end.clamp(
+                                                        (favorite_start + 0.25)
+                                                            .min(duration_seconds),
+                                                        duration_seconds,
+                                                    );
                                                     modal.tracks[index].section_mode = section_mode;
                                                     modal.tracks[index].favorite_start_seconds = favorite_start.max(0.0);
                                                     modal.tracks[index].favorite_end_seconds = favorite_end.max(0.0);
@@ -683,6 +1029,19 @@ impl AudioOrbitApp {
             }
         }
         self.dj_mix_modal = Some(modal);
+        if preview_pause_resume_requested {
+            self.pause_or_resume();
+        } else if let Some(seconds) = preview_seek_request {
+            self.seek_current(seconds);
+        } else if let Some((path, seconds)) = preview_play_request {
+            let track_index = self.current_playlist().and_then(|playlist| {
+                playlist
+                    .tracks
+                    .iter()
+                    .position(|track| same_path(&track.path, &path))
+            });
+            self.play_path_with_crossfade(path, track_index, seconds, 0.0);
+        }
         if cancel_requested {
             self.cancel_dj_mix_export();
         }
