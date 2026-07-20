@@ -237,17 +237,17 @@ Automatic bridge recipes:
 - **Harmonic bridge** is selected only for compatible detected keys and uses accompaniment stems or filtered deck material.
 - **Echo drop** removes the outgoing phrase with an echo throw and performs a short controlled drop reveal.
 - **Stem mashup** combines selected drums/accompaniment while vocals and bass remain mutually exclusive.
-- **Custom audio** repeats a chosen MP3/WAV/FLAC/OGG range from a configurable start timestamp and loop length.
+- **Custom audio** repeats a chosen MP3/WAV/FLAC/OGG range from a configurable start timestamp and loop length. Loop boundaries use a short overlap crossfade instead of periodic fade-to-zero modulation.
 
-The complete incoming track does not sit underneath the outgoing track for a long fade. With stems, drums, bass, accompaniment, and vocals receive independent phrase gates. Without stems, a short filtered handoff and center-vocal guard are used. Controlled musical beds remain where they add continuity; deliberate silence appears only in an echo-drop recipe.
+The complete incoming track does not sit underneath the outgoing track for a long fade. With stems, drums, bass, accompaniment, and vocals receive independent phrase gates. Without stems, a short filtered handoff and center-vocal guard are used. Every Smart DJ transition keeps a low instrumental continuity bed, including echo-drop transitions, so the handoff never reaches a complete mute.
 
-Requested transition length is a target. When selected sections cannot fit it, Audio Orbit shortens the transition automatically, loops available beat material where useful, and reserves middle-track audio for both neighboring transitions. Favorite ranges as short as 0.25 seconds are accepted; only unavailable or effectively empty decoded audio fails.
+Requested transition length is a target. When selected sections cannot fit it, Audio Orbit shortens the transition automatically and reserves middle-track audio for both neighboring transitions. The bridge follows the complete available overlap phrase instead of repeatedly cycling a one-bar fragment. Favorite ranges as short as 0.25 seconds remain valid for imported/saved plans; the interactive editor snaps range endpoints to whole seconds. Only unavailable or effectively empty decoded audio fails.
 
 Set target mix length from 1 to 180 minutes. Each track supports:
 
 - **Auto highlight**: select a deterministic energetic section and align its boundaries to 8/16/32-bar phrases.
 - **Full track**: keep complete playable track after detected leading/trailing silence.
-- **Favorite range**: set the usable section on a compact waveform while the track plays. Left-click plays or seeks, right-click moves the range start, and both blue edges are draggable. Numeric start/end fields remain available for exact edits; export phrase-aligns safe boundaries.
+- **Favorite range**: set the usable section on a compact waveform while the track plays. Left-click plays or seeks, right-click moves the range start, and both blue edges are draggable. Moving the start immediately seeks preview playback to the new whole-second position. Range preview stops at the selected end and never advances to the next track. Leaving Favorite range or closing the DJ builder stops the preview and removes the main playback bar. Numeric start/end fields use whole seconds; export still phrase-aligns safe boundaries.
 
 Smart order keeps the first track and scores following tracks by BPM distance, analysis confidence, harmonic compatibility, and energy continuity. Tempo change is capped at ±6%. Loudness leveling targets approximately -14 LUFS while peak-aware gain and output limiting prevent clipping. MP3 output uses 192/256/320 kbps.
 

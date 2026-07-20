@@ -26,9 +26,9 @@ use std::{
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
-const ENGINE_SCHEMA_VERSION: u32 = 3;
+const ENGINE_SCHEMA_VERSION: u32 = 4;
 const ANALYZER_VERSION: &str = "audio-orbit+optional-essentia-v3";
-const ENGINE_VERSION: &str = "human-dj-v7-essentia-rubberband-demucs";
+const ENGINE_VERSION: &str = "human-dj-v8-continuous-phrase-bridge";
 const OUTPUT_SAMPLE_RATE: u32 = 44_100;
 const OUTPUT_CHANNELS: u16 = 2;
 const ANALYSIS_RATE_HZ: usize = 100;
@@ -40,6 +40,8 @@ const DEFAULT_BPM: f32 = 120.0;
 const MAX_SMART_TEMPO_CHANGE: f32 = 0.06;
 const TARGET_LUFS: f64 = -14.0;
 const OUTPUT_PEAK_LIMIT: f32 = 0.96;
+const MIN_TRANSITION_BED_GAIN: f32 = 0.08;
+const MIN_DROP_CUT_GAIN: f32 = 0.12;
 const MIN_SECTION_SECONDS: f32 = 24.0;
 const MAX_AUTO_SECTION_SECONDS: f32 = 150.0;
 
@@ -1265,7 +1267,9 @@ fn write_performance_transition(
     );
     let bpm = ((current.analysis.bpm + next.analysis.bpm) * 0.5).clamp(MIN_BPM, MAX_BPM);
     let beat_frames = ((60.0 / bpm) * OUTPUT_SAMPLE_RATE as f32).round().max(1.0) as usize;
-    let loop_frames = beat_frames.saturating_mul(4).max(256).min(frames);
+    // Use the complete overlap as one evolving phrase. Repeating a one-bar fragment
+    // produces the mechanical buzzing/pumping associated with cheap auto-mixers.
+    let loop_frames = frames;
     let strong_change = transition_should_hit_hard(current, next);
     let stems_available = outgoing_stems.is_some() && incoming_stems.is_some();
     let recipe = TransitionRecipe::resolve(
@@ -1283,6 +1287,8 @@ fn write_performance_transition(
     let mut percussion = TransitionPercussion::new(bpm, transition_seed(current, next));
     let mut outgoing_vocal_guard = CenterVocalGuard::new();
     let mut incoming_vocal_guard = CenterVocalGuard::new();
+    let mut outgoing_bed_filter = LowPassStereo::new(1_100.0);
+    let mut incoming_bed_filter = LowPassStereo::new(1_100.0);
     let vocal_plan = plan_vocal_handoff(&outgoing[..frames], &incoming[..frames]);
 
     for index in 0..frames {
@@ -1334,6 +1340,46 @@ fn write_performance_transition(
             ]
         };
 
+        let bed_handoff = smoothstep(0.40, 0.60, progress);
+        let out_bed_gain = ((1.0 - bed_handoff) * std::f32::consts::FRAC_PI_2).sin();
+        let in_bed_gain = (bed_handoff * std::f32::consts::FRAC_PI_2).sin();
+        let continuity_bed =
+            if let (Some(out_stems), Some(in_stems)) = (outgoing_stems, incoming_stems) {
+                let out_drums = out_stems.frame(StemKind::Drums, outgoing_stem_offset + index);
+                let out_other = out_stems.frame(StemKind::Other, outgoing_stem_offset + index);
+                let in_drums = in_stems.frame(StemKind::Drums, index);
+                let in_other = in_stems.frame(StemKind::Other, index);
+                [
+                    (out_drums[0] * 0.62 + out_other[0] * 0.38)
+                        * current.gain
+                        * peak_scale
+                        * out_bed_gain
+                        + (in_drums[0] * 0.62 + in_other[0] * 0.38)
+                            * next.gain
+                            * peak_scale
+                            * in_bed_gain,
+                    (out_drums[1] * 0.62 + out_other[1] * 0.38)
+                        * current.gain
+                        * peak_scale
+                        * out_bed_gain
+                        + (in_drums[1] * 0.62 + in_other[1] * 0.38)
+                            * next.gain
+                            * peak_scale
+                            * in_bed_gain,
+                ]
+            } else {
+                let out_bed = outgoing_bed_filter
+                    .process(multiply_frame(outgoing[index], current.gain * peak_scale));
+                let in_bed = incoming_bed_filter
+                    .process(multiply_frame(incoming[index], next.gain * peak_scale));
+                [
+                    out_bed[0] * out_bed_gain + in_bed[0] * in_bed_gain,
+                    out_bed[1] * out_bed_gain + in_bed[1] * in_bed_gain,
+                ]
+            };
+        mixed[0] += continuity_bed[0] * MIN_TRANSITION_BED_GAIN;
+        mixed[1] += continuity_bed[1] * MIN_TRANSITION_BED_GAIN;
+
         let deck_bridge = transition_deck_bridge(
             recipe,
             outgoing,
@@ -1371,7 +1417,7 @@ fn write_performance_transition(
         if recipe.has_drop_cut() && progress > 0.69 && progress < 0.735 {
             let down = 1.0 - smoothstep(0.69, 0.715, progress);
             let up = smoothstep(0.715, 0.735, progress);
-            let cut = down.max(up).clamp(0.0, 1.0);
+            let cut = MIN_DROP_CUT_GAIN + (1.0 - MIN_DROP_CUT_GAIN) * down.max(up).clamp(0.0, 1.0);
             mixed[0] *= cut;
             mixed[1] *= cut;
         }
@@ -1707,20 +1753,27 @@ struct CustomBridgeAudio {
 }
 
 impl CustomBridgeAudio {
-    fn render(&self, frame_index: usize, progress: f32) -> [f32; 2] {
+    fn render(&self, frame_index: usize, _progress: f32) -> [f32; 2] {
         if self.frames.is_empty() {
             return [0.0, 0.0];
         }
-        let position = frame_index % self.frames.len();
-        let frame = self.frames[position];
-        let loop_edge = position as f32 / self.frames.len() as f32;
-        let edge_fade =
-            smoothstep(0.0, 0.035, loop_edge) * (1.0 - smoothstep(0.965, 1.0, loop_edge));
-        let movement = 0.94 + 0.06 * (std::f32::consts::TAU * progress).sin();
-        [
-            frame[0] * edge_fade * movement,
-            frame[1] * edge_fade * movement,
-        ]
+        let frame_count = self.frames.len();
+        let position = frame_index % frame_count;
+        let crossfade_frames = (OUTPUT_SAMPLE_RATE as usize / 50)
+            .min(frame_count / 4)
+            .max(1);
+        let crossfade_start = frame_count.saturating_sub(crossfade_frames);
+        if position >= crossfade_start {
+            let head_index = position - crossfade_start;
+            let blend = smoothstep(0.0, 1.0, head_index as f32 / crossfade_frames as f32);
+            let tail = self.frames[position];
+            let head = self.frames[head_index.min(frame_count - 1)];
+            return [
+                tail[0] * (1.0 - blend) + head[0] * blend,
+                tail[1] * (1.0 - blend) + head[1] * blend,
+            ];
+        }
+        self.frames[position]
     }
 }
 
@@ -2923,7 +2976,12 @@ fn plan_transition_diagnostics(
                     effective_bpm
                 ),
                 format!("Transition recipe: {}.", recipe.diagnostic_name()),
-                "Outgoing and incoming lead vocals are never intentionally layered; the handoff is instrumental between vocal phrases.".to_owned(),
+                "The bridge follows the complete overlap phrase instead of repeating a one-bar fragment."
+                    .to_owned(),
+                "A low instrumental continuity bed remains active; transition gain never intentionally reaches zero."
+                    .to_owned(),
+                "Outgoing and incoming lead vocals are never intentionally layered; the handoff is instrumental between vocal phrases."
+                    .to_owned(),
             ];
             if actual_frames < requested_frames {
                 decisions.push(format!(

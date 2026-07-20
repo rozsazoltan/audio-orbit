@@ -1382,6 +1382,34 @@ impl AudioOrbitApp {
         self.seek_current(next);
     }
     pub(crate) fn update_playback_status(&mut self) {
+        let dj_preview = self.dj_mix_modal.as_ref().and_then(|modal| {
+            modal
+                .preview_track_path
+                .as_ref()
+                .map(|path| (path.clone(), modal.preview_stop_seconds))
+        });
+        if let Some((preview_path, stop_seconds)) = dj_preview {
+            let preview_is_active = self
+                .active_track_path
+                .as_ref()
+                .map(|active| same_path(active, &preview_path))
+                .unwrap_or(false);
+            if preview_is_active {
+                let finished = self
+                    .player
+                    .as_ref()
+                    .map(AudioPlayer::has_finished)
+                    .unwrap_or(false);
+                let reached_range_end = stop_seconds
+                    .map(|end| self.displayed_playback_position_seconds() >= end.max(0.0))
+                    .unwrap_or(false);
+                if finished || reached_range_end {
+                    self.stop_dj_preview_playback();
+                }
+            }
+            return;
+        }
+
         if self.maybe_start_crossfade_to_next_track() {
             return;
         }

@@ -1,6 +1,17 @@
 use crate::*;
 use std::sync::atomic::Ordering;
 
+#[derive(Default)]
+struct DjFavoriteRangeWaveformAction {
+    seek_seconds: Option<f32>,
+    start_changed: bool,
+    end_changed: bool,
+}
+
+fn snap_favorite_range_second(seconds: f32, duration_seconds: f32) -> f32 {
+    seconds.round().clamp(0.0, duration_seconds)
+}
+
 fn draw_dj_favorite_range_waveform(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -10,20 +21,24 @@ fn draw_dj_favorite_range_waveform(
     range_end_seconds: &mut f32,
     playhead_seconds: Option<f32>,
     enabled: bool,
-) -> Option<f32> {
-    let duration_seconds = duration_seconds.max(0.25);
-    let minimum_range_seconds = 0.25_f32.min(duration_seconds);
-    *range_start_seconds =
-        (*range_start_seconds).clamp(0.0, (duration_seconds - minimum_range_seconds).max(0.0));
-    *range_end_seconds = (*range_end_seconds).clamp(
+) -> DjFavoriteRangeWaveformAction {
+    let duration_seconds = duration_seconds.max(0.25).round().max(1.0);
+    let minimum_range_seconds = 1.0_f32.min(duration_seconds);
+    *range_start_seconds = snap_favorite_range_second(*range_start_seconds, duration_seconds)
+        .clamp(0.0, (duration_seconds - minimum_range_seconds).max(0.0));
+    *range_end_seconds = snap_favorite_range_second(*range_end_seconds, duration_seconds).clamp(
         (*range_start_seconds + minimum_range_seconds).min(duration_seconds),
         duration_seconds,
     );
 
     let desired_size = egui::vec2(ui.available_width().max(180.0).floor(), 44.0);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
-    let seconds_from_x =
-        |x: f32| ((x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0) * duration_seconds;
+    let seconds_from_x = |x: f32| {
+        snap_favorite_range_second(
+            ((x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0) * duration_seconds,
+            duration_seconds,
+        )
+    };
     let x_from_seconds =
         |seconds: f32| rect.left() + rect.width() * (seconds / duration_seconds).clamp(0.0, 1.0);
 
@@ -45,6 +60,7 @@ fn draw_dj_favorite_range_waveform(
     };
     let start_response = ui.interact(start_hit_rect, id.with("start"), handle_sense);
     let end_response = ui.interact(end_hit_rect, id.with("end"), handle_sense);
+    let mut action = DjFavoriteRangeWaveformAction::default();
 
     if enabled && start_response.dragged() {
         if let Some(pointer) = start_response.interact_pointer_pos() {
@@ -60,6 +76,8 @@ fn draw_dj_favorite_range_waveform(
             );
         }
     }
+    action.start_changed = enabled && start_response.drag_stopped();
+    action.end_changed = enabled && end_response.drag_stopped();
 
     let handles_active = start_response.hovered()
         || end_response.hovered()
@@ -73,7 +91,9 @@ fn draw_dj_favorite_range_waveform(
             if *range_end_seconds - *range_start_seconds < minimum_range_seconds {
                 *range_end_seconds =
                     (*range_start_seconds + minimum_range_seconds).min(duration_seconds);
+                action.end_changed = true;
             }
+            action.start_changed = true;
         }
     }
 
@@ -177,17 +197,31 @@ fn draw_dj_favorite_range_waveform(
     end_response.on_hover_text("Drag favorite range end");
 
     if enabled && response.clicked_by(egui::PointerButton::Primary) && !handles_active {
-        response
+        action.seek_seconds = response
             .interact_pointer_pos()
-            .map(|pointer| seconds_from_x(pointer.x))
-    } else {
-        None
+            .map(|pointer| seconds_from_x(pointer.x));
     }
+
+    action
 }
 
 impl AudioOrbitApp {
     pub(crate) fn dj_mix_is_running(&self) -> bool {
         self.dj_mix_event_receiver.is_some()
+    }
+
+    pub(crate) fn stop_dj_preview_playback(&mut self) {
+        let preview_path = self
+            .dj_mix_modal
+            .as_ref()
+            .and_then(|modal| modal.preview_track_path.clone());
+        if preview_path.is_some() {
+            self.stop();
+        }
+        if let Some(modal) = self.dj_mix_modal.as_mut() {
+            modal.preview_track_path = None;
+            modal.preview_stop_seconds = None;
+        }
     }
 
     fn dj_preview_waveform_for_path(&self, path: &Path) -> (Vec<f32>, Option<f32>) {
@@ -300,6 +334,8 @@ impl AudioOrbitApp {
             completed: false,
             started_at: None,
             last_progress_at: None,
+            preview_track_path: None,
+            preview_stop_seconds: None,
         });
     }
 
@@ -533,9 +569,11 @@ impl AudioOrbitApp {
         let mut play_path = None;
         let mut choose_bridge_requested = false;
         let mut clear_bridge_requested = false;
-        let mut preview_play_request: Option<(PathBuf, f32)> = None;
-        let mut preview_seek_request: Option<f32> = None;
+        let mut preview_play_request: Option<(PathBuf, f32, f32)> = None;
+        let mut preview_seek_request: Option<(f32, f32)> = None;
+        let mut preview_stop_update_request: Option<(PathBuf, f32)> = None;
         let mut preview_pause_resume_requested = false;
+        let mut stop_preview_requested = false;
 
         egui::Area::new(egui::Id::new("dj_mix_modal"))
             .order(egui::Order::Foreground)
@@ -793,14 +831,17 @@ impl AudioOrbitApp {
                                                 for index in 0..track_count {
                                                     let title = modal.tracks[index].title.clone();
                                                     let path = modal.tracks[index].path.clone();
-                                                    let mut section_mode = modal.tracks[index].section_mode;
+                                                    let previous_section_mode = modal.tracks[index].section_mode;
+                                                    let mut section_mode = previous_section_mode;
                                                     let mut favorite_start = modal.tracks[index].favorite_start_seconds;
                                                     let mut favorite_end = modal.tracks[index].favorite_end_seconds;
                                                     let (waveform, known_duration) =
                                                         self.dj_preview_waveform_for_path(&path);
                                                     let duration_seconds = known_duration
                                                         .unwrap_or_else(|| favorite_end.max(60.0))
-                                                        .max(0.25);
+                                                        .max(0.25)
+                                                        .round()
+                                                        .max(1.0);
                                                     let preview_is_active = self
                                                         .active_track_path
                                                         .as_ref()
@@ -848,12 +889,14 @@ impl AudioOrbitApp {
                                                                 });
                                                             });
                                                             if section_mode == DjTrackSectionMode::FavoriteRange {
+                                                                let mut favorite_start_changed = false;
+                                                                let mut favorite_end_changed = false;
                                                                 let waveform_id = egui::Id::new((
                                                                     "dj_favorite_range_waveform",
                                                                     index,
                                                                     path_key(&path),
                                                                 ));
-                                                                if let Some(seek_seconds) = draw_dj_favorite_range_waveform(
+                                                                let waveform_action = draw_dj_favorite_range_waveform(
                                                                     ui,
                                                                     waveform_id,
                                                                     &waveform,
@@ -862,11 +905,23 @@ impl AudioOrbitApp {
                                                                     &mut favorite_end,
                                                                     playhead_seconds,
                                                                     !running && known_duration.is_some(),
-                                                                ) {
-                                                                    if preview_is_active {
-                                                                        preview_seek_request = Some(seek_seconds);
+                                                                );
+                                                                favorite_start_changed |= waveform_action.start_changed;
+                                                                favorite_end_changed |= waveform_action.end_changed;
+                                                                if let Some(seek_seconds) = waveform_action.seek_seconds {
+                                                                    let stop_seconds = if seek_seconds < favorite_end {
+                                                                        favorite_end
                                                                     } else {
-                                                                        preview_play_request = Some((path.clone(), seek_seconds));
+                                                                        duration_seconds
+                                                                    };
+                                                                    if preview_is_active {
+                                                                        preview_seek_request = Some((seek_seconds, stop_seconds));
+                                                                    } else {
+                                                                        preview_play_request = Some((
+                                                                            path.clone(),
+                                                                            seek_seconds,
+                                                                            stop_seconds,
+                                                                        ));
                                                                     }
                                                                 }
                                                                 ui.horizontal_wrapped(|ui| {
@@ -887,6 +942,7 @@ impl AudioOrbitApp {
                                                                             preview_play_request = Some((
                                                                                 path.clone(),
                                                                                 favorite_start,
+                                                                                favorite_end,
                                                                             ));
                                                                         }
                                                                     }
@@ -898,12 +954,14 @@ impl AudioOrbitApp {
                                                                             )
                                                                             .clicked()
                                                                         {
-                                                                            let playhead = self
-                                                                                .displayed_playback_position_seconds()
-                                                                                .clamp(0.0, duration_seconds);
-                                                                            favorite_start = playhead.min(
-                                                                                (favorite_end - 0.25).max(0.0),
+                                                                            let playhead = snap_favorite_range_second(
+                                                                                self.displayed_playback_position_seconds(),
+                                                                                duration_seconds,
                                                                             );
+                                                                            favorite_start = playhead.min(
+                                                                                (favorite_end - 1.0).max(0.0),
+                                                                            );
+                                                                            favorite_start_changed = true;
                                                                         }
                                                                         if ui
                                                                             .add_enabled(
@@ -912,13 +970,15 @@ impl AudioOrbitApp {
                                                                             )
                                                                             .clicked()
                                                                         {
-                                                                            let playhead = self
-                                                                                .displayed_playback_position_seconds()
-                                                                                .clamp(0.0, duration_seconds);
+                                                                            let playhead = snap_favorite_range_second(
+                                                                                self.displayed_playback_position_seconds(),
+                                                                                duration_seconds,
+                                                                            );
                                                                             favorite_end = playhead.max(
-                                                                                (favorite_start + 0.25)
+                                                                                (favorite_start + 1.0)
                                                                                     .min(duration_seconds),
                                                                             );
+                                                                            favorite_end_changed = true;
                                                                         }
                                                                     }
                                                                     ui.small(format!(
@@ -932,29 +992,65 @@ impl AudioOrbitApp {
                                                                 });
                                                                 ui.horizontal_wrapped(|ui| {
                                                                     ui.label("Start:");
-                                                                    ui.add_enabled(
+                                                                    let start_response = ui.add_enabled(
                                                                         !running,
                                                                         egui::DragValue::new(&mut favorite_start)
                                                                             .range(0.0..=duration_seconds)
-                                                                            .speed(0.25)
+                                                                            .speed(1.0)
+                                                                            .fixed_decimals(0)
                                                                             .suffix(" s"),
                                                                     );
+                                                                    favorite_start_changed |= start_response.changed();
                                                                     ui.label("End:");
-                                                                    ui.add_enabled(
+                                                                    let end_response = ui.add_enabled(
                                                                         !running,
                                                                         egui::DragValue::new(&mut favorite_end)
                                                                             .range(0.0..=duration_seconds)
-                                                                            .speed(0.25)
+                                                                            .speed(1.0)
+                                                                            .fixed_decimals(0)
                                                                             .suffix(" s"),
                                                                     );
+                                                                    favorite_end_changed |= end_response.changed();
                                                                 });
+                                                                favorite_start = snap_favorite_range_second(
+                                                                    favorite_start,
+                                                                    duration_seconds,
+                                                                )
+                                                                .clamp(0.0, (duration_seconds - 1.0).max(0.0));
+                                                                favorite_end = snap_favorite_range_second(
+                                                                    favorite_end,
+                                                                    duration_seconds,
+                                                                )
+                                                                .clamp(
+                                                                    (favorite_start + 1.0).min(duration_seconds),
+                                                                    duration_seconds,
+                                                                );
+                                                                if favorite_start_changed {
+                                                                    if preview_is_active {
+                                                                        preview_seek_request = Some((
+                                                                            favorite_start,
+                                                                            favorite_end,
+                                                                        ));
+                                                                    } else {
+                                                                        preview_play_request = Some((
+                                                                            path.clone(),
+                                                                            favorite_start,
+                                                                            favorite_end,
+                                                                        ));
+                                                                    }
+                                                                } else if favorite_end_changed && preview_is_active {
+                                                                    preview_stop_update_request = Some((
+                                                                        path.clone(),
+                                                                        favorite_end,
+                                                                    ));
+                                                                }
                                                                 if waveform.is_empty() {
                                                                     ui.small(
                                                                         "Play preview first. Background decoding loads the real duration and waveform without blocking the DJ window.",
                                                                     );
                                                                 } else {
                                                                     ui.small(
-                                                                        "Left click jumps playback. Right click moves the left edge. Drag either blue edge.",
+                                                                        "Left click jumps playback. Right click moves the start and seeks there. Drag either blue edge. Values use whole seconds.",
                                                                     );
                                                                 }
                                                                 if preview_is_playing {
@@ -986,12 +1082,32 @@ impl AudioOrbitApp {
                                                             }
                                                         });
                                                     });
-                                                    favorite_start = favorite_start.clamp(
+                                                    if previous_section_mode
+                                                        == DjTrackSectionMode::FavoriteRange
+                                                        && section_mode
+                                                            != DjTrackSectionMode::FavoriteRange
+                                                        && modal
+                                                            .preview_track_path
+                                                            .as_ref()
+                                                            .map(|preview| same_path(preview, &path))
+                                                            .unwrap_or(false)
+                                                    {
+                                                        stop_preview_requested = true;
+                                                    }
+                                                    favorite_start = snap_favorite_range_second(
+                                                        favorite_start,
+                                                        duration_seconds,
+                                                    )
+                                                    .clamp(
                                                         0.0,
-                                                        (duration_seconds - 0.25).max(0.0),
+                                                        (duration_seconds - 1.0).max(0.0),
                                                     );
-                                                    favorite_end = favorite_end.clamp(
-                                                        (favorite_start + 0.25)
+                                                    favorite_end = snap_favorite_range_second(
+                                                        favorite_end,
+                                                        duration_seconds,
+                                                    )
+                                                    .clamp(
+                                                        (favorite_start + 1.0)
                                                             .min(duration_seconds),
                                                         duration_seconds,
                                                     );
@@ -1007,6 +1123,17 @@ impl AudioOrbitApp {
                                                     modal.options.smart_order = false;
                                                 }
                                                 if let Some(index) = remove_index {
+                                                    if modal
+                                                        .tracks
+                                                        .get(index)
+                                                        .zip(modal.preview_track_path.as_ref())
+                                                        .map(|(track, preview)| {
+                                                            same_path(&track.path, preview)
+                                                        })
+                                                        .unwrap_or(false)
+                                                    {
+                                                        stop_preview_requested = true;
+                                                    }
                                                     modal.tracks.remove(index);
                                                 }
                                             });
@@ -1029,23 +1156,48 @@ impl AudioOrbitApp {
             }
         }
         self.dj_mix_modal = Some(modal);
+        if stop_preview_requested {
+            self.stop_dj_preview_playback();
+        }
+        if let Some((path, stop_seconds)) = preview_stop_update_request {
+            if let Some(modal) = self.dj_mix_modal.as_mut() {
+                if modal
+                    .preview_track_path
+                    .as_ref()
+                    .map(|preview| same_path(preview, &path))
+                    .unwrap_or(false)
+                {
+                    modal.preview_stop_seconds = Some(stop_seconds);
+                }
+            }
+        }
         if preview_pause_resume_requested {
             self.pause_or_resume();
-        } else if let Some(seconds) = preview_seek_request {
+        } else if let Some((seconds, stop_seconds)) = preview_seek_request {
+            let active_preview_path = self.active_track_path.clone();
+            if let Some(modal) = self.dj_mix_modal.as_mut() {
+                modal.preview_track_path = active_preview_path;
+                modal.preview_stop_seconds = Some(stop_seconds);
+            }
             self.seek_current(seconds);
-        } else if let Some((path, seconds)) = preview_play_request {
+        } else if let Some((path, seconds, stop_seconds)) = preview_play_request {
             let track_index = self.current_playlist().and_then(|playlist| {
                 playlist
                     .tracks
                     .iter()
                     .position(|track| same_path(&track.path, &path))
             });
+            if let Some(modal) = self.dj_mix_modal.as_mut() {
+                modal.preview_track_path = Some(path.clone());
+                modal.preview_stop_seconds = Some(stop_seconds);
+            }
             self.play_path_with_crossfade(path, track_index, seconds, 0.0);
         }
         if cancel_requested {
             self.cancel_dj_mix_export();
         }
         if let Some(path) = play_path {
+            self.stop_dj_preview_playback();
             self.dj_mix_modal = None;
             self.open_audio_files_in_temporary_playlist(vec![path], true);
             return;
@@ -1059,6 +1211,7 @@ impl AudioOrbitApp {
             self.start_dj_mix_export();
         }
         if close_requested && !self.dj_mix_is_running() {
+            self.stop_dj_preview_playback();
             self.dj_mix_modal = None;
         }
     }

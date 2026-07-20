@@ -437,6 +437,8 @@ struct DjMixModalState {
     completed: bool,
     started_at: Option<Instant>,
     last_progress_at: Option<Instant>,
+    preview_track_path: Option<PathBuf>,
+    preview_stop_seconds: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
