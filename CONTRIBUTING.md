@@ -1,6 +1,5 @@
 # Contributing to Audio Orbit
 
-
 ## Development goals
 
 Audio Orbit should stay lightweight, portable, and predictable. Prefer incremental changes over rewrites.
@@ -13,28 +12,58 @@ Important priorities:
 
 ## Local development
 
-Install a recent Rust toolchain and build the project with Cargo.
+Project is currently Windows-only. It uses [mise](https://mise.jdx.dev/) for Rust and developer-tool installation, task execution, and exact local/CI parity on `windows-latest`.
+
+Install configured tools and repository hooks:
 
 ```sh
-cargo check
-cargo build
+mise run setup
 ```
 
-For WSL → Windows sync workflows, edit files in WSL, let Mutagen sync them into the Windows checkout, then run the dev watcher from the Windows checkout, for example `D:\github\rozsazoltan\audio-orbit`:
+This installs all tools pinned in `mise.toml`. It installs repository Git hooks through hk when `.git` worktree exists; source ZIPs skip hook installation without failing.
+
+DJ export always has built-in pure-Rust rhythm analysis and WSOLA fallback, so normal builds need no Clang, LLVM, `libclang`, C++ compiler, or `LIBCLANG_PATH`. Optional runtime integrations with Essentia Music Extractor, Rubber Band R3, and Demucs are detected as external executables and are never linked or bundled.
+
+Available validation commands:
+
+```sh
+mise run format          # apply Rust, TOML, and Pkl formatting
+mise run format:check    # verify Rust, TOML, and Pkl formatting
+mise run tooling:check   # validate mise tasks and hk/Pkl config
+mise run check           # cargo check --locked --all-targets
+mise run clippy          # cargo clippy --locked --bins -- -D warnings
+mise run test            # cargo nextest run --locked --all-targets
+mise run test:doc        # doctests not run by nextest
+mise run ci              # hooks plus full tests used by GitHub Actions
+```
+
+Git hooks use `hk`:
+
+- `pre-commit` fixes Rust, TOML, and Pkl formatting; validates TOML, mise, and hk/Pkl config; checks merge markers and private keys
+- `pre-push` runs one locked Clippy pass for application binaries on Windows when Rust or Cargo inputs changed; Linux/WSL source worktrees skip compilation
+- `mise run hooks:pre-commit` checks the full pre-commit hook against all tracked files
+- `mise run hooks:pre-push` runs the fast Windows Clippy gate, or skips compilation on Linux/WSL
+- `mise run hooks:check` aliases the full pre-commit check
+- `mise run hooks:fix` applies supported pre-commit fixes across all tracked files
+- `mise run ci` runs both hooks, nextest, and doctests exactly as Windows GitHub Actions does
+
+`HK_MISE=1` is used when installing hooks, so generated hook commands execute through `mise` even when shell activation is unavailable. Do not install both global and repository-local hk hooks, because Git can execute both.
+
+For WSL → Windows sync workflows, edit files in WSL, let Mutagen sync them into Windows checkout, then run dev watcher from Windows checkout, for example `D:\github\rozsazoltan\audio-orbit`:
+
+Mutagen excludes root `/.cache/` and `/target/` directories. Session configuration is locked when session is created, so rerunning `scripts/setup-mutagen-wsl-dev.ps1` recreates existing named session and applies current ignores. `-KeepExistingSession` preserves old session configuration and should only be used when its ignores are already correct.
 
 ```powershell
 .\scripts\dev.ps1
 ```
 
-You can also run the same watcher directly:
+You can also run same watcher directly:
 
 ```sh
 cargo dev
 ```
 
-`cargo dev` is a project-local Cargo alias that runs the built-in `audio-orbit-dev` helper. It does not require `cargo-watch`. The helper uses polling-friendly file watching for Mutagen/WSL sync workflows, watches `src`, `Cargo.toml`, `Cargo.lock`, `assets`, and `build.rs`, ignores `target` and portable app data folders, rebuilds `audio-orbit`, and restarts the desktop app after synced file changes.
-
-
+`cargo dev` is project-local Cargo alias running built-in `audio-orbit-dev` helper. Development state uses `.cache/app-data`, so moving Cargo artifacts between `target` and `.cache/cargo-target` does not reset settings, playlists, metadata, or waveforms. It does not require `cargo-watch`. Helper uses polling-friendly file watching for Mutagen/WSL sync workflows, watches `src`, `Cargo.toml`, `Cargo.lock`, `assets`, and `build.rs`, ignores `target` and portable app data folders, rebuilds `audio-orbit`, and restarts desktop app after synced file changes.
 
 ## Project structure
 
@@ -78,21 +107,12 @@ refactor(ui): separate settings sections
 
 
 
-```text
-```
-
-The version metadata should be committed as:
-
-```text
-```
-
-
 
 ## Pull request checklist
 
 Before merging, check:
 
-- `cargo check` passes
+- `mise run ci` passes
 - no unexpected version number changes were committed
 - no unused Rust warnings were introduced
 - playback still works after profile changes, seeking, crossfade, and media key commands
@@ -102,6 +122,7 @@ Before merging, check:
 By contributing, you agree that your contribution is licensed under the GNU Affero General Public License v3.0 or later.
 
 
-## Development runner
+## Build cache
 
-Use `cargo dev` from the repository root. The repository contains both `.cargo/config.toml` and `.cargo/config` so Cargo uses the built-in polling dev runner instead of requiring the external `cargo-watch` subcommand. On Windows, `scripts/dev.ps1` runs the same project-local runner directly with `cargo run --bin audio-orbit-dev --`.
+Cargo build artifacts are stored under `.cache/cargo-target` to keep the repository root clean. Development app state is stored separately under `.cache/app-data`. These directories are local to machine running Cargo or application and are excluded from Mutagen synchronization. Linux/WSL pre-push does not compile Windows-only application.
+

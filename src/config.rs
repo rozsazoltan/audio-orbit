@@ -15,6 +15,7 @@ use std::{
 use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
 
 pub const FAVORITES_PLAYLIST_NAME: &str = "Favorites";
+pub const TEMPORARY_PLAYLIST_NAME: &str = "Temporary playback";
 const BACKUP_STATE_ENTRY: &str = "audio-orbit/state.json";
 const BACKUP_META_ENTRY: &str = "audio-orbit/backup.json";
 
@@ -85,6 +86,7 @@ pub enum PlaylistKind {
     Favorites,
     Manual,
     Folder,
+    Temporary,
 }
 
 impl Default for PlaylistKind {
@@ -99,6 +101,7 @@ impl PlaylistKind {
             Self::Favorites => Icon::Heart,
             Self::Manual => Icon::ListMusic,
             Self::Folder => Icon::Folder,
+            Self::Temporary => Icon::ListMusic,
         };
 
         char::from(icon).to_string()
@@ -109,15 +112,16 @@ impl PlaylistKind {
             Self::Favorites => "Favorites",
             Self::Manual => "Manual playlist",
             Self::Folder => "Folder playlist",
+            Self::Temporary => "Temporary playback",
         }
     }
 
     pub fn accepts_manual_tracks(&self) -> bool {
-        !matches!(self, Self::Folder)
+        matches!(self, Self::Favorites | Self::Manual)
     }
 
     pub fn can_delete(&self) -> bool {
-        !matches!(self, Self::Favorites)
+        !matches!(self, Self::Favorites | Self::Temporary)
     }
 }
 
@@ -159,7 +163,9 @@ impl Track {
         let group = folder_group_for_path(&path, root, folder_depth);
         // Keep large folder imports responsive: expensive decoder/tag metadata is filled
         // lazily from playback results instead of being read for every scanned file.
-        let file_metadata = fs::metadata(&path).ok().filter(|metadata| metadata.is_file());
+        let file_metadata = fs::metadata(&path)
+            .ok()
+            .filter(|metadata| metadata.is_file());
         let metadata = TrackMetadata {
             size_bytes: file_metadata.as_ref().map(|metadata| metadata.len()),
             ..Default::default()
@@ -265,7 +271,6 @@ fn default_playback_session_source() -> String {
     "music".to_owned()
 }
 
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TrackAvailabilityStats {
     pub restored: usize,
@@ -320,6 +325,38 @@ impl Playlist {
         }
     }
 
+    pub fn temporary() -> Self {
+        Self {
+            name: TEMPORARY_PLAYLIST_NAME.to_owned(),
+            tracks: Vec::new(),
+            source_folder: None,
+            folder_depth: 0,
+            selected_group: None,
+            repeat_selection: Vec::new(),
+            kind: PlaylistKind::Temporary,
+        }
+    }
+
+    pub fn add_temporary_files(&mut self, files: Vec<PathBuf>) -> Vec<PathBuf> {
+        if self.kind != PlaylistKind::Temporary {
+            return Vec::new();
+        }
+
+        let mut added = Vec::new();
+        for path in files {
+            if self
+                .tracks
+                .iter()
+                .any(|track| same_path(&track.path, &path))
+            {
+                continue;
+            }
+            self.tracks.push(Track::from_path(path.clone(), None, 0));
+            added.push(path);
+        }
+        added
+    }
+
     pub fn from_folder(
         name: impl Into<String>,
         source_folder: PathBuf,
@@ -359,8 +396,17 @@ impl Playlist {
         added_paths
     }
 
-    pub fn add_track_path(&mut self, path: PathBuf, root: Option<&Path>, folder_depth: usize) -> bool {
-        if self.tracks.iter().any(|track| same_path(&track.path, &path)) {
+    pub fn add_track_path(
+        &mut self,
+        path: PathBuf,
+        root: Option<&Path>,
+        folder_depth: usize,
+    ) -> bool {
+        if self
+            .tracks
+            .iter()
+            .any(|track| same_path(&track.path, &path))
+        {
             return false;
         }
 
@@ -662,7 +708,11 @@ impl Playlist {
             return;
         };
 
-        if !self.tracks.iter().any(|track| track.group == selected_group) {
+        if !self
+            .tracks
+            .iter()
+            .any(|track| track.group == selected_group)
+        {
             self.selected_group = None;
         }
     }
@@ -707,7 +757,8 @@ impl Playlist {
         }
 
         self.ensure_favorite_added_sequences();
-        self.tracks.sort_by_key(|track| Reverse(track.favorite_added_sequence.unwrap_or(0)));
+        self.tracks
+            .sort_by_key(|track| Reverse(track.favorite_added_sequence.unwrap_or(0)));
     }
 
     pub fn sort_tracks(&mut self) {
@@ -735,8 +786,6 @@ impl DspProfile {
     }
 }
 
-
-
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RecordingSettings {
     #[serde(default)]
@@ -753,11 +802,11 @@ impl RecordingSettings {
 }
 
 pub fn default_recording_output_folder() -> Option<PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join(".audio-orbit-records")))
+    std::env::current_exe().ok().and_then(|path| {
+        path.parent()
+            .map(|parent| parent.join(".audio-orbit-records"))
+    })
 }
-
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LibrarySettings {
@@ -789,7 +838,6 @@ impl Default for UpdateSettings {
         }
     }
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepeatMode {
@@ -868,8 +916,6 @@ fn default_crossfade_seconds() -> u8 {
 fn default_volume_percent() -> u8 {
     100
 }
-
-
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct WindowGeometry {
@@ -995,7 +1041,33 @@ impl Default for SavedState {
     }
 }
 
+const APP_DATA_DIR_ENV: &str = "AUDIO_ORBIT_APP_DATA_DIR";
+
 pub fn app_data_dir() -> Option<PathBuf> {
+    resolve_app_data_dir(
+        std::env::var_os(APP_DATA_DIR_ENV).map(PathBuf::from),
+        std::env::current_dir().ok(),
+        std::env::current_exe().ok(),
+    )
+}
+
+fn resolve_app_data_dir(
+    override_dir: Option<PathBuf>,
+    current_dir: Option<PathBuf>,
+    current_exe: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(path) = override_dir.filter(|path| !path.as_os_str().is_empty()) {
+        return Some(if path.is_absolute() {
+            path
+        } else {
+            current_dir?.join(path)
+        });
+    }
+
+    current_exe.and_then(|path| path.parent().map(|parent| parent.join(".audio-orbit-data")))
+}
+
+fn portable_app_data_dir() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join(".audio-orbit-data")))
@@ -1005,9 +1077,75 @@ pub fn state_path() -> Option<PathBuf> {
     app_data_dir().map(|dir| dir.join("state.json"))
 }
 
-fn legacy_state_path() -> Option<PathBuf> {
-    ProjectDirs::from("dev", "AudioOrbit", "Audio Orbit")
+fn legacy_state_paths(primary_path: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if cfg!(debug_assertions) {
+        if let Ok(root) = std::env::current_dir() {
+            push_unique_state_path(
+                &mut paths,
+                primary_path,
+                root.join("target")
+                    .join("debug")
+                    .join(".audio-orbit-data")
+                    .join("state.json"),
+            );
+            push_unique_state_path(
+                &mut paths,
+                primary_path,
+                root.join(".cache")
+                    .join("cargo-target")
+                    .join("debug")
+                    .join(".audio-orbit-data")
+                    .join("state.json"),
+            );
+            push_unique_state_path(
+                &mut paths,
+                primary_path,
+                root.join(".audio-orbit-data").join("state.json"),
+            );
+        }
+    }
+
+    if let Some(path) = portable_app_data_dir().map(|directory| directory.join("state.json")) {
+        push_unique_state_path(&mut paths, primary_path, path);
+    }
+
+    if let Some(path) = ProjectDirs::from("dev", "AudioOrbit", "Audio Orbit")
         .map(|dirs| dirs.data_local_dir().join("state.json"))
+    {
+        push_unique_state_path(&mut paths, primary_path, path);
+    }
+
+    paths
+}
+
+fn push_unique_state_path(paths: &mut Vec<PathBuf>, primary_path: &Path, candidate: PathBuf) {
+    if candidate != primary_path && !paths.contains(&candidate) {
+        paths.push(candidate);
+    }
+}
+
+fn read_state_from_path(path: &Path) -> Option<SavedState> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| serde_json::from_str(&contents).ok())
+}
+
+fn migrate_companion_data(legacy_state_path: &Path, new_state_path: &Path) {
+    let Some(legacy_directory) = legacy_state_path.parent() else {
+        return;
+    };
+    let Some(new_directory) = new_state_path.parent() else {
+        return;
+    };
+
+    let legacy_cache = legacy_directory.join("dj-analysis-cache.json");
+    let new_cache = new_directory.join("dj-analysis-cache.json");
+    if legacy_cache.is_file() && !new_cache.exists() {
+        let _ = fs::create_dir_all(new_directory);
+        let _ = fs::copy(legacy_cache, new_cache);
+    }
 }
 
 pub fn load_state() -> SavedState {
@@ -1015,14 +1153,14 @@ pub fn load_state() -> SavedState {
         return SavedState::default();
     };
 
-    if let Ok(contents) = fs::read_to_string(&path) {
-        return serde_json::from_str(&contents).unwrap_or_default();
+    if let Some(state) = read_state_from_path(&path) {
+        return state;
     }
 
-    if let Some(legacy_path) = legacy_state_path() {
-        if let Ok(contents) = fs::read_to_string(&legacy_path) {
-            let state = serde_json::from_str(&contents).unwrap_or_default();
+    for legacy_path in legacy_state_paths(&path) {
+        if let Some(state) = read_state_from_path(&legacy_path) {
             let _ = write_state_to_path(&state, &path);
+            migrate_companion_data(&legacy_path, &path);
             return state;
         }
     }
@@ -1030,9 +1168,62 @@ pub fn load_state() -> SavedState {
     SavedState::default()
 }
 
+fn persisted_state(state: &SavedState) -> SavedState {
+    let mut persisted = state.clone();
+    let temporary_index = persisted
+        .playlists
+        .iter()
+        .position(|playlist| playlist.kind == PlaylistKind::Temporary);
+
+    if let Some(index) = temporary_index {
+        persisted.playlists.remove(index);
+
+        if persisted.selected_playlist_index == index {
+            persisted.selected_playlist_index = persisted
+                .playlists
+                .iter()
+                .position(|playlist| playlist.kind == PlaylistKind::Manual)
+                .unwrap_or(0);
+        } else if persisted.selected_playlist_index > index {
+            persisted.selected_playlist_index -= 1;
+        }
+
+        if persisted
+            .last_played_track
+            .as_ref()
+            .map(|track| track.playlist_index == index)
+            .unwrap_or(false)
+        {
+            persisted.last_played_track = None;
+        } else if let Some(track) = persisted.last_played_track.as_mut() {
+            if track.playlist_index > index {
+                track.playlist_index -= 1;
+            }
+        }
+
+        if persisted.playback_session.playlist_index == Some(index) {
+            persisted.playback_session = PlaybackSession::default();
+        } else if let Some(playlist_index) = persisted.playback_session.playlist_index.as_mut() {
+            if *playlist_index > index {
+                *playlist_index -= 1;
+            }
+        }
+    }
+
+    if persisted.playlists.is_empty() {
+        persisted.playlists.push(Playlist::favorites());
+        persisted.playlists.push(Playlist::new("Local music"));
+    }
+    if persisted.selected_playlist_index >= persisted.playlists.len() {
+        persisted.selected_playlist_index = 0;
+    }
+
+    persisted
+}
+
 pub fn save_state(state: &SavedState) -> Result<()> {
     let path = state_path().context("could not resolve the application data path")?;
-    write_state_to_path(state, &path)
+    write_state_to_path(&persisted_state(state), &path)
 }
 
 pub fn export_state_zip(state: &SavedState, path: &Path) -> Result<()> {
@@ -1055,7 +1246,7 @@ pub fn export_state_zip(state: &SavedState, path: &Path) -> Result<()> {
     zip.write_all(serde_json::to_string_pretty(&meta)?.as_bytes())?;
 
     zip.start_file(BACKUP_STATE_ENTRY, options)?;
-    zip.write_all(serde_json::to_string_pretty(state)?.as_bytes())?;
+    zip.write_all(serde_json::to_string_pretty(&persisted_state(state))?.as_bytes())?;
     zip.finish()?;
     Ok(())
 }
@@ -1096,12 +1287,15 @@ pub fn scan_audio_folder(root: &Path) -> Result<FolderScanResult> {
 
         for entry in entries {
             let entry = entry.with_context(|| {
-                format!("failed to inspect a folder entry under {}", directory.display())
+                format!(
+                    "failed to inspect a folder entry under {}",
+                    directory.display()
+                )
             })?;
             let path = entry.path();
-            let file_type = entry.file_type().with_context(|| {
-                format!("failed to read file type: {}", path.display())
-            })?;
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("failed to read file type: {}", path.display()))?;
 
             // Never follow symbolic links or Windows reparse points during
             // recursive scans. This prevents cycles and avoids leaving the
@@ -1117,7 +1311,9 @@ pub fn scan_audio_folder(root: &Path) -> Result<FolderScanResult> {
         }
     }
 
-    files.sort_by(|left, right| natural_key(&left.to_string_lossy()).cmp(&natural_key(&right.to_string_lossy())));
+    files.sort_by(|left, right| {
+        natural_key(&left.to_string_lossy()).cmp(&natural_key(&right.to_string_lossy()))
+    });
     Ok(FolderScanResult { files })
 }
 
@@ -1127,7 +1323,18 @@ pub fn is_supported_audio_file(path: &Path) -> bool {
         .map(|extension| {
             matches!(
                 extension.to_lowercase().as_str(),
-                "mp3" | "wav" | "flac" | "ogg" | "opus" | "m4a" | "mp4" | "aac" | "aiff" | "aif" | "ape" | "wv"
+                "mp3"
+                    | "wav"
+                    | "flac"
+                    | "ogg"
+                    | "opus"
+                    | "m4a"
+                    | "mp4"
+                    | "aac"
+                    | "aiff"
+                    | "aif"
+                    | "ape"
+                    | "wv"
             )
         })
         .unwrap_or(false)
@@ -1189,12 +1396,16 @@ pub fn display_file_name(path: &Path) -> String {
 
 fn write_state_to_path(state: &SavedState, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create application data directory: {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create application data directory: {}",
+                parent.display()
+            )
+        })?;
     }
 
-    let contents = serde_json::to_string_pretty(state)
-        .context("failed to serialize application state")?;
+    let contents =
+        serde_json::to_string_pretty(state).context("failed to serialize application state")?;
     fs::write(path, contents)
         .with_context(|| format!("failed to save application state: {}", path.display()))?;
 
@@ -1213,7 +1424,9 @@ fn read_track_metadata(path: &Path) -> Result<TrackMetadata> {
         duration_seconds: Some(properties.duration().as_secs_f32()).filter(|value| *value > 0.0),
         sample_rate_hz: properties.sample_rate(),
         channels: properties.channels(),
-        bitrate_kbps: properties.audio_bitrate().or_else(|| properties.overall_bitrate()),
+        bitrate_kbps: properties
+            .audio_bitrate()
+            .or_else(|| properties.overall_bitrate()),
     })
 }
 
@@ -1271,6 +1484,36 @@ mod tests {
     }
 
     #[test]
+    fn app_data_override_resolves_relative_to_working_directory() {
+        let resolved = resolve_app_data_dir(
+            Some(PathBuf::from(".cache/app-data")),
+            Some(PathBuf::from("C:/Projects/audio-orbit")),
+            Some(PathBuf::from(
+                "C:/Projects/audio-orbit/target/debug/audio-orbit.exe",
+            )),
+        );
+
+        assert_eq!(
+            resolved,
+            Some(PathBuf::from("C:/Projects/audio-orbit/.cache/app-data"))
+        );
+    }
+
+    #[test]
+    fn app_data_without_override_remains_portable() {
+        let resolved = resolve_app_data_dir(
+            None,
+            Some(PathBuf::from("C:/Projects/audio-orbit")),
+            Some(PathBuf::from("C:/Apps/Audio Orbit/audio-orbit.exe")),
+        );
+
+        assert_eq!(
+            resolved,
+            Some(PathBuf::from("C:/Apps/Audio Orbit/.audio-orbit-data"))
+        );
+    }
+
+    #[test]
     fn playback_settings_keep_auto_output_switch_disabled_for_existing_state() {
         let settings: PlaybackSettings = serde_json::from_str("{}").unwrap();
 
@@ -1292,7 +1535,10 @@ mod tests {
         assert_eq!(track_paths(&favorites), owned_paths(&[&alpha, &beta]));
 
         assert!(favorites.add_track_path(charlie.clone(), None, 0));
-        assert_eq!(track_paths(&favorites), owned_paths(&[&charlie, &alpha, &beta]));
+        assert_eq!(
+            track_paths(&favorites),
+            owned_paths(&[&charlie, &alpha, &beta])
+        );
         assert!(!favorites.add_track_path(alpha.clone(), None, 0));
 
         favorites.sort_favorites_by_added();
@@ -1368,20 +1614,17 @@ mod tests {
 
     #[test]
     fn library_settings_migrate_previous_automatic_sync_key() {
-        let settings: LibrarySettings = serde_json::from_str(
-            r#"{"auto_sync_folder_playlists":true}"#,
-        )
-        .unwrap();
+        let settings: LibrarySettings =
+            serde_json::from_str(r#"{"auto_sync_folder_playlists":true}"#).unwrap();
 
         assert!(settings.auto_sync_selected_playlist);
     }
 
     #[test]
     fn tracks_from_existing_state_default_to_available() {
-        let track: Track = serde_json::from_str(
-            r#"{"path":"C:/Music/Track.mp3","title":"Track","group":"Root"}"#,
-        )
-        .unwrap();
+        let track: Track =
+            serde_json::from_str(r#"{"path":"C:/Music/Track.mp3","title":"Track","group":"Root"}"#)
+                .unwrap();
 
         assert!(!track.missing);
     }
@@ -1428,19 +1671,26 @@ mod tests {
         assert_eq!(stats.newly_missing, 1);
         assert_eq!(stats.present_total, 3);
         assert_eq!(stats.missing_total, 1);
+        assert!(
+            playlist
+                .tracks
+                .iter()
+                .find(|track| same_path(&track.path, &alpha))
+                .unwrap()
+                .missing
+        );
+        assert!(
+            !playlist
+                .tracks
+                .iter()
+                .find(|track| same_path(&track.path, &gamma))
+                .unwrap()
+                .missing
+        );
         assert!(playlist
             .tracks
             .iter()
-            .find(|track| same_path(&track.path, &alpha))
-            .unwrap()
-            .missing);
-        assert!(!playlist
-            .tracks
-            .iter()
-            .find(|track| same_path(&track.path, &gamma))
-            .unwrap()
-            .missing);
-        assert!(playlist.tracks.iter().any(|track| same_path(&track.path, &delta)));
+            .any(|track| same_path(&track.path, &delta)));
     }
 
     #[test]
@@ -1449,19 +1699,18 @@ mod tests {
         let alpha = root.join("Alpha.mp3");
         let beta = root.join("Beta.mp3");
         let gamma = root.join("Gamma.mp3");
-        let mut playlist = Playlist::from_folder(
-            "Folder",
-            root,
-            1,
-            vec![alpha.clone(), beta.clone()],
-        );
+        let mut playlist =
+            Playlist::from_folder("Folder", root, 1, vec![alpha.clone(), beta.clone()]);
 
         let stats = playlist.merge_tracks_from_folder_scan(&[beta.clone(), gamma.clone()]);
 
         assert_eq!(stats.added, 1);
         assert_eq!(stats.newly_missing, 1);
         assert_eq!(stats.missing_total, 1);
-        assert_eq!(track_paths(&playlist), owned_paths(&[&alpha, &beta, &gamma]));
+        assert_eq!(
+            track_paths(&playlist),
+            owned_paths(&[&alpha, &beta, &gamma])
+        );
         assert!(playlist.tracks[0].missing);
         assert!(!playlist.tracks[1].missing);
         assert!(!playlist.tracks[2].missing);
@@ -1510,7 +1759,11 @@ mod tests {
             "Folder",
             root,
             1,
-            vec![artist_a_one.clone(), artist_b_one.clone(), artist_a_two.clone()],
+            vec![
+                artist_a_one.clone(),
+                artist_b_one.clone(),
+                artist_a_two.clone(),
+            ],
         );
         playlist.tracks = vec![
             Track::from_path(artist_a_one.clone(), playlist.source_folder.as_deref(), 1),
@@ -1531,12 +1784,8 @@ mod tests {
         let root = PathBuf::from("C:/Music");
         let alpha = root.join("Alpha.mp3");
         let beta = root.join("Beta.mp3");
-        let mut playlist = Playlist::from_folder(
-            "Folder",
-            root,
-            1,
-            vec![alpha.clone(), beta.clone()],
-        );
+        let mut playlist =
+            Playlist::from_folder("Folder", root, 1, vec![alpha.clone(), beta.clone()]);
         playlist.tracks.swap(0, 1);
 
         playlist.merge_tracks_from_folder_scan(std::slice::from_ref(&beta));
@@ -1589,10 +1838,7 @@ mod tests {
             track.missing = false;
         }
 
-        let availability = BTreeMap::from([
-            (path_key(&alpha), false),
-            (path_key(&beta), true),
-        ]);
+        let availability = BTreeMap::from([(path_key(&alpha), false), (path_key(&beta), true)]);
         let missing = playlist.apply_track_availability(&availability);
 
         assert_eq!(missing.newly_missing, 1);
@@ -1605,5 +1851,30 @@ mod tests {
         ]));
         assert_eq!(restored.restored, 1);
         assert_eq!(restored.missing_total, 0);
+    }
+
+    #[test]
+    fn temporary_playlist_is_runtime_only_and_read_only() {
+        let mut state = SavedState::default();
+        state.playlists.push(Playlist::temporary());
+        state.selected_playlist_index = state.playlists.len() - 1;
+        state.last_played_track = Some(LastPlayedTrack {
+            playlist_index: state.selected_playlist_index,
+            track_path: PathBuf::from("C:/Music/mix.mp3"),
+        });
+        state.playback_session.playlist_index = Some(state.selected_playlist_index);
+        state.playback_session.track_path = Some(PathBuf::from("C:/Music/mix.mp3"));
+        state.playback_session.was_active = true;
+
+        let persisted = persisted_state(&state);
+
+        assert!(persisted
+            .playlists
+            .iter()
+            .all(|playlist| playlist.kind != PlaylistKind::Temporary));
+        assert!(persisted.last_played_track.is_none());
+        assert!(persisted.playback_session.playlist_index.is_none());
+        assert!(!PlaylistKind::Temporary.accepts_manual_tracks());
+        assert!(!PlaylistKind::Temporary.can_delete());
     }
 }

@@ -162,7 +162,9 @@ pub fn render_orbit_to_stereo_with_cached_analysis(
     let mono = downmix_to_mono(input_samples, channels, frame_count);
     let mut start_frame = ((start_seconds.max(0.0) * sample_rate as f32) as usize).min(frame_count);
     let (waveform, waveform_brightness) = cached_waveform
-        .filter(|(waveform, waveform_brightness)| !waveform.is_empty() && !waveform_brightness.is_empty())
+        .filter(|(waveform, waveform_brightness)| {
+            !waveform.is_empty() && !waveform_brightness.is_empty()
+        })
         .unwrap_or_else(|| spectrum_waveform(&mono, sample_rate, WAVEFORM_POINTS));
 
     let output_level = settings.output_level_percent.clamp(1, 100) as f32 / 100.0;
@@ -292,7 +294,12 @@ pub fn render_orbit_to_stereo_with_cached_analysis(
         smoothed_backness = smooth_value(smoothed_backness, target.backness, smoothing_coeff);
 
         front_presence_state = high_passish(front_presence_state, source_sample);
-        rear_low_pass_state = rear_low_pass(rear_low_pass_state, source_sample, smoothed_backness, depth_amount);
+        rear_low_pass_state = rear_low_pass(
+            rear_low_pass_state,
+            source_sample,
+            smoothed_backness,
+            depth_amount,
+        );
 
         let (left, right) = match settings.mode {
             OrbitMode::SmoothStereoOrbit => render_smooth_stereo_frame(
@@ -382,7 +389,7 @@ fn automatic_silence_floor(samples: &[f32]) -> f32 {
         .max(p12 * 3.0)
         .max(p25 * 0.85)
         .max(peak * 0.0018))
-        .clamp(0.0025, 0.020)
+    .clamp(0.0025, 0.020)
 }
 
 fn db_to_linear_threshold(db: i16) -> f32 {
@@ -443,8 +450,13 @@ fn detect_silence_ranges(
     for (window_index, chunk) in mono.chunks(window_frames).enumerate() {
         let start = window_index * window_frames;
         let end = (start + chunk.len()).min(mono.len());
-        let rms = (chunk.iter().map(|sample| sample * sample).sum::<f32>() / chunk.len().max(1) as f32).sqrt();
-        let peak = chunk.iter().map(|sample| sample.abs()).fold(0.0_f32, f32::max);
+        let rms = (chunk.iter().map(|sample| sample * sample).sum::<f32>()
+            / chunk.len().max(1) as f32)
+            .sqrt();
+        let peak = chunk
+            .iter()
+            .map(|sample| sample.abs())
+            .fold(0.0_f32, f32::max);
         let silent = rms <= silence_rms_gate && peak <= silence_peak_gate;
 
         if silent {
@@ -468,7 +480,12 @@ fn detect_silence_ranges(
         if let Some(start) = candidate_start.take() {
             let silent_frames = candidate_last_silent_end.saturating_sub(start);
             if silent_frames >= min_silent_frames {
-                push_silence_range(&mut ranges, start, candidate_last_silent_end, edge_padding_frames);
+                push_silence_range(
+                    &mut ranges,
+                    start,
+                    candidate_last_silent_end,
+                    edge_padding_frames,
+                );
             }
         }
         candidate_last_silent_end = 0;
@@ -478,7 +495,8 @@ fn detect_silence_ranges(
     if let Some(start) = candidate_start.take() {
         let silent_frames = mono.len().saturating_sub(start);
         if silent_frames >= min_silent_frames
-            || (trim_end_regardless_of_duration && candidate_last_silent_end >= mono.len().saturating_sub(window_frames))
+            || (trim_end_regardless_of_duration
+                && candidate_last_silent_end >= mono.len().saturating_sub(window_frames))
         {
             push_silence_range(&mut ranges, start, mono.len(), edge_padding_frames);
         }
@@ -544,7 +562,10 @@ fn render_plain_stereo(
         } else {
             (
                 input_samples.get(offset).copied().unwrap_or(source_sample),
-                input_samples.get(offset + 1).copied().unwrap_or(source_sample),
+                input_samples
+                    .get(offset + 1)
+                    .copied()
+                    .unwrap_or(source_sample),
             )
         };
 
@@ -608,7 +629,6 @@ fn apply_skip_boundary_smoothing(
     }
 }
 
-
 #[derive(Clone, Copy)]
 struct OrbitPosition {
     pan: f32,
@@ -671,7 +691,8 @@ fn render_surround_frame(
     let front_mix = frontness * depth_amount;
 
     let front_sample = source_sample + front_presence_state * front_mix * 0.30;
-    let rear_sample = (source_sample * (1.0 - rear_mix * 0.70)) + (rear_low_pass_state * rear_mix * 1.05);
+    let rear_sample =
+        (source_sample * (1.0 - rear_mix * 0.70)) + (rear_low_pass_state * rear_mix * 1.05);
     let spatial_sample = front_sample * (1.0 - rear_mix) + rear_sample * rear_mix;
 
     let delay_base = MAX_STEREO_DELAY_SECONDS + MAX_SURROUND_DELAY_SECONDS * rear_mix;

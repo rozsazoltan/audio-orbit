@@ -1,9 +1,7 @@
 use crate::*;
 
 #[cfg(debug_assertions)]
-use std::{
-    process::Child,
-};
+use std::process::Child;
 
 #[cfg(debug_assertions)]
 const DEV_METRICS_PROCESS_ARG: &str = "--audio-orbit-dev-metrics";
@@ -82,7 +80,10 @@ impl DevMetricsNativeWindowHandle {
             .spawn()
             .map_err(|error| format!("failed to open Dev metrics window: {error}"))?;
 
-        Ok(Self { child, snapshot_path })
+        Ok(Self {
+            child,
+            snapshot_path,
+        })
     }
 
     fn is_running(&mut self) -> bool {
@@ -205,9 +206,11 @@ impl DevMetricsStandaloneApp {
                 if elapsed > 0.0 {
                     let process_seconds = sample
                         .process_time_100ns
-                        .saturating_sub(previous.process_time_100ns) as f64
+                        .saturating_sub(previous.process_time_100ns)
+                        as f64
                         / 10_000_000.0;
-                    let normalized = process_seconds / elapsed / self.logical_processors as f64 * 100.0;
+                    let normalized =
+                        process_seconds / elapsed / self.logical_processors as f64 * 100.0;
                     self.snapshot.cpu_percent = Some(normalized.clamp(0.0, 100.0) as f32);
                 }
             }
@@ -222,7 +225,6 @@ impl DevMetricsStandaloneApp {
             self.snapshot.peak_working_set_bytes = None;
             self.snapshot.pagefile_bytes = None;
         }
-
     }
 }
 
@@ -298,7 +300,11 @@ impl Default for DevMetricsPanelState {
 
 #[cfg(debug_assertions)]
 impl AudioOrbitApp {
-    pub(crate) fn update_dev_metrics(&mut self, context: &egui::Context, repaint_interval: Duration) {
+    pub(crate) fn update_dev_metrics(
+        &mut self,
+        context: &egui::Context,
+        repaint_interval: Duration,
+    ) {
         if !self.show_dev_metrics_window {
             return;
         }
@@ -322,7 +328,9 @@ impl AudioOrbitApp {
         self.dev_metrics.snapshot.player_state = self.dev_player_state_label().to_owned();
         self.dev_metrics.snapshot.uptime_seconds = context.input(|input| input.time as f32);
 
-        if now.saturating_duration_since(self.dev_metrics.last_refresh_at) < Duration::from_millis(750) {
+        if now.saturating_duration_since(self.dev_metrics.last_refresh_at)
+            < Duration::from_millis(750)
+        {
             return;
         }
         self.dev_metrics.last_refresh_at = now;
@@ -335,14 +343,19 @@ impl AudioOrbitApp {
             return;
         };
 
-        if let (Some(previous), Some(previous_at)) = (self.dev_metrics.last_sample, self.dev_metrics.last_sample_at) {
+        if let (Some(previous), Some(previous_at)) = (
+            self.dev_metrics.last_sample,
+            self.dev_metrics.last_sample_at,
+        ) {
             let elapsed = now.saturating_duration_since(previous_at).as_secs_f64();
             if elapsed > 0.0 {
                 let process_seconds = sample
                     .process_time_100ns
-                    .saturating_sub(previous.process_time_100ns) as f64
+                    .saturating_sub(previous.process_time_100ns)
+                    as f64
                     / 10_000_000.0;
-                let normalized = process_seconds / elapsed / self.dev_metrics.logical_processors as f64 * 100.0;
+                let normalized =
+                    process_seconds / elapsed / self.dev_metrics.logical_processors as f64 * 100.0;
                 self.dev_metrics.snapshot.cpu_percent = Some(normalized.clamp(0.0, 100.0) as f32);
             }
         }
@@ -392,7 +405,12 @@ impl AudioOrbitApp {
     fn dev_player_state_label(&self) -> &'static str {
         if self.active_radio_index.is_some() {
             "radio"
-        } else if self.player.as_ref().map(AudioPlayer::is_playing).unwrap_or(false) {
+        } else if self
+            .player
+            .as_ref()
+            .map(AudioPlayer::is_playing)
+            .unwrap_or(false)
+        {
             "music playing"
         } else if self.active_track_path.is_some() {
             "music selected"
@@ -400,7 +418,6 @@ impl AudioOrbitApp {
             "idle"
         }
     }
-
 
     pub(crate) fn render_dev_metrics_window(&mut self, _context: &egui::Context) {
         if !self.show_dev_metrics_window {
@@ -451,11 +468,14 @@ impl AudioOrbitApp {
             .map(|playlist| playlist.tracks.len())
             .sum()
     }
-
 }
 
 #[cfg(debug_assertions)]
-fn render_dev_metrics_panel_content(ui: &mut egui::Ui, snapshot: &DevMetricsSnapshot, counters: &DevMetricsCounters) {
+fn render_dev_metrics_panel_content(
+    ui: &mut egui::Ui,
+    snapshot: &DevMetricsSnapshot,
+    counters: &DevMetricsCounters,
+) {
     AudioOrbitApp::render_modal_section(ui, |ui| {
         ui.heading("Dev runtime metrics");
         ui.small("Debug-only process metrics for checking CPU, memory, repaint cadence, and active background work while profiling Audio Orbit.");
@@ -464,10 +484,38 @@ fn render_dev_metrics_panel_content(ui: &mut egui::Ui, snapshot: &DevMetricsSnap
 
     AudioOrbitApp::render_modal_section(ui, |ui| {
         ui.heading("Process");
-        metric_row(ui, "CPU", snapshot.cpu_percent.map(|value| format!("{value:.1}%")).unwrap_or_else(|| "Waiting for sample".to_owned()));
-        metric_row(ui, "RAM", snapshot.working_set_bytes.map(format_bytes).unwrap_or_else(|| "Unavailable".to_owned()));
-        metric_row(ui, "Peak RAM", snapshot.peak_working_set_bytes.map(format_bytes).unwrap_or_else(|| "Unavailable".to_owned()));
-        metric_row(ui, "Commit", snapshot.pagefile_bytes.map(format_bytes).unwrap_or_else(|| "Unavailable".to_owned()));
+        metric_row(
+            ui,
+            "CPU",
+            snapshot
+                .cpu_percent
+                .map(|value| format!("{value:.1}%"))
+                .unwrap_or_else(|| "Waiting for sample".to_owned()),
+        );
+        metric_row(
+            ui,
+            "RAM",
+            snapshot
+                .working_set_bytes
+                .map(format_bytes)
+                .unwrap_or_else(|| "Unavailable".to_owned()),
+        );
+        metric_row(
+            ui,
+            "Peak RAM",
+            snapshot
+                .peak_working_set_bytes
+                .map(format_bytes)
+                .unwrap_or_else(|| "Unavailable".to_owned()),
+        );
+        metric_row(
+            ui,
+            "Commit",
+            snapshot
+                .pagefile_bytes
+                .map(format_bytes)
+                .unwrap_or_else(|| "Unavailable".to_owned()),
+        );
         metric_row(ui, "GPU", snapshot.gpu_usage_label.clone());
         ui.small("GPU usage is not polled directly here to avoid adding a high-overhead Windows performance-counter loop to normal profiling runs. Use Task Manager or GPUView for exact per-adapter GPU counters.");
     });
@@ -475,9 +523,21 @@ fn render_dev_metrics_panel_content(ui: &mut egui::Ui, snapshot: &DevMetricsSnap
 
     AudioOrbitApp::render_modal_section(ui, |ui| {
         ui.heading("UI / repaint");
-        metric_row(ui, "Frame delta", format!("{:.1} ms", snapshot.frame_delta_ms));
-        metric_row(ui, "Estimated FPS", format!("{:.1}", snapshot.estimated_fps));
-        metric_row(ui, "Next repaint", format!("{} ms", snapshot.repaint_interval_ms));
+        metric_row(
+            ui,
+            "Frame delta",
+            format!("{:.1} ms", snapshot.frame_delta_ms),
+        );
+        metric_row(
+            ui,
+            "Estimated FPS",
+            format!("{:.1}", snapshot.estimated_fps),
+        );
+        metric_row(
+            ui,
+            "Next repaint",
+            format!("{} ms", snapshot.repaint_interval_ms),
+        );
         metric_row(ui, "App uptime", format_duration(snapshot.uptime_seconds));
         metric_row(ui, "Player state", snapshot.player_state.clone());
         let jobs = if snapshot.background_jobs.is_empty() {
@@ -541,10 +601,7 @@ fn collect_process_metrics_sample() -> Option<ProcessMetricsSample> {
 
 #[cfg(all(debug_assertions, windows))]
 fn collect_process_metrics_sample_for_pid(pid: u32) -> Option<ProcessMetricsSample> {
-    use windows_sys::Win32::{
-        Foundation::CloseHandle,
-        System::Threading::OpenProcess,
-    };
+    use windows_sys::Win32::{Foundation::CloseHandle, System::Threading::OpenProcess};
 
     const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
     const PROCESS_VM_READ: u32 = 0x0010;
@@ -561,7 +618,9 @@ fn collect_process_metrics_sample_for_pid(pid: u32) -> Option<ProcessMetricsSamp
 }
 
 #[cfg(all(debug_assertions, windows))]
-unsafe fn collect_process_metrics_sample_for_handle(process: windows_sys::Win32::Foundation::HANDLE) -> Option<ProcessMetricsSample> {
+unsafe fn collect_process_metrics_sample_for_handle(
+    process: windows_sys::Win32::Foundation::HANDLE,
+) -> Option<ProcessMetricsSample> {
     use windows_sys::Win32::{
         Foundation::FILETIME,
         System::{

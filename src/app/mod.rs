@@ -4,9 +4,11 @@
 //! provide the `AudioOrbitApp` implementation in focused units so playback,
 //! playlist, radio, updater, modal, and UI behavior can evolve independently.
 
+mod core;
 #[cfg(debug_assertions)]
 pub(crate) mod dev_metrics;
-mod core;
+mod dj_mix;
+mod external_files;
 mod input;
 mod library_backup;
 mod lifecycle;

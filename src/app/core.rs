@@ -40,6 +40,8 @@ impl AudioOrbitApp {
                     pending_folder_scan_receiver: None,
                     pending_library_sync_receiver: None,
                     pending_track_file_operation_receiver: None,
+                    dj_mix_event_receiver: None,
+                    dj_mix_cancel_flag: None,
                     folder_watcher: None,
                     folder_watcher_target_key: None,
                     pending_folder_watch_sync_at: None,
@@ -56,6 +58,7 @@ impl AudioOrbitApp {
                     pending_new_playlist_tracks: Vec::new(),
                     pending_track_delete_confirmation: None,
                     pending_track_delete_confirmation_text: String::new(),
+                    dj_mix_modal: None,
                     active_panel_modal: None,
                     panel_modal_history: Vec::new(),
                     details_modal: None,
@@ -107,6 +110,9 @@ impl AudioOrbitApp {
                     last_update_check: None,
                     update_check_started_at: None,
                     update_install_started_at: None,
+                    last_external_open_request_poll: Instant::now(),
+                    #[cfg(windows)]
+                    file_associations_registered: file_associations::is_registered(),
                     #[cfg(debug_assertions)]
                     dev_metrics: DevMetricsPanelState::default(),
                     #[cfg(debug_assertions)]
@@ -142,6 +148,8 @@ impl AudioOrbitApp {
                 pending_folder_scan_receiver: None,
                 pending_library_sync_receiver: None,
                 pending_track_file_operation_receiver: None,
+                dj_mix_event_receiver: None,
+                dj_mix_cancel_flag: None,
                 folder_watcher: None,
                 folder_watcher_target_key: None,
                 pending_folder_watch_sync_at: None,
@@ -158,6 +166,7 @@ impl AudioOrbitApp {
                 pending_new_playlist_tracks: Vec::new(),
                 pending_track_delete_confirmation: None,
                 pending_track_delete_confirmation_text: String::new(),
+                dj_mix_modal: None,
                 active_panel_modal: None,
                 panel_modal_history: Vec::new(),
                 details_modal: None,
@@ -209,6 +218,9 @@ impl AudioOrbitApp {
                 last_update_check: None,
                 update_check_started_at: None,
                 update_install_started_at: None,
+                last_external_open_request_poll: Instant::now(),
+                #[cfg(windows)]
+                file_associations_registered: file_associations::is_registered(),
                 #[cfg(debug_assertions)]
                 dev_metrics: DevMetricsPanelState::default(),
                 #[cfg(debug_assertions)]
@@ -279,19 +291,29 @@ impl AudioOrbitApp {
 
         geometry
             .filter(WindowGeometry::is_valid)
-            .map(|geometry| egui::vec2(geometry.width.max(min_size.x), geometry.height.max(min_size.y)))
+            .map(|geometry| {
+                egui::vec2(
+                    geometry.width.max(min_size.x),
+                    geometry.height.max(min_size.y),
+                )
+            })
             .unwrap_or_else(|| default_window_size_for_mode(player_only_mode))
     }
     pub(crate) fn apply_window_mode_size(&self, context: &egui::Context, player_only_mode: bool) {
-        context.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min_window_size_for_mode(player_only_mode)));
-        context.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.saved_window_size_for_mode(player_only_mode)));
+        context.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(
+            min_window_size_for_mode(player_only_mode),
+        ));
+        context.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+            self.saved_window_size_for_mode(player_only_mode),
+        ));
     }
     pub(crate) fn toggle_player_only_mode(&mut self, context: &egui::Context) {
         self.remember_window_geometry(context);
         self.player_only_mode = !self.player_only_mode;
         self.state.ui.player_only_mode = self.player_only_mode;
         self.apply_window_mode_size(context, self.player_only_mode);
-        self.suppress_window_geometry_save_until = Some(Instant::now() + Duration::from_millis(450));
+        self.suppress_window_geometry_save_until =
+            Some(Instant::now() + Duration::from_millis(450));
         self.save_state_silently();
     }
     pub(crate) fn open_panel_modal(&mut self, panel: AppPanelModal) {
@@ -331,7 +353,17 @@ impl AudioOrbitApp {
             return;
         }
 
-        if self.active_panel_modal.is_some() {
+        if context.memory(|memory| memory.any_popup_open()) {
+            return;
+        }
+
+        if self.dj_mix_modal.is_some() {
+            if self.dj_mix_is_running() {
+                self.cancel_dj_mix_export();
+            } else {
+                self.dj_mix_modal = None;
+            }
+        } else if self.active_panel_modal.is_some() {
             self.close_panel_modal();
         } else if self.show_folder_import_modal {
             self.show_folder_import_modal = false;
@@ -350,6 +382,11 @@ impl AudioOrbitApp {
             self.close_track_search();
         } else if self.show_radio_search {
             self.close_radio_search();
+        } else if self.selected_track_index.is_some()
+            || !self.multi_selected_track_indexes.is_empty()
+        {
+            self.clear_multi_track_selection();
+            self.selected_track_index = None;
         }
     }
     pub(crate) fn save_state_silently(&mut self) {
@@ -363,7 +400,9 @@ impl AudioOrbitApp {
         if self.status_message != self.status_last_seen {
             self.status_last_seen = self.status_message.clone();
             self.status_updated_at = Instant::now();
-        } else if !self.status_message.is_empty() && self.status_updated_at.elapsed() >= Duration::from_secs(10) {
+        } else if !self.status_message.is_empty()
+            && self.status_updated_at.elapsed() >= Duration::from_secs(10)
+        {
             self.status_message.clear();
             self.status_last_seen.clear();
             self.status_updated_at = Instant::now();
@@ -372,7 +411,9 @@ impl AudioOrbitApp {
         if self.error_message != self.error_last_seen {
             self.error_last_seen = self.error_message.clone();
             self.error_updated_at = Instant::now();
-        } else if self.error_message.is_some() && self.error_updated_at.elapsed() >= Duration::from_secs(10) {
+        } else if self.error_message.is_some()
+            && self.error_updated_at.elapsed() >= Duration::from_secs(10)
+        {
             self.error_message = None;
             self.error_last_seen = None;
             self.error_updated_at = Instant::now();

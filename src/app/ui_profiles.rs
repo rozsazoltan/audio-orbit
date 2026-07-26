@@ -36,7 +36,10 @@ impl AudioOrbitApp {
         }
 
         ui.horizontal_wrapped(|ui| {
-            if ui.button(ui_icons::label(Icon::Plus, "New profile")).clicked() {
+            if ui
+                .button(ui_icons::label(Icon::Plus, "New profile"))
+                .clicked()
+            {
                 self.add_profile();
             }
 
@@ -44,7 +47,11 @@ impl AudioOrbitApp {
                 self.remove_current_profile();
             }
 
-            if ui.small_button(ui_icons::icon(Icon::Pencil)).on_hover_text("Rename profile").clicked() {
+            if ui
+                .small_button(ui_icons::icon(Icon::Pencil))
+                .on_hover_text("Rename profile")
+                .clicked()
+            {
                 self.editing_profile_index = Some(self.state.selected_profile_index);
             }
         });
@@ -52,7 +59,11 @@ impl AudioOrbitApp {
         ui.add_space(8.0);
 
         let mut profile_changed = false;
-        if let Some(profile) = self.state.profiles.get_mut(self.state.selected_profile_index) {
+        if let Some(profile) = self
+            .state
+            .profiles
+            .get_mut(self.state.selected_profile_index)
+        {
             if self.editing_profile_index == Some(self.state.selected_profile_index) {
                 ui.label("Profile name");
                 profile_changed |= ui.text_edit_singleline(&mut profile.name).changed();
@@ -105,8 +116,11 @@ impl AudioOrbitApp {
                     .changed();
                 profile_changed |= ui
                     .add(
-                        egui::Slider::new(&mut profile.settings.transition_smoothness_percent, 0u8..=100u8)
-                            .text("Motion Smoothness (%)"),
+                        egui::Slider::new(
+                            &mut profile.settings.transition_smoothness_percent,
+                            0u8..=100u8,
+                        )
+                        .text("Motion Smoothness (%)"),
                     )
                     .changed();
                 profile_changed |= ui
@@ -116,7 +130,6 @@ impl AudioOrbitApp {
                     )
                     .changed();
             });
-
         }
 
         if profile_changed {
@@ -131,7 +144,11 @@ impl AudioOrbitApp {
         ui.add_space(12.0);
         ui.separator();
         ui.horizontal_wrapped(|ui| {
-            if ui.small_button(ui_icons::icon(Icon::RefreshCw)).on_hover_text("Refresh output device").clicked() {
+            if ui
+                .small_button(ui_icons::icon(Icon::RefreshCw))
+                .on_hover_text("Refresh output device")
+                .clicked()
+            {
                 self.refresh_output_device();
             }
             ui.label(self.last_known_output_name.as_str());
@@ -144,7 +161,10 @@ impl AudioOrbitApp {
 
         let mut playback_changed = false;
         playback_changed |= ui
-            .checkbox(&mut self.state.playback.crossfade_enabled, "Crossfade source changes")
+            .checkbox(
+                &mut self.state.playback.crossfade_enabled,
+                "Crossfade source changes",
+            )
             .changed();
         if self.state.playback.crossfade_enabled {
             playback_changed |= ui

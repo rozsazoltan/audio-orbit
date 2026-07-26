@@ -16,7 +16,13 @@ impl AppliedLibrarySyncStats {
 impl AudioOrbitApp {
     pub(crate) fn add_audio_files(&mut self) {
         let Some(files) = FileDialog::new()
-            .add_filter("Audio files", &["mp3", "wav", "flac", "ogg", "opus", "m4a", "mp4", "aac", "aiff", "aif", "ape", "wv"])
+            .add_filter(
+                "Audio files",
+                &[
+                    "mp3", "wav", "flac", "ogg", "opus", "m4a", "mp4", "aac", "aiff", "aif", "ape",
+                    "wv",
+                ],
+            )
             .add_filter("All files", &["*"])
             .pick_files()
         else {
@@ -27,14 +33,19 @@ impl AudioOrbitApp {
             return;
         };
         if !playlist.accepts_manual_tracks() {
-            self.error_message = Some("Folder playlists are scanner-owned. Add files to a manual playlist or Favorites instead.".to_owned());
+            self.error_message = Some(
+                "This playlist is read-only. Add files to a manual playlist or Favorites instead."
+                    .to_owned(),
+            );
             return;
         }
 
-        let Some((added_paths, playlist_name, playlist_kind)) = self.current_playlist_mut().map(|playlist| {
-            let added_paths = playlist.add_files(files);
-            (added_paths, playlist.name.clone(), playlist.kind.clone())
-        }) else {
+        let Some((added_paths, playlist_name, playlist_kind)) =
+            self.current_playlist_mut().map(|playlist| {
+                let added_paths = playlist.add_files(files);
+                (added_paths, playlist.name.clone(), playlist.kind.clone())
+            })
+        else {
             return;
         };
 
@@ -46,13 +57,21 @@ impl AudioOrbitApp {
         };
         self.clear_multi_track_selection();
         self.selected_track_index = selected_path.and_then(|path| {
-            self.current_playlist()
-                .and_then(|playlist| playlist.tracks.iter().position(|track| same_path(&track.path, path)))
+            self.current_playlist().and_then(|playlist| {
+                playlist
+                    .tracks
+                    .iter()
+                    .position(|track| same_path(&track.path, path))
+            })
         });
         if self.active_playlist_index == Some(self.state.selected_playlist_index) {
             self.active_track_index = self.active_track_path.as_ref().and_then(|active_path| {
-                self.current_playlist()
-                    .and_then(|playlist| playlist.tracks.iter().position(|track| same_path(&track.path, active_path)))
+                self.current_playlist().and_then(|playlist| {
+                    playlist
+                        .tracks
+                        .iter()
+                        .position(|track| same_path(&track.path, active_path))
+                })
             });
         }
         self.ensure_selected_track_visible();
@@ -75,7 +94,9 @@ impl AudioOrbitApp {
             return;
         };
 
-        if self.pending_playlist_name.trim().is_empty() || self.pending_playlist_name == "Local music" {
+        if self.pending_playlist_name.trim().is_empty()
+            || self.pending_playlist_name == "Local music"
+        {
             self.pending_playlist_name = folder
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -152,7 +173,8 @@ impl AudioOrbitApp {
             Err(mpsc::TryRecvError::Empty) => return,
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.pending_folder_scan_receiver = None;
-                self.error_message = Some("Folder scan stopped before returning a result.".to_owned());
+                self.error_message =
+                    Some("Folder scan stopped before returning a result.".to_owned());
                 return;
             }
         };
@@ -167,7 +189,11 @@ impl AudioOrbitApp {
             }
         };
 
-        let PendingFolderScanKind::Import { name, folder, depth } = result.kind;
+        let PendingFolderScanKind::Import {
+            name,
+            folder,
+            depth,
+        } = result.kind;
         if result.files.is_empty() {
             self.error_message = Some(format!(
                 "No supported audio files were found under {}.",
@@ -179,8 +205,21 @@ impl AudioOrbitApp {
 
         let track_count = result.files.len();
         let playlist = Playlist::from_folder(name.clone(), folder.clone(), depth, result.files);
-        self.state.playlists.push(playlist);
-        self.state.selected_playlist_index = self.state.playlists.len() - 1;
+        let insert_index = self
+            .state
+            .playlists
+            .iter()
+            .position(|playlist| playlist.kind == PlaylistKind::Temporary)
+            .unwrap_or(self.state.playlists.len());
+        self.state.playlists.insert(insert_index, playlist);
+        if self
+            .active_playlist_index
+            .map(|index| index >= insert_index)
+            .unwrap_or(false)
+        {
+            self.active_playlist_index = self.active_playlist_index.map(|index| index + 1);
+        }
+        self.state.selected_playlist_index = insert_index;
         self.restore_repeat_selection_for_current_playlist();
         self.clear_multi_track_selection();
         self.selected_track_index = self.eligible_track_indexes().first().copied();
@@ -202,7 +241,10 @@ impl AudioOrbitApp {
             || self.pending_track_file_operation_receiver.is_some()
         {
             if trigger == LibrarySyncTrigger::Manual {
-                self.error_message = Some("Wait for current library or track file operation to finish before syncing.".to_owned());
+                self.error_message = Some(
+                    "Wait for current library or track file operation to finish before syncing."
+                        .to_owned(),
+                );
             }
             return false;
         }
@@ -288,7 +330,9 @@ impl AudioOrbitApp {
         &mut self,
         changed_paths: Vec<PendingFolderWatchChange>,
     ) -> bool {
-        if self.pending_folder_scan_receiver.is_some() || self.pending_library_sync_receiver.is_some() {
+        if self.pending_folder_scan_receiver.is_some()
+            || self.pending_library_sync_receiver.is_some()
+        {
             return false;
         }
 
@@ -523,7 +567,8 @@ impl AudioOrbitApp {
             Err(mpsc::TryRecvError::Empty) => return,
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.pending_library_sync_receiver = None;
-                self.error_message = Some("Playlist sync stopped before returning a result.".to_owned());
+                self.error_message =
+                    Some("Playlist sync stopped before returning a result.".to_owned());
                 return;
             }
         };
@@ -545,10 +590,9 @@ impl AudioOrbitApp {
         for folder_result in folder_results {
             match folder_result.outcome {
                 Ok(FolderLibrarySyncOutcome::Scanned { files }) => {
-                    let Some(resolved_index) = resolve_folder_sync_target(
-                        &self.state.playlists,
-                        &folder_result.target,
-                    ) else {
+                    let Some(resolved_index) =
+                        resolve_folder_sync_target(&self.state.playlists, &folder_result.target)
+                    else {
                         continue;
                     };
                     let Some(playlist) = self.state.playlists.get_mut(resolved_index) else {
@@ -564,10 +608,9 @@ impl AudioOrbitApp {
                     missing_roots,
                     errors: incremental_errors,
                 }) => {
-                    let Some(resolved_index) = resolve_folder_sync_target(
-                        &self.state.playlists,
-                        &folder_result.target,
-                    ) else {
+                    let Some(resolved_index) =
+                        resolve_folder_sync_target(&self.state.playlists, &folder_result.target)
+                    else {
                         continue;
                     };
                     let Some(playlist) = self.state.playlists.get_mut(resolved_index) else {
@@ -623,7 +666,10 @@ impl AudioOrbitApp {
                     if errors.len() == 1 {
                         format!("Folder could not be synced: {error}")
                     } else {
-                        format!("{} folders could not be synced. First error: {error}", errors.len())
+                        format!(
+                            "{} folders could not be synced. First error: {error}",
+                            errors.len()
+                        )
                     }
                 });
             }
@@ -661,9 +707,12 @@ impl AudioOrbitApp {
     fn remap_track_indexes_after_library_change(&mut self, selected_path: Option<PathBuf>) {
         self.clear_multi_track_selection();
         if let Some(path) = selected_path {
-            self.selected_track_index = self
-                .current_playlist()
-                .and_then(|playlist| playlist.tracks.iter().position(|track| same_path(&track.path, &path)));
+            self.selected_track_index = self.current_playlist().and_then(|playlist| {
+                playlist
+                    .tracks
+                    .iter()
+                    .position(|track| same_path(&track.path, &path))
+            });
         } else if self
             .selected_track_index
             .map(|index| {
@@ -680,12 +729,15 @@ impl AudioOrbitApp {
             .active_playlist_index
             .zip(self.active_track_path.as_ref())
             .and_then(|(playlist_index, active_path)| {
-                self.state.playlists.get(playlist_index).and_then(|playlist| {
-                    playlist
-                        .tracks
-                        .iter()
-                        .position(|track| same_path(&track.path, active_path))
-                })
+                self.state
+                    .playlists
+                    .get(playlist_index)
+                    .and_then(|playlist| {
+                        playlist
+                            .tracks
+                            .iter()
+                            .position(|track| same_path(&track.path, active_path))
+                    })
             });
         self.restore_repeat_selection_for_current_playlist();
         self.ensure_selected_track_visible();
@@ -805,7 +857,10 @@ fn resolve_folder_sync_target(
         return Some(target.playlist_index);
     }
 
-    if let Some(index) = playlists.iter().position(|playlist| matches_target(playlist)) {
+    if let Some(index) = playlists
+        .iter()
+        .position(|playlist| matches_target(playlist))
+    {
         return Some(index);
     }
 

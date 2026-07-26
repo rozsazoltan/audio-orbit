@@ -2,6 +2,9 @@ use crate::*;
 
 impl Drop for AudioOrbitApp {
     fn drop(&mut self) {
+        if let Some(cancel) = &self.dj_mix_cancel_flag {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.persist_playback_session();
         self.persist_repeat_selection_for_current_playlist();
         if let Some(player) = &mut self.player {
@@ -14,7 +17,6 @@ impl Drop for AudioOrbitApp {
         let _ = save_state(&self.state);
     }
 }
-
 
 impl AudioOrbitApp {
     fn next_repaint_interval(&self, context: &egui::Context) -> Duration {
@@ -34,6 +36,10 @@ impl AudioOrbitApp {
             return Duration::from_millis(500);
         }
 
+        if self.dj_mix_is_running() {
+            return Duration::from_millis(80);
+        }
+
         if self.waveform_loading_animation_is_active() {
             return WAVEFORM_LOADING_REPAINT_INTERVAL;
         }
@@ -42,7 +48,11 @@ impl AudioOrbitApp {
             return RADIO_REPAINT_INTERVAL;
         }
 
-        if self.player.as_ref().map(AudioPlayer::is_playing).unwrap_or(false)
+        if self
+            .player
+            .as_ref()
+            .map(AudioPlayer::is_playing)
+            .unwrap_or(false)
             || self.pending_track_switch.is_some()
         {
             return PLAYBACK_REPAINT_INTERVAL;
@@ -79,12 +89,16 @@ impl AudioOrbitApp {
             || self.pending_folder_scan_receiver.is_some()
             || self.pending_library_sync_receiver.is_some()
             || self.pending_track_file_operation_receiver.is_some()
+            || self.dj_mix_event_receiver.is_some()
             || self.pending_folder_watch_sync_at.is_some()
             || self.update_check_receiver.is_some()
             || self.update_install_receiver.is_some()
             || self.radio_title_receiver.is_some()
             || self.pending_profile_apply_at.is_some()
-            || self.profile_apply_applied_until.map(|until| until > Instant::now()).unwrap_or(false)
+            || self
+                .profile_apply_applied_until
+                .map(|until| until > Instant::now())
+                .unwrap_or(false)
             || self.detected_output_change.is_some()
             || self.focus_track_search
             || self.focus_radio_search
@@ -104,6 +118,7 @@ impl eframe::App for AudioOrbitApp {
         self.update_dev_metrics(context, repaint_interval);
         self.remember_window_geometry(context);
 
+        self.process_external_open_requests(context);
         self.process_media_key_events();
         self.process_update_events();
         self.maybe_start_auto_update_check();
@@ -117,6 +132,7 @@ impl eframe::App for AudioOrbitApp {
         self.process_folder_scan_events();
         self.process_library_sync_events();
         self.process_track_file_operation_events();
+        self.process_dj_mix_events();
         self.maybe_start_auto_library_sync();
         self.process_pending_fast_seek();
         self.process_pending_seek_prepare();
@@ -129,9 +145,10 @@ impl eframe::App for AudioOrbitApp {
             context.copy_text(text);
         }
 
-        let now_playing_response = egui::TopBottomPanel::top("now_playing_panel").show(context, |ui| {
-            self.render_now_playing_panel(ui);
-        });
+        let now_playing_response =
+            egui::TopBottomPanel::top("now_playing_panel").show(context, |ui| {
+                self.render_now_playing_panel(ui);
+            });
         self.handle_top_panel_volume_wheel(&now_playing_response.response, context);
 
         if !self.player_only_mode && self.show_library_panel {
@@ -200,6 +217,10 @@ impl eframe::App for AudioOrbitApp {
 
         if self.pending_track_delete_confirmation.is_some() {
             self.render_track_delete_confirmation_modal(context);
+        }
+
+        if self.dj_mix_modal.is_some() {
+            self.render_dj_mix_modal(context);
         }
 
         if self.details_modal.is_some() {

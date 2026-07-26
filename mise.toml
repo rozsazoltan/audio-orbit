@@ -1,0 +1,109 @@
+[tools]
+hk = "1.51.0"
+pkl = "0.31.1"
+rust = { version = "stable", components = ["rustfmt", "clippy"] }
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.137"
+"aqua:tombi-toml/tombi" = "1.1.0"
+
+[env]
+CARGO_INCREMENTAL = "0"
+CARGO_TARGET_DIR = ".cache/cargo-target"
+CARGO_TERM_COLOR = "always"
+AUDIO_ORBIT_APP_DATA_DIR = ".cache/app-data"
+
+[tasks.setup]
+description = "Install configured tools and Git hooks when a Git worktree exists"
+run = [
+  "mise install",
+  { task = "hooks:install" },
+]
+
+[tasks."hooks:install"]
+description = "Install repository Git hooks through hk and mise when a Git worktree exists"
+dir = "{{config_root}}"
+env = { HK_MISE = "1" }
+run = """
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  hk install
+else
+  echo 'Skipping Git hook installation: no .git worktree found.'
+fi
+"""
+run_windows = """
+git rev-parse --is-inside-work-tree >NUL 2>&1
+if errorlevel 1 (
+  echo Skipping Git hook installation: no .git worktree found.
+  exit /b 0
+)
+hk install
+"""
+
+[tasks."hooks:pre-commit"]
+description = "Run the repository pre-commit hook against all tracked files"
+run = "hk run pre-commit --all --check"
+
+[tasks."hooks:pre-push"]
+description = "Run the fast pre-push Clippy gate"
+run = "hk run pre-push --all --check"
+
+[tasks."hooks:check"]
+description = "Run pre-commit checks against all tracked files"
+run = "mise run hooks:pre-commit"
+
+[tasks."hooks:fix"]
+description = "Run pre-commit auto-fixes against all tracked files"
+run = "hk run pre-commit --all --fix"
+
+[tasks.format]
+description = "Format Rust, TOML, and Pkl files"
+run = [
+  "cargo fmt --all",
+  "tombi format .",
+  "pkl format --write hk.pkl",
+]
+
+[tasks."format:check"]
+description = "Verify Rust, TOML, and Pkl formatting"
+run = [
+  "cargo fmt --all -- --check",
+  "tombi format --check .",
+  "tombi lint --quiet --error-on-warnings .",
+  "pkl format --silent hk.pkl",
+]
+
+[tasks."tooling:check"]
+description = "Validate mise tasks and hk/Pkl configuration"
+run = [
+  "mise tasks validate --errors-only",
+  "hk test --quiet",
+]
+
+[tasks.check]
+description = "Type-check all locked Cargo targets"
+run = "cargo check --locked --all-targets"
+
+[tasks.clippy]
+description = "Run Clippy against locked application binaries"
+run = "cargo clippy --locked --bins -- -D warnings"
+
+[tasks."clippy:pre-push"]
+description = "Run the Windows-only Clippy pre-push gate"
+run = "echo 'Skipping Clippy pre-push gate: Audio Orbit development builds are Windows-only.'"
+run_windows = "cargo clippy --locked --bins -- -D warnings"
+
+[tasks.test]
+description = "Run Rust tests with cargo-nextest"
+run = "cargo nextest run --locked --all-targets"
+
+[tasks."test:doc"]
+description = "Run Rust documentation tests not handled by nextest"
+run = "cargo test --locked --doc"
+
+[tasks.ci]
+description = "Run Windows CI quality gates and full test suite"
+run = [
+  { task = "hooks:pre-commit" },
+  { task = "hooks:pre-push" },
+  { task = "test" },
+  { task = "test:doc" },
+]

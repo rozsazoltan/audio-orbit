@@ -1,27 +1,35 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app;
 mod audio_player;
 mod config;
+mod dj_mix;
 mod dsp;
-mod icon;
+#[cfg(windows)]
+mod file_associations;
 mod folder_watcher;
+mod icon;
 mod media_keys;
 mod single_instance;
 mod spectrum_waveform;
+mod time_stretch;
 mod ui_icons;
 mod updater;
-mod app;
 
 #[cfg(debug_assertions)]
 use crate::app::dev_metrics::{DevMetricsNativeWindowHandle, DevMetricsPanelState};
 
 use crate::{
-    audio_player::{current_default_output_device_name, AudioPlayer, PlaybackInfo, PreparedPlayback, RadioVisualizerFrame},
+    audio_player::{
+        current_default_output_device_name, AudioPlayer, PlaybackInfo, PreparedPlayback,
+        RadioVisualizerFrame,
+    },
     config::{
-        app_data_dir, app_version_label, default_backup_file_name, display_file_name, export_state_zip,
-        import_state_zip, is_recursive_scan_link, is_supported_audio_file, load_state, path_is_same_or_descendant,
-        path_key, same_path, save_state, scan_audio_folder, LastPlayedTrack,
-        PlaybackSession, Playlist, PlaylistKind, RadioStation, RepeatMode, SavedState, Track, WindowGeometry, FAVORITES_PLAYLIST_NAME,
+        app_data_dir, app_version_label, default_backup_file_name, display_file_name,
+        export_state_zip, import_state_zip, is_recursive_scan_link, is_supported_audio_file,
+        load_state, path_is_same_or_descendant, path_key, same_path, save_state, scan_audio_folder,
+        LastPlayedTrack, PlaybackSession, Playlist, PlaylistKind, RadioStation, RepeatMode,
+        SavedState, Track, WindowGeometry, FAVORITES_PLAYLIST_NAME,
     },
     dsp::{DspSettings, OrbitMode},
 };
@@ -34,7 +42,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::Command,
-    sync::{mpsc, Arc},
+    sync::{atomic::AtomicBool, mpsc, Arc},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -74,7 +82,10 @@ fn default_window_size_for_mode(player_only_mode: bool) -> egui::Vec2 {
     }
 }
 
-fn saved_window_geometry_for_mode(state: &SavedState, player_only_mode: bool) -> Option<WindowGeometry> {
+fn saved_window_geometry_for_mode(
+    state: &SavedState,
+    player_only_mode: bool,
+) -> Option<WindowGeometry> {
     let geometry = if player_only_mode {
         state.ui.player_only_window_geometry
     } else {
@@ -92,7 +103,8 @@ fn main() -> eframe::Result<()> {
         return app::dev_metrics::run_dev_metrics_process(config);
     }
 
-    let _single_instance_guard = match single_instance::acquire() {
+    let startup_audio_files = command_line_audio_files();
+    let _single_instance_guard = match single_instance::acquire(&startup_audio_files) {
         Ok(Some(guard)) => guard,
         Ok(None) => return Ok(()),
         Err(error) => {
@@ -128,9 +140,21 @@ fn main() -> eframe::Result<()> {
         Box::new(move |creation_context| {
             ui_icons::install(&creation_context.egui_ctx);
             configure_app_style(&creation_context.egui_ctx);
-            Ok(Box::new(AudioOrbitApp::new(state)))
+            let mut app = AudioOrbitApp::new(state);
+            if !startup_audio_files.is_empty() {
+                app.open_audio_files_in_temporary_playlist(startup_audio_files.clone(), true);
+            }
+            Ok(Box::new(app))
         }),
     )
+}
+
+fn command_line_audio_files() -> Vec<PathBuf> {
+    std::env::args_os()
+        .skip(1)
+        .map(PathBuf::from)
+        .filter(|path| path.is_file() && is_supported_audio_file(path))
+        .collect()
 }
 
 fn configure_app_style(context: &egui::Context) {
@@ -146,7 +170,12 @@ fn initial_window_size(state: &SavedState) -> egui::Vec2 {
     let min_size = min_window_size_for_mode(player_only_mode);
 
     saved_window_geometry_for_mode(state, player_only_mode)
-        .map(|geometry| egui::vec2(geometry.width.max(min_size.x), geometry.height.max(min_size.y)))
+        .map(|geometry| {
+            egui::vec2(
+                geometry.width.max(min_size.x),
+                geometry.height.max(min_size.y),
+            )
+        })
         .unwrap_or_else(|| default_window_size_for_mode(player_only_mode))
 }
 
@@ -155,7 +184,6 @@ fn initial_window_position(state: &SavedState) -> Option<egui::Pos2> {
         .or_else(|| saved_window_geometry_for_mode(state, !state.ui.player_only_mode))
         .map(|geometry| egui::pos2(geometry.x, geometry.y))
 }
-
 
 #[derive(Clone, Debug)]
 struct PendingTrackSwitch {
@@ -283,7 +311,6 @@ struct PendingLibrarySyncResult {
     folder_results: Vec<FolderLibrarySyncResult>,
 }
 
-
 #[derive(Clone, Debug)]
 enum DetailsModal {
     Track(PathBuf),
@@ -313,6 +340,124 @@ enum TrackFileOperationResult {
         removed_paths: Vec<PathBuf>,
         errors: Vec<String>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DjTrackSectionMode {
+    AutoHighlight,
+    FullTrack,
+    FavoriteRange,
+}
+
+#[derive(Clone, Debug)]
+struct DjMixTrack {
+    path: PathBuf,
+    title: String,
+    section_mode: DjTrackSectionMode,
+    favorite_start_seconds: f32,
+    favorite_end_seconds: f32,
+}
+
+impl DjMixTrack {
+    fn new(path: PathBuf, title: String) -> Self {
+        Self {
+            path,
+            title,
+            section_mode: DjTrackSectionMode::AutoHighlight,
+            favorite_start_seconds: 0.0,
+            favorite_end_seconds: 60.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DjMixStyle {
+    Crossfade,
+    SmartDj,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DjBridgeMode {
+    Auto,
+    DrumSwap,
+    HarmonicBridge,
+    EchoDrop,
+    StemMashup,
+    Custom,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DjMixOptions {
+    style: DjMixStyle,
+    smart_order: bool,
+    normalize_loudness: bool,
+    bass_swap: bool,
+    professional_tools: bool,
+    stem_separation: bool,
+    bridge_mode: DjBridgeMode,
+    bridge_start_seconds: f32,
+    bridge_loop_seconds: f32,
+    bridge_level: f32,
+    transition_bars: u32,
+    target_minutes: f32,
+    bitrate_kbps: u32,
+}
+
+impl Default for DjMixOptions {
+    fn default() -> Self {
+        Self {
+            style: DjMixStyle::SmartDj,
+            smart_order: true,
+            normalize_loudness: true,
+            bass_swap: true,
+            professional_tools: true,
+            stem_separation: true,
+            bridge_mode: DjBridgeMode::Auto,
+            bridge_start_seconds: 0.0,
+            bridge_loop_seconds: 4.0,
+            bridge_level: 0.72,
+            transition_bars: 16,
+            target_minutes: 15.0,
+            bitrate_kbps: 256,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DjMixModalState {
+    tracks: Vec<DjMixTrack>,
+    options: DjMixOptions,
+    custom_bridge_path: Option<PathBuf>,
+    stage: String,
+    progress: f32,
+    output_path: Option<PathBuf>,
+    report_path: Option<PathBuf>,
+    diagnostics_summary: Option<String>,
+    professional_tool_status: String,
+    completed: bool,
+    started_at: Option<Instant>,
+    last_progress_at: Option<Instant>,
+    preview_track_path: Option<PathBuf>,
+    preview_stop_seconds: Option<f32>,
+}
+
+#[derive(Clone, Debug)]
+enum DjMixEvent {
+    Progress {
+        stage: String,
+        progress: f32,
+    },
+    Completed {
+        output_path: PathBuf,
+        report_path: PathBuf,
+        track_count: usize,
+        duration_seconds: f32,
+        integrated_lufs: Option<f64>,
+        true_peak_dbfs: Option<f64>,
+        diagnostics_summary: String,
+    },
+    Cancelled,
+    Failed(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -410,6 +555,8 @@ struct AudioOrbitApp {
     pending_folder_scan_receiver: Option<mpsc::Receiver<Result<PendingFolderScanResult, String>>>,
     pending_library_sync_receiver: Option<mpsc::Receiver<PendingLibrarySyncResult>>,
     pending_track_file_operation_receiver: Option<mpsc::Receiver<TrackFileOperationResult>>,
+    dj_mix_event_receiver: Option<mpsc::Receiver<DjMixEvent>>,
+    dj_mix_cancel_flag: Option<Arc<AtomicBool>>,
     folder_watcher: Option<folder_watcher::FolderWatcher>,
     folder_watcher_target_key: Option<String>,
     pending_folder_watch_sync_at: Option<Instant>,
@@ -426,6 +573,7 @@ struct AudioOrbitApp {
     pending_new_playlist_tracks: Vec<PathBuf>,
     pending_track_delete_confirmation: Option<PendingTrackDeleteConfirmation>,
     pending_track_delete_confirmation_text: String,
+    dj_mix_modal: Option<DjMixModalState>,
     active_panel_modal: Option<AppPanelModal>,
     panel_modal_history: Vec<AppPanelModal>,
     details_modal: Option<DetailsModal>,
@@ -477,6 +625,9 @@ struct AudioOrbitApp {
     last_update_check: Option<updater::UpdateCheck>,
     update_check_started_at: Option<Instant>,
     update_install_started_at: Option<Instant>,
+    last_external_open_request_poll: Instant,
+    #[cfg(windows)]
+    file_associations_registered: bool,
     #[cfg(debug_assertions)]
     dev_metrics: DevMetricsPanelState,
     #[cfg(debug_assertions)]
@@ -484,11 +635,6 @@ struct AudioOrbitApp {
     #[cfg(debug_assertions)]
     dev_metrics_window: Option<DevMetricsNativeWindowHandle>,
 }
-
-
-
-
-
 
 fn media_key_status_message(
     registered: &[media_keys::MediaKeyCommand],
@@ -518,11 +664,7 @@ fn fetch_radio_stream_metadata(url: &str) -> Option<RadioStreamMetadata> {
         .build()
         .ok()?;
 
-    let mut response = client
-        .get(url)
-        .header("Icy-MetaData", "1")
-        .send()
-        .ok()?;
+    let mut response = client.get(url).header("Icy-MetaData", "1").send().ok()?;
 
     let headers = response.headers().clone();
     let station_name = headers
@@ -736,8 +878,12 @@ fn clean_radio_metadata_value(value: &str) -> String {
         .to_owned()
 }
 
-
-fn search_icon_text_button(ui: &mut egui::Ui, enabled: bool, icon: Icon, text: &str) -> egui::Response {
+fn search_icon_text_button(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    icon: Icon,
+    text: &str,
+) -> egui::Response {
     let icon_text = ui_icons::icon(icon);
     let icon_font = egui::FontId::proportional(14.0);
     let text_font = egui::TextStyle::Button.resolve(ui.style());
@@ -748,15 +894,19 @@ fn search_icon_text_button(ui: &mut egui::Ui, enabled: bool, icon: Icon, text: &
         &icon_text,
         icon_font.clone(),
         ui.visuals().widgets.inactive.fg_stroke.color,
-    ).ceil();
+    )
+    .ceil();
     let text_width = text_width(
         ui,
         text,
         text_font.clone(),
         ui.visuals().widgets.inactive.fg_stroke.color,
-    ).ceil();
+    )
+    .ceil();
     let icon_gap = 5.0;
-    let button_width = (horizontal_padding * 2.0 + icon_width + icon_gap + text_width).ceil().max(44.0);
+    let button_width = (horizontal_padding * 2.0 + icon_width + icon_gap + text_width)
+        .ceil()
+        .max(44.0);
 
     let response = ui.add_enabled(
         enabled,
@@ -830,7 +980,13 @@ fn text_width(ui: &egui::Ui, value: &str, font_id: egui::FontId, color: egui::Co
         .width()
 }
 
-fn ellipsize_to_width_exact(ui: &egui::Ui, value: &str, width: f32, font_id: egui::FontId, color: egui::Color32) -> String {
+fn ellipsize_to_width_exact(
+    ui: &egui::Ui,
+    value: &str,
+    width: f32,
+    font_id: egui::FontId,
+    color: egui::Color32,
+) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return String::new();
@@ -956,7 +1112,14 @@ fn same_text(left: &str, right: &str) -> bool {
 }
 
 fn ensure_state_is_valid(state: &mut SavedState) {
-    if !state.playlists.iter().any(|playlist| playlist.kind == PlaylistKind::Favorites) {
+    state
+        .playlists
+        .retain(|playlist| playlist.kind != PlaylistKind::Temporary);
+    if !state
+        .playlists
+        .iter()
+        .any(|playlist| playlist.kind == PlaylistKind::Favorites)
+    {
         state.playlists.insert(0, Playlist::favorites());
     }
 
@@ -969,10 +1132,16 @@ fn ensure_state_is_valid(state: &mut SavedState) {
         playlist.ensure_favorite_added_sequences();
         playlist.ensure_folder_group_contiguity();
         playlist.set_selected_group(playlist.selected_group.clone());
-        let track_paths: Vec<PathBuf> = playlist.tracks.iter().map(|track| track.path.clone()).collect();
-        playlist
-            .repeat_selection
-            .retain(|selected_path| track_paths.iter().any(|track_path| same_path(track_path, selected_path)));
+        let track_paths: Vec<PathBuf> = playlist
+            .tracks
+            .iter()
+            .map(|track| track.path.clone())
+            .collect();
+        playlist.repeat_selection.retain(|selected_path| {
+            track_paths
+                .iter()
+                .any(|track_path| same_path(track_path, selected_path))
+        });
         let mut deduped_repeat_selection: Vec<PathBuf> = Vec::new();
         for selected_path in playlist.repeat_selection.drain(..) {
             if !deduped_repeat_selection
@@ -992,9 +1161,13 @@ fn ensure_state_is_valid(state: &mut SavedState) {
     if state.selected_playlist_index >= state.playlists.len() {
         state.selected_playlist_index = 0;
     }
+    state.playlists.push(Playlist::temporary());
 
     if state.profiles.is_empty() {
-        state.profiles.push(config::DspProfile::new("Smooth orbit", DspSettings::default()));
+        state.profiles.push(config::DspProfile::new(
+            "Smooth orbit",
+            DspSettings::default(),
+        ));
     }
     if state.selected_profile_index >= state.profiles.len() {
         state.selected_profile_index = 0;
@@ -1006,11 +1179,15 @@ fn ensure_state_is_valid(state: &mut SavedState) {
         }
     }
 
-
-    if !state.playback_session.position_seconds.is_finite() || state.playback_session.position_seconds < 0.0 {
+    if !state.playback_session.position_seconds.is_finite()
+        || state.playback_session.position_seconds < 0.0
+    {
         state.playback_session.position_seconds = 0.0;
     }
-    if !matches!(state.playback_session.source.as_str(), "music" | "track" | "radio") {
+    if !matches!(
+        state.playback_session.source.as_str(),
+        "music" | "track" | "radio"
+    ) {
         state.playback_session = PlaybackSession::default();
     }
     if let Some(index) = state.playback_session.radio_index {
@@ -1039,7 +1216,6 @@ fn next_valid_track_index(previous_index: usize, remaining_len: usize) -> Option
     }
 }
 
-
 fn paint_sticky_folder_header(
     ui: &egui::Ui,
     visible_rect: egui::Rect,
@@ -1050,7 +1226,10 @@ fn paint_sticky_folder_header(
     let header_height = 24.0;
     let rect = egui::Rect::from_min_max(
         egui::pos2(visible_rect.left(), visible_rect.top() + push_offset_y),
-        egui::pos2(visible_rect.right(), visible_rect.top() + push_offset_y + header_height),
+        egui::pos2(
+            visible_rect.right(),
+            visible_rect.top() + push_offset_y + header_height,
+        ),
     );
     let painter = ui.painter().with_clip_rect(visible_rect);
     let visuals = ui.visuals();
@@ -1059,14 +1238,23 @@ fn paint_sticky_folder_header(
     painter.rect_filled(rect, 0.0, background);
     painter.line_segment([rect.left_bottom(), rect.right_bottom()], stroke);
 
-    let icon = if collapsed { Icon::ChevronRight } else { Icon::ChevronDown };
+    let icon = if collapsed {
+        Icon::ChevronRight
+    } else {
+        Icon::ChevronDown
+    };
     let icon_rect = egui::Rect::from_min_size(
         egui::pos2(rect.left() + 8.0, rect.top() + 3.0),
         egui::vec2(18.0, header_height - 6.0),
     );
     let text_left = icon_rect.right() + 4.0;
     let text_width = (rect.right() - text_left - 10.0).max(24.0);
-    let text_color = visuals.widgets.inactive.fg_stroke.color.linear_multiply(0.92);
+    let text_color = visuals
+        .widgets
+        .inactive
+        .fg_stroke
+        .color
+        .linear_multiply(0.92);
 
     painter.text(
         icon_rect.center(),
@@ -1092,7 +1280,15 @@ fn paint_dragged_row_fade(ui: &egui::Ui, rect: egui::Rect) {
     painter.rect_stroke(
         rect,
         4.0,
-        egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color.linear_multiply(0.70)),
+        egui::Stroke::new(
+            1.0,
+            ui.visuals()
+                .widgets
+                .inactive
+                .bg_stroke
+                .color
+                .linear_multiply(0.70),
+        ),
         egui::StrokeKind::Inside,
     );
 }
@@ -1117,7 +1313,11 @@ fn paint_list_separator(ui: &mut egui::Ui, width: f32, highlighted: bool) {
 }
 
 fn paint_list_edge_separator(ui: &egui::Ui, row_rect: egui::Rect, width: f32, after: bool) {
-    let y = if after { row_rect.bottom() } else { row_rect.top() - 1.0 };
+    let y = if after {
+        row_rect.bottom()
+    } else {
+        row_rect.top() - 1.0
+    };
     paint_list_separator_line(ui, row_rect.left(), row_rect.left() + width, y, true);
 }
 
@@ -1179,7 +1379,11 @@ fn sample_waveform_column(waveform: &[f32], column: usize, columns: usize) -> f3
         .clamp((start + 1) as f32, len as f32) as usize;
     let slice = &waveform[start..end];
     let stride = (slice.len() / 24).max(1);
-    slice.iter().step_by(stride).copied().fold(0.0_f32, f32::max)
+    slice
+        .iter()
+        .step_by(stride)
+        .copied()
+        .fold(0.0_f32, f32::max)
 }
 
 fn draw_waveform_seek(
@@ -1200,7 +1404,8 @@ fn draw_waveform_seek(
     if waveform.is_empty() {
         if show_loading_wave {
             paint_waveform_loading_wave(ui, rect);
-            ui.ctx().request_repaint_after(WAVEFORM_LOADING_REPAINT_INTERVAL);
+            ui.ctx()
+                .request_repaint_after(WAVEFORM_LOADING_REPAINT_INTERVAL);
         }
         return response;
     }
@@ -1209,7 +1414,8 @@ fn draw_waveform_seek(
     let progress_x = rect.left() + rect.width() * progress;
     let column_count = (rect.width() / RADIO_WAVEFORM_BAR_PITCH_PIXELS)
         .floor()
-        .max(1.0) as usize + 1;
+        .max(1.0) as usize
+        + 1;
     let mut values = Vec::with_capacity(column_count);
     for column in 0..column_count {
         values.push(sample_waveform_column(waveform, column, column_count));
@@ -1232,7 +1438,9 @@ fn draw_waveform_seek(
             break;
         }
 
-        let height = (rect.height() * 0.84 * eased).max(2.0).min(rect.height() - 4.0);
+        let height = (rect.height() * 0.84 * eased)
+            .max(2.0)
+            .min(rect.height() - 4.0);
         let bar_start_seconds = if duration_seconds > 0.0 {
             bar_index as f32 / column_count.max(1) as f32 * duration_seconds
         } else {
@@ -1244,7 +1452,9 @@ fn draw_waveform_seek(
             0.0
         };
         let is_silence = duration_seconds > 0.0
-            && silence_ranges.iter().any(|(start, end)| *end > bar_start_seconds && *start < bar_end_seconds);
+            && silence_ranges
+                .iter()
+                .any(|(start, end)| *end > bar_start_seconds && *start < bar_end_seconds);
 
         let color = if is_silence {
             silence_color
@@ -1274,7 +1484,6 @@ fn draw_waveform_seek(
 
     response
 }
-
 
 fn paint_waveform_loading_wave(ui: &egui::Ui, rect: egui::Rect) {
     let painter = ui.painter();
@@ -1307,7 +1516,10 @@ fn paint_waveform_loading_wave(ui: &egui::Ui, rect: egui::Rect) {
     let mut previous: Option<egui::Pos2> = None;
     for index in 0..points {
         let t = index as f32 / (points.saturating_sub(1).max(1)) as f32;
-        let distance = (t - pulse_center).abs().min((t - pulse_center + 1.0).abs()).min((t - pulse_center - 1.0).abs());
+        let distance = (t - pulse_center)
+            .abs()
+            .min((t - pulse_center + 1.0).abs())
+            .min((t - pulse_center - 1.0).abs());
         if distance > pulse_half_width {
             previous = None;
             continue;
@@ -1354,7 +1566,6 @@ fn format_track_metadata_compact(track: &Track) -> String {
     format!("{duration} · {sample_rate} · {bitrate} · {channels} · {size}")
 }
 
-
 fn format_track_metadata_player_only(track: &Track) -> String {
     track
         .metadata
@@ -1374,7 +1585,11 @@ fn next_row_pointer_hovered(ui: &egui::Ui, width: f32, height: f32) -> bool {
     })
 }
 
-fn rendered_to_original_position(rendered_position: f32, render_start: f32, playback: &PlaybackInfo) -> f32 {
+fn rendered_to_original_position(
+    rendered_position: f32,
+    render_start: f32,
+    playback: &PlaybackInfo,
+) -> f32 {
     if playback.silence_ranges.is_empty() {
         return rendered_position.clamp(0.0, playback.original_duration_seconds.max(0.0));
     }
@@ -1402,7 +1617,8 @@ fn rendered_to_original_position(rendered_position: f32, render_start: f32, play
             })
             .sum::<f32>();
 
-        original = (rendered_position + skipped_before).min(playback.original_duration_seconds.max(0.0));
+        original =
+            (rendered_position + skipped_before).min(playback.original_duration_seconds.max(0.0));
         if (original - previous).abs() < 0.001 {
             break;
         }
@@ -1451,7 +1667,6 @@ fn display_parent(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-
 fn detail_row(ui: &mut egui::Ui, label: &str, value: &str) {
     let available_width = ui.available_width().max(260.0);
     let label_width = available_width.min(170.0);
@@ -1463,9 +1678,14 @@ fn detail_row(ui: &mut egui::Ui, label: &str, value: &str) {
             ui.set_min_width(label_width);
             ui.set_max_width(label_width);
             ui.label(
-                egui::RichText::new(label)
-                    .strong()
-                    .color(ui.visuals().widgets.inactive.fg_stroke.color.linear_multiply(0.72)),
+                egui::RichText::new(label).strong().color(
+                    ui.visuals()
+                        .widgets
+                        .inactive
+                        .fg_stroke
+                        .color
+                        .linear_multiply(0.72),
+                ),
             );
         });
         ui.vertical(|ui| {
@@ -1485,7 +1705,10 @@ fn reveal_in_file_manager(path: &Path) -> anyhow::Result<()> {
     };
     let looks_like_file = target.is_file() || (!target.is_dir() && path.extension().is_some());
     let folder = if looks_like_file {
-        target.parent().map(Path::to_path_buf).unwrap_or_else(|| target.clone())
+        target
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| target.clone())
     } else {
         target.clone()
     };
@@ -1527,4 +1750,3 @@ fn explorer_compatible_path(path: &Path) -> PathBuf {
     }
     path.to_path_buf()
 }
-

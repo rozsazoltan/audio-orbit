@@ -1,2 +1,5 @@
+[build]
+target-dir = ".cache/cargo-target"
+
 [alias]
 dev = "run --bin audio-orbit-dev --"

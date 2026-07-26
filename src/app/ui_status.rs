@@ -11,7 +11,8 @@ impl AudioOrbitApp {
             return None;
         }
         let visible = self.visible_track_indexes().len();
-        if self.show_track_search && !self.track_search_query.trim().is_empty() && visible != total {
+        if self.show_track_search && !self.track_search_query.trim().is_empty() && visible != total
+        {
             Some(format!("{visible}/{total} tracks"))
         } else {
             Some(format!("{total} tracks"))
@@ -41,24 +42,47 @@ impl AudioOrbitApp {
             .profile_apply_status_text()
             .unwrap_or_else(|| self.status_message.clone());
         let status_message = if include_error {
-            self.error_message.as_deref().unwrap_or(primary_status.as_str())
+            self.error_message
+                .as_deref()
+                .unwrap_or(primary_status.as_str())
         } else {
             primary_status.as_str()
         };
-        let status_color = if include_error && self.error_message.is_some() { error_color } else { text_color };
-        let separator_width = if !status_message.is_empty() && !self.media_key_status.is_empty() { 12.0 } else { 0.0 };
-        let available_status_width = (available_width - count_width - media_width - separator_width - 12.0).max(48.0);
+        let status_color = if include_error && self.error_message.is_some() {
+            error_color
+        } else {
+            text_color
+        };
+        let separator_width = if !status_message.is_empty() && !self.media_key_status.is_empty() {
+            12.0
+        } else {
+            0.0
+        };
+        let available_status_width =
+            (available_width - count_width - media_width - separator_width - 12.0).max(48.0);
 
         ui.horizontal(|ui| {
             if !status_message.is_empty() {
-                render_ellipsized_single_line(ui, status_message, available_status_width, body_font.clone(), status_color);
+                render_ellipsized_single_line(
+                    ui,
+                    status_message,
+                    available_status_width,
+                    body_font.clone(),
+                    status_color,
+                );
                 if !self.media_key_status.is_empty() {
                     ui.separator();
                 }
             }
             if !self.media_key_status.is_empty() {
                 let width = media_width.max(48.0);
-                render_ellipsized_single_line(ui, &self.media_key_status, width, small_font.clone(), text_color);
+                render_ellipsized_single_line(
+                    ui,
+                    &self.media_key_status,
+                    width,
+                    small_font.clone(),
+                    text_color,
+                );
             }
 
             if let Some(count_label) = count_label {
@@ -79,9 +103,12 @@ impl AudioOrbitApp {
         };
 
         let screen_rect = context.screen_rect();
-        let estimated_width = (error_message.chars().count() as f32 * 7.0 + 34.0).clamp(260.0, 720.0);
+        let estimated_width =
+            (error_message.chars().count() as f32 * 7.0 + 34.0).clamp(260.0, 720.0);
         let width = estimated_width.min((screen_rect.width() - 32.0).max(260.0));
-        let estimated_lines = (error_message.chars().count() as f32 / 90.0).ceil().max(1.0);
+        let estimated_lines = (error_message.chars().count() as f32 / 90.0)
+            .ceil()
+            .max(1.0);
         let max_height = (estimated_lines * 18.0 + 16.0).clamp(32.0, 112.0);
         egui::Area::new(egui::Id::new("error_toast_overlay"))
             .order(egui::Order::Tooltip)
@@ -100,7 +127,13 @@ impl AudioOrbitApp {
                             .auto_shrink([false, true])
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
-                                ui.add(egui::Label::new(egui::RichText::new(error_message.as_str()).color(egui::Color32::from_rgb(255, 112, 112))).wrap());
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(error_message.as_str())
+                                            .color(egui::Color32::from_rgb(255, 112, 112)),
+                                    )
+                                    .wrap(),
+                                );
                             });
                     });
             });

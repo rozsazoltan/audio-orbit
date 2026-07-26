@@ -88,7 +88,11 @@ fn start_app(root: &Path) -> Option<Child> {
         return None;
     }
 
+    let app_data_dir = root.join(".cache").join("app-data");
+    println!("app data: {}", app_data_dir.display());
+
     match Command::new(&exe)
+        .env("AUDIO_ORBIT_APP_DATA_DIR", &app_data_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -129,7 +133,7 @@ fn stop_child(child: &mut Option<Child>) {
 fn app_executable_path(root: &Path) -> PathBuf {
     let target_dir = env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("target"));
+        .unwrap_or_else(|| root.join(".cache").join("cargo-target"));
 
     let exe_name = if cfg!(windows) {
         "audio-orbit.exe"
@@ -167,9 +171,9 @@ fn collect_fingerprint(path: &Path, fingerprint: &mut FileFingerprint) {
     if metadata.is_file() {
         fingerprint.files = fingerprint.files.saturating_add(1);
         fingerprint.bytes = fingerprint.bytes.saturating_add(metadata.len());
-        fingerprint.modified_nanos = fingerprint
-            .modified_nanos
-            .max(system_time_to_nanos(metadata.modified().unwrap_or(UNIX_EPOCH)));
+        fingerprint.modified_nanos = fingerprint.modified_nanos.max(system_time_to_nanos(
+            metadata.modified().unwrap_or(UNIX_EPOCH),
+        ));
         return;
     }
 
@@ -198,6 +202,7 @@ fn should_ignore(path: &Path) -> bool {
         matches!(
             value.to_str(),
             Some("target")
+                | Some(".cache")
                 | Some(".git")
                 | Some(".audio-orbit-data")
                 | Some(".audio-orbit-dll")

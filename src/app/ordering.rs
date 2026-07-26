@@ -2,10 +2,31 @@ use crate::*;
 
 impl AudioOrbitApp {
     pub(crate) fn add_playlist(&mut self) {
-        let number = self.state.playlists.len() + 1;
+        let number = self
+            .state
+            .playlists
+            .iter()
+            .filter(|playlist| playlist.kind != PlaylistKind::Temporary)
+            .count()
+            + 1;
         self.persist_repeat_selection_for_current_playlist();
-        self.state.playlists.push(Playlist::new(format!("Playlist {number}")));
-        self.state.selected_playlist_index = self.state.playlists.len() - 1;
+        let insert_index = self
+            .state
+            .playlists
+            .iter()
+            .position(|playlist| playlist.kind == PlaylistKind::Temporary)
+            .unwrap_or(self.state.playlists.len());
+        self.state
+            .playlists
+            .insert(insert_index, Playlist::new(format!("Playlist {number}")));
+        if self
+            .active_playlist_index
+            .map(|index| index >= insert_index)
+            .unwrap_or(false)
+        {
+            self.active_playlist_index = self.active_playlist_index.map(|index| index + 1);
+        }
+        self.state.selected_playlist_index = insert_index;
         self.restore_repeat_selection_for_current_playlist();
         self.clear_multi_track_selection();
         self.selected_track_index = None;
@@ -19,7 +40,7 @@ impl AudioOrbitApp {
         };
 
         if !playlist.kind.can_delete() {
-            self.error_message = Some("Favorites is built-in and cannot be deleted.".to_owned());
+            self.error_message = Some("Built-in playlists cannot be deleted.".to_owned());
             return;
         }
 
@@ -39,7 +60,9 @@ impl AudioOrbitApp {
                 self.active_playlist_index = Some(active_playlist_index - 1);
             }
         }
-        self.state.selected_playlist_index = removed_index.saturating_sub(1).min(self.state.playlists.len() - 1);
+        self.state.selected_playlist_index = removed_index
+            .saturating_sub(1)
+            .min(self.state.playlists.len() - 1);
         self.restore_repeat_selection_for_current_playlist();
         self.clear_multi_track_selection();
         self.selected_track_index = self.eligible_track_indexes().first().copied();
@@ -51,13 +74,22 @@ impl AudioOrbitApp {
         self.save_state_silently();
     }
     pub(crate) fn move_playlist(&mut self, from: usize, delta: isize) {
-        if from >= self.state.playlists.len() {
+        if from >= self.state.playlists.len()
+            || self.state.playlists[from].kind == PlaylistKind::Temporary
+        {
             return;
         }
+        let last_movable_index = self
+            .state
+            .playlists
+            .iter()
+            .position(|playlist| playlist.kind == PlaylistKind::Temporary)
+            .unwrap_or(self.state.playlists.len())
+            .saturating_sub(1);
         let to = if delta < 0 {
             from.saturating_sub(1)
         } else {
-            (from + 1).min(self.state.playlists.len() - 1)
+            (from + 1).min(last_movable_index)
         };
         if from == to {
             return;
@@ -122,11 +154,18 @@ impl AudioOrbitApp {
                 if playlist_index < self.state.playlists.len() {
                     self.state.playlists[playlist_index] = playlist;
                     self.state.selected_playlist_index = playlist_index;
-                    self.selected_track_index = selected_track_index
-                        .filter(|index| self.current_playlist().map(|playlist| *index < playlist.tracks.len()).unwrap_or(false));
+                    self.selected_track_index = selected_track_index.filter(|index| {
+                        self.current_playlist()
+                            .map(|playlist| *index < playlist.tracks.len())
+                            .unwrap_or(false)
+                    });
                     self.selected_track_indexes = selected_track_indexes
                         .into_iter()
-                        .filter(|index| self.current_playlist().map(|playlist| *index < playlist.tracks.len()).unwrap_or(false))
+                        .filter(|index| {
+                            self.current_playlist()
+                                .map(|playlist| *index < playlist.tracks.len())
+                                .unwrap_or(false)
+                        })
                         .collect();
                     self.clear_multi_track_selection();
                     self.active_playlist_index = active_playlist_index;
@@ -143,10 +182,10 @@ impl AudioOrbitApp {
                 radio_selection_was_user_set,
             } => {
                 self.state.radio_stations = stations;
-                self.state.selected_radio_index = selected_radio_index
-                    .filter(|index| *index < self.state.radio_stations.len());
-                self.active_radio_index = active_radio_index
-                    .filter(|index| *index < self.state.radio_stations.len());
+                self.state.selected_radio_index =
+                    selected_radio_index.filter(|index| *index < self.state.radio_stations.len());
+                self.active_radio_index =
+                    active_radio_index.filter(|index| *index < self.state.radio_stations.len());
                 self.radio_selection_was_user_set = radio_selection_was_user_set;
                 self.status_message = "Undid radio order change.".to_owned();
             }
@@ -170,13 +209,15 @@ impl AudioOrbitApp {
         let Some(playlist) = self.current_playlist() else {
             return false;
         };
-        if index >= playlist.tracks.len() {
+        if index >= playlist.tracks.len() || playlist.kind == PlaylistKind::Temporary {
             return false;
         }
         let target = if delta < 0 {
             index.checked_sub(1)
         } else {
-            index.checked_add(1).filter(|target| *target < playlist.tracks.len())
+            index
+                .checked_add(1)
+                .filter(|target| *target < playlist.tracks.len())
         };
         let Some(target) = target else {
             return false;
@@ -187,28 +228,45 @@ impl AudioOrbitApp {
     pub(crate) fn restore_track_selection_after_reorder(&mut self, selected_path: Option<PathBuf>) {
         self.clear_multi_track_selection();
         if let Some(selected_path) = selected_path {
-            if let Some(index) = self
-                .current_playlist()
-                .and_then(|playlist| playlist.tracks.iter().position(|track| same_path(&track.path, &selected_path)))
-            {
+            if let Some(index) = self.current_playlist().and_then(|playlist| {
+                playlist
+                    .tracks
+                    .iter()
+                    .position(|track| same_path(&track.path, &selected_path))
+            }) {
                 self.selected_track_index = Some(index);
             }
         }
 
-        if let (Some(active_playlist_index), Some(active_path)) = (self.active_playlist_index, self.active_track_path.clone()) {
+        if let (Some(active_playlist_index), Some(active_path)) =
+            (self.active_playlist_index, self.active_track_path.clone())
+        {
             if active_playlist_index == self.state.selected_playlist_index {
-                self.active_track_index = self
-                    .current_playlist()
-                    .and_then(|playlist| playlist.tracks.iter().position(|track| same_path(&track.path, &active_path)));
+                self.active_track_index = self.current_playlist().and_then(|playlist| {
+                    playlist
+                        .tracks
+                        .iter()
+                        .position(|track| same_path(&track.path, &active_path))
+                });
             }
         }
 
         self.restore_repeat_selection_for_current_playlist();
     }
     pub(crate) fn sort_current_playlist_by_name(&mut self, ascending: bool) {
+        if self
+            .current_playlist()
+            .map(|playlist| playlist.kind == PlaylistKind::Temporary)
+            .unwrap_or(false)
+        {
+            return;
+        }
         self.persist_repeat_selection_for_current_playlist();
         let selected_path = self.selected_track_path();
-        let should_sort = self.current_playlist().map(|playlist| playlist.tracks.len() > 1).unwrap_or(false);
+        let should_sort = self
+            .current_playlist()
+            .map(|playlist| playlist.tracks.len() > 1)
+            .unwrap_or(false);
         if should_sort {
             self.push_playlist_order_undo();
         }
@@ -218,7 +276,11 @@ impl AudioOrbitApp {
                     .cmp(&naturalish_key(&right.group))
                     .then_with(|| naturalish_key(&left.title).cmp(&naturalish_key(&right.title)))
                     .then_with(|| left.path.cmp(&right.path));
-                if ascending { ordering } else { ordering.reverse() }
+                if ascending {
+                    ordering
+                } else {
+                    ordering.reverse()
+                }
             });
         }
         self.restore_track_selection_after_reorder(selected_path);
@@ -240,7 +302,10 @@ impl AudioOrbitApp {
 
         self.persist_repeat_selection_for_current_playlist();
         let selected_path = self.selected_track_path();
-        let should_sort = self.current_playlist().map(|playlist| playlist.tracks.len() > 1).unwrap_or(false);
+        let should_sort = self
+            .current_playlist()
+            .map(|playlist| playlist.tracks.len() > 1)
+            .unwrap_or(false);
         if should_sort {
             self.push_playlist_order_undo();
         }
@@ -258,7 +323,10 @@ impl AudioOrbitApp {
         }
         self.persist_repeat_selection_for_current_playlist();
         let selected_path = self.selected_track_path();
-        let Some(track_count) = self.current_playlist().map(|playlist| playlist.tracks.len()) else {
+        let Some(track_count) = self
+            .current_playlist()
+            .map(|playlist| playlist.tracks.len())
+        else {
             return;
         };
         let to = if delta < 0 {
@@ -287,7 +355,9 @@ impl AudioOrbitApp {
         };
         let track = playlist.tracks.remove(from);
         let insert_at = if from < to { to.saturating_sub(1) } else { to };
-        playlist.tracks.insert(insert_at.min(playlist.tracks.len()), track);
+        playlist
+            .tracks
+            .insert(insert_at.min(playlist.tracks.len()), track);
         self.restore_track_selection_after_reorder(selected_path);
         self.status_message = "Moved track in playlist order.".to_owned();
         self.save_state_silently();
@@ -301,7 +371,10 @@ impl AudioOrbitApp {
 
         let mut group_order: Vec<String> = Vec::new();
         for track in &playlist.tracks {
-            if group_order.last().map(|current| current != &track.group).unwrap_or(true)
+            if group_order
+                .last()
+                .map(|current| current != &track.group)
+                .unwrap_or(true)
                 && !group_order.iter().any(|current| current == &track.group)
             {
                 group_order.push(track.group.clone());
@@ -343,26 +416,41 @@ impl AudioOrbitApp {
         if self.state.radio_stations.len() > 1 {
             self.push_radio_order_undo();
         }
-        let active_url = self
-            .active_radio_index
-            .and_then(|index| self.state.radio_stations.get(index).map(|station| station.url.clone()));
-        let selected_url = self
-            .state
-            .selected_radio_index
-            .and_then(|index| self.state.radio_stations.get(index).map(|station| station.url.clone()));
+        let active_url = self.active_radio_index.and_then(|index| {
+            self.state
+                .radio_stations
+                .get(index)
+                .map(|station| station.url.clone())
+        });
+        let selected_url = self.state.selected_radio_index.and_then(|index| {
+            self.state
+                .radio_stations
+                .get(index)
+                .map(|station| station.url.clone())
+        });
 
         self.state.radio_stations.sort_by(|left, right| {
             let ordering = naturalish_key(&left.name)
                 .cmp(&naturalish_key(&right.name))
                 .then_with(|| left.url.cmp(&right.url));
-            if ascending { ordering } else { ordering.reverse() }
+            if ascending {
+                ordering
+            } else {
+                ordering.reverse()
+            }
         });
 
         self.active_radio_index = active_url.as_ref().and_then(|url| {
-            self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
+            self.state
+                .radio_stations
+                .iter()
+                .position(|station| same_text(&station.url, url))
         });
         self.state.selected_radio_index = selected_url.as_ref().and_then(|url| {
-            self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
+            self.state
+                .radio_stations
+                .iter()
+                .position(|station| same_text(&station.url, url))
         });
         self.radio_selection_was_user_set = self.state.selected_radio_index.is_some();
         self.status_message = if ascending {
@@ -376,13 +464,18 @@ impl AudioOrbitApp {
         if index >= self.state.radio_stations.len() {
             return;
         }
-        let active_url = self
-            .active_radio_index
-            .and_then(|active_index| self.state.radio_stations.get(active_index).map(|station| station.url.clone()));
-        let selected_url = self
-            .state
-            .selected_radio_index
-            .and_then(|selected_index| self.state.radio_stations.get(selected_index).map(|station| station.url.clone()));
+        let active_url = self.active_radio_index.and_then(|active_index| {
+            self.state
+                .radio_stations
+                .get(active_index)
+                .map(|station| station.url.clone())
+        });
+        let selected_url = self.state.selected_radio_index.and_then(|selected_index| {
+            self.state
+                .radio_stations
+                .get(selected_index)
+                .map(|station| station.url.clone())
+        });
         let to = if delta < 0 {
             index.saturating_sub(1)
         } else {
@@ -394,10 +487,16 @@ impl AudioOrbitApp {
         self.push_radio_order_undo();
         self.state.radio_stations.swap(index, to);
         self.active_radio_index = active_url.as_ref().and_then(|url| {
-            self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
+            self.state
+                .radio_stations
+                .iter()
+                .position(|station| same_text(&station.url, url))
         });
         self.state.selected_radio_index = selected_url.as_ref().and_then(|url| {
-            self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
+            self.state
+                .radio_stations
+                .iter()
+                .position(|station| same_text(&station.url, url))
         });
         self.radio_selection_was_user_set = self.state.selected_radio_index.is_some();
         self.status_message = "Moved radio station.".to_owned();
@@ -408,21 +507,34 @@ impl AudioOrbitApp {
             return;
         }
         self.push_radio_order_undo();
-        let active_url = self
-            .active_radio_index
-            .and_then(|active_index| self.state.radio_stations.get(active_index).map(|station| station.url.clone()));
-        let selected_url = self
-            .state
-            .selected_radio_index
-            .and_then(|selected_index| self.state.radio_stations.get(selected_index).map(|station| station.url.clone()));
+        let active_url = self.active_radio_index.and_then(|active_index| {
+            self.state
+                .radio_stations
+                .get(active_index)
+                .map(|station| station.url.clone())
+        });
+        let selected_url = self.state.selected_radio_index.and_then(|selected_index| {
+            self.state
+                .radio_stations
+                .get(selected_index)
+                .map(|station| station.url.clone())
+        });
         let station = self.state.radio_stations.remove(from);
         let insert_at = if from < to { to.saturating_sub(1) } else { to };
-        self.state.radio_stations.insert(insert_at.min(self.state.radio_stations.len()), station);
+        self.state
+            .radio_stations
+            .insert(insert_at.min(self.state.radio_stations.len()), station);
         self.active_radio_index = active_url.as_ref().and_then(|url| {
-            self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
+            self.state
+                .radio_stations
+                .iter()
+                .position(|station| same_text(&station.url, url))
         });
         self.state.selected_radio_index = selected_url.as_ref().and_then(|url| {
-            self.state.radio_stations.iter().position(|station| same_text(&station.url, url))
+            self.state
+                .radio_stations
+                .iter()
+                .position(|station| same_text(&station.url, url))
         });
         self.radio_selection_was_user_set = self.state.selected_radio_index.is_some();
         self.status_message = "Moved radio station.".to_owned();
@@ -449,6 +561,9 @@ fn valid_track_drop_target_for_playlist(playlist: &Playlist, from: usize, to: us
         return false;
     }
     if from >= playlist.tracks.len() || to > playlist.tracks.len() {
+        return false;
+    }
+    if playlist.kind == PlaylistKind::Temporary {
         return false;
     }
     if playlist.kind != PlaylistKind::Folder {
